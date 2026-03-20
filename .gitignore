@@ -36,4 +36,3 @@ npm-debug.log
 /assets/node_modules/
 
 .env
-build_from_scratch.sh
