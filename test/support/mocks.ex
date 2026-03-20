@@ -1,0 +1,6 @@
+Mox.defmock(Homelab.Mocks.Orchestrator, for: Homelab.Behaviours.Orchestrator)
+Mox.defmock(Homelab.Mocks.IdentityBroker, for: Homelab.Behaviours.IdentityBroker)
+Mox.defmock(Homelab.Mocks.Gateway, for: Homelab.Behaviours.Gateway)
+Mox.defmock(Homelab.Mocks.BackupProvider, for: Homelab.Behaviours.BackupProvider)
+Mox.defmock(Homelab.Mocks.DnsProvider, for: Homelab.Behaviours.DnsProvider)
+Mox.defmock(Homelab.Mocks.RegistrarProvider, for: Homelab.Behaviours.RegistrarProvider)

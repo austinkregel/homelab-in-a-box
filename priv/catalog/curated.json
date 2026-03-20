@@ -1,0 +1,1901 @@
+[
+  {
+    "name": "Nextcloud",
+    "image": "nextcloud:latest",
+    "description": "Self-hosted productivity platform with file sync, calendar, contacts, and more",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nextcloud.png",
+    "categories": ["cloud", "productivity", "file-storage"],
+    "project_url": "https://nextcloud.com",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/www/html", "description": "Application data"}],
+    "env": {"MYSQL_HOST": "", "MYSQL_DATABASE": "nextcloud", "MYSQL_USER": "nextcloud", "MYSQL_PASSWORD": ""},
+    "required_env": ["MYSQL_HOST", "MYSQL_PASSWORD"]
+  },
+  {
+    "name": "Gitea",
+    "image": "gitea/gitea:latest",
+    "description": "Lightweight self-hosted Git service",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitea.png",
+    "categories": ["dev-tools", "git"],
+    "project_url": "https://gitea.io",
+    "ports": [
+      {"internal": 3000, "external": 3000, "role": "web"},
+      {"internal": 22, "external": 2222, "role": "ssh"}
+    ],
+    "volumes": [{"path": "/data", "description": "Gitea data"}],
+    "env": {"GITEA__database__DB_TYPE": "sqlite3"},
+    "required_env": []
+  },
+  {
+    "name": "Forgejo",
+    "image": "codeberg.org/forgejo/forgejo:latest",
+    "description": "Community-driven Git hosting, soft fork of Gitea",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/forgejo.png",
+    "categories": ["dev-tools", "git"],
+    "project_url": "https://forgejo.org",
+    "ports": [
+      {"internal": 3000, "external": 3000, "role": "web"},
+      {"internal": 22, "external": 2222, "role": "ssh"}
+    ],
+    "volumes": [{"path": "/data", "description": "Forgejo data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Jellyfin",
+    "image": "jellyfin/jellyfin:latest",
+    "description": "Free software media system for streaming movies, TV, and music",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/jellyfin.png",
+    "categories": ["media", "streaming"],
+    "project_url": "https://jellyfin.org",
+    "ports": [{"internal": 8096, "external": 8096, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/media", "description": "Media library"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Plex",
+    "image": "plexinc/pms-docker:latest",
+    "description": "Media server for organizing and streaming your media collection",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/plex.png",
+    "categories": ["media", "streaming"],
+    "project_url": "https://plex.tv",
+    "ports": [{"internal": 32400, "external": 32400, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/media", "description": "Media library"}
+    ],
+    "env": {"PLEX_CLAIM": ""},
+    "required_env": []
+  },
+  {
+    "name": "Emby",
+    "image": "emby/embyserver:latest",
+    "description": "Personal media server for movies, TV shows, and music",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/emby.png",
+    "categories": ["media", "streaming"],
+    "project_url": "https://emby.media",
+    "ports": [{"internal": 8096, "external": 8096, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/media", "description": "Media library"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Navidrome",
+    "image": "deluan/navidrome:latest",
+    "description": "Modern music server and streamer compatible with Subsonic/Airsonic",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/navidrome.png",
+    "categories": ["media", "music"],
+    "project_url": "https://navidrome.org",
+    "ports": [{"internal": 4533, "external": 4533, "role": "web"}],
+    "volumes": [
+      {"path": "/data", "description": "Application data"},
+      {"path": "/music", "description": "Music library"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Sonarr",
+    "image": "lscr.io/linuxserver/sonarr:latest",
+    "description": "PVR for Usenet and BitTorrent TV show management",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/sonarr.png",
+    "categories": ["media", "download"],
+    "project_url": "https://sonarr.tv",
+    "ports": [{"internal": 8989, "external": 8989, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/tv", "description": "TV shows"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Radarr",
+    "image": "lscr.io/linuxserver/radarr:latest",
+    "description": "Movie collection manager for Usenet and BitTorrent",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/radarr.png",
+    "categories": ["media", "download"],
+    "project_url": "https://radarr.video",
+    "ports": [{"internal": 7878, "external": 7878, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/movies", "description": "Movies"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Lidarr",
+    "image": "lscr.io/linuxserver/lidarr:latest",
+    "description": "Music collection manager for Usenet and BitTorrent",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/lidarr.png",
+    "categories": ["media", "download", "music"],
+    "project_url": "https://lidarr.audio",
+    "ports": [{"internal": 8686, "external": 8686, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/music", "description": "Music"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Prowlarr",
+    "image": "lscr.io/linuxserver/prowlarr:latest",
+    "description": "Indexer manager for Sonarr, Radarr, and Lidarr",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prowlarr.png",
+    "categories": ["media", "download"],
+    "project_url": "https://prowlarr.com",
+    "ports": [{"internal": 9696, "external": 9696, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Bazarr",
+    "image": "lscr.io/linuxserver/bazarr:latest",
+    "description": "Companion application to Sonarr and Radarr for managing subtitles",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/bazarr.png",
+    "categories": ["media", "download"],
+    "project_url": "https://bazarr.media",
+    "ports": [{"internal": 6767, "external": 6767, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/movies", "description": "Movies"},
+      {"path": "/tv", "description": "TV shows"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Readarr",
+    "image": "lscr.io/linuxserver/readarr:develop",
+    "description": "Book and audiobook collection manager",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/readarr.png",
+    "categories": ["media", "download"],
+    "project_url": "https://readarr.com",
+    "ports": [{"internal": 8787, "external": 8787, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/books", "description": "Books"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Overseerr",
+    "image": "lscr.io/linuxserver/overseerr:latest",
+    "description": "Request management and media discovery tool for Plex",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/overseerr.png",
+    "categories": ["media"],
+    "project_url": "https://overseerr.dev",
+    "ports": [{"internal": 5055, "external": 5055, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Tautulli",
+    "image": "lscr.io/linuxserver/tautulli:latest",
+    "description": "Monitoring and tracking tool for Plex Media Server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tautulli.png",
+    "categories": ["media", "monitoring"],
+    "project_url": "https://tautulli.com",
+    "ports": [{"internal": 8181, "external": 8181, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "qBittorrent",
+    "image": "lscr.io/linuxserver/qbittorrent:latest",
+    "description": "BitTorrent client with web UI",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/qbittorrent.png",
+    "categories": ["download"],
+    "project_url": "https://qbittorrent.org",
+    "ports": [
+      {"internal": 8080, "external": 8080, "role": "web"},
+      {"internal": 6881, "external": 6881, "role": "torrent"}
+    ],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "WEBUI_PORT": "8080"},
+    "required_env": []
+  },
+  {
+    "name": "Transmission",
+    "image": "lscr.io/linuxserver/transmission:latest",
+    "description": "Lightweight BitTorrent client with web interface",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/transmission.png",
+    "categories": ["download"],
+    "project_url": "https://transmissionbt.com",
+    "ports": [
+      {"internal": 9091, "external": 9091, "role": "web"},
+      {"internal": 51413, "external": 51413, "role": "torrent"}
+    ],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "SABnzbd",
+    "image": "lscr.io/linuxserver/sabnzbd:latest",
+    "description": "Usenet binary newsreader",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/sabnzbd.png",
+    "categories": ["download"],
+    "project_url": "https://sabnzbd.org",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "NZBGet",
+    "image": "lscr.io/linuxserver/nzbget:latest",
+    "description": "Efficient Usenet downloader",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nzbget.png",
+    "categories": ["download"],
+    "project_url": "https://nzbget.net",
+    "ports": [{"internal": 6789, "external": 6789, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/downloads", "description": "Downloads"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Vaultwarden",
+    "image": "vaultwarden/server:latest",
+    "description": "Lightweight Bitwarden-compatible password manager server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/vaultwarden.png",
+    "categories": ["security", "password-manager"],
+    "project_url": "https://github.com/dani-garcia/vaultwarden",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Persistent data"}],
+    "env": {"SIGNUPS_ALLOWED": "true"},
+    "required_env": []
+  },
+  {
+    "name": "Pi-hole",
+    "image": "pihole/pihole:latest",
+    "description": "Network-wide ad blocker and DNS sinkhole",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/pi-hole.png",
+    "categories": ["dns", "networking", "ad-blocking"],
+    "project_url": "https://pi-hole.net",
+    "ports": [
+      {"internal": 80, "external": 8080, "role": "web"},
+      {"internal": 53, "external": 53, "role": "dns"}
+    ],
+    "volumes": [
+      {"path": "/etc/pihole", "description": "Pi-hole configuration"},
+      {"path": "/etc/dnsmasq.d", "description": "DNS configuration"}
+    ],
+    "env": {"WEBPASSWORD": "", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "AdGuard Home",
+    "image": "adguard/adguardhome:latest",
+    "description": "Network-wide ad and tracker blocking DNS server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/adguard-home.png",
+    "categories": ["dns", "networking", "ad-blocking"],
+    "project_url": "https://adguard.com/adguard-home.html",
+    "ports": [
+      {"internal": 3000, "external": 3000, "role": "web"},
+      {"internal": 53, "external": 53, "role": "dns"}
+    ],
+    "volumes": [
+      {"path": "/opt/adguardhome/work", "description": "Working data"},
+      {"path": "/opt/adguardhome/conf", "description": "Configuration"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Uptime Kuma",
+    "image": "louislam/uptime-kuma:latest",
+    "description": "Self-hosted monitoring tool with beautiful status pages",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/uptime-kuma.png",
+    "categories": ["monitoring"],
+    "project_url": "https://uptime.kuma.pet",
+    "ports": [{"internal": 3001, "external": 3001, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Grafana",
+    "image": "grafana/grafana:latest",
+    "description": "Open observability platform for metrics, logs, and traces",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png",
+    "categories": ["monitoring", "analytics"],
+    "project_url": "https://grafana.com",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/var/lib/grafana", "description": "Grafana data"}],
+    "env": {"GF_SECURITY_ADMIN_PASSWORD": "admin"},
+    "required_env": []
+  },
+  {
+    "name": "Prometheus",
+    "image": "prom/prometheus:latest",
+    "description": "Monitoring system and time series database",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png",
+    "categories": ["monitoring"],
+    "project_url": "https://prometheus.io",
+    "ports": [{"internal": 9090, "external": 9090, "role": "web"}],
+    "volumes": [
+      {"path": "/prometheus", "description": "Data storage"},
+      {"path": "/etc/prometheus", "description": "Configuration"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Loki",
+    "image": "grafana/loki:latest",
+    "description": "Log aggregation system by Grafana Labs",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/loki.png",
+    "categories": ["monitoring", "logging"],
+    "project_url": "https://grafana.com/oss/loki/",
+    "ports": [{"internal": 3100, "external": 3100, "role": "api"}],
+    "volumes": [{"path": "/loki", "description": "Data storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "InfluxDB",
+    "image": "influxdb:latest",
+    "description": "Time series database for metrics and events",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/influxdb.png",
+    "categories": ["database", "monitoring"],
+    "project_url": "https://influxdata.com",
+    "ports": [{"internal": 8086, "external": 8086, "role": "api"}],
+    "volumes": [{"path": "/var/lib/influxdb2", "description": "Data storage"}],
+    "env": {"DOCKER_INFLUXDB_INIT_MODE": "setup", "DOCKER_INFLUXDB_INIT_USERNAME": "admin", "DOCKER_INFLUXDB_INIT_PASSWORD": "", "DOCKER_INFLUXDB_INIT_ORG": "homelab", "DOCKER_INFLUXDB_INIT_BUCKET": "default"},
+    "required_env": ["DOCKER_INFLUXDB_INIT_PASSWORD"]
+  },
+  {
+    "name": "Portainer",
+    "image": "portainer/portainer-ce:latest",
+    "description": "Container management UI for Docker and Kubernetes",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/portainer.png",
+    "categories": ["dev-tools", "docker"],
+    "project_url": "https://portainer.io",
+    "ports": [{"internal": 9000, "external": 9000, "role": "web"}],
+    "volumes": [
+      {"path": "/data", "description": "Portainer data"},
+      {"path": "/var/run/docker.sock", "description": "Docker socket"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Nginx",
+    "image": "nginx:alpine",
+    "description": "High-performance HTTP server and reverse proxy",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nginx.png",
+    "categories": ["web-server", "reverse-proxy"],
+    "project_url": "https://nginx.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/etc/nginx/conf.d", "description": "Configuration"},
+      {"path": "/usr/share/nginx/html", "description": "Web root"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Nginx Proxy Manager",
+    "image": "jc21/nginx-proxy-manager:latest",
+    "description": "Easy-to-use reverse proxy with SSL management UI",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nginx-proxy-manager.png",
+    "categories": ["reverse-proxy", "networking"],
+    "project_url": "https://nginxproxymanager.com",
+    "ports": [
+      {"internal": 80, "external": 80, "role": "http"},
+      {"internal": 443, "external": 443, "role": "https"},
+      {"internal": 81, "external": 81, "role": "web"}
+    ],
+    "volumes": [
+      {"path": "/data", "description": "Application data"},
+      {"path": "/etc/letsencrypt", "description": "SSL certificates"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Caddy",
+    "image": "caddy:latest",
+    "description": "Automatic HTTPS web server and reverse proxy",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/caddy.png",
+    "categories": ["web-server", "reverse-proxy"],
+    "project_url": "https://caddyserver.com",
+    "ports": [
+      {"internal": 80, "external": 80, "role": "http"},
+      {"internal": 443, "external": 443, "role": "https"}
+    ],
+    "volumes": [
+      {"path": "/data", "description": "Caddy data"},
+      {"path": "/config", "description": "Caddy config"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Traefik",
+    "image": "traefik:latest",
+    "description": "Cloud-native reverse proxy and load balancer",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/traefik.png",
+    "categories": ["reverse-proxy", "networking"],
+    "project_url": "https://traefik.io",
+    "ports": [
+      {"internal": 80, "external": 80, "role": "http"},
+      {"internal": 443, "external": 443, "role": "https"},
+      {"internal": 8080, "external": 8080, "role": "web"}
+    ],
+    "volumes": [{"path": "/var/run/docker.sock", "description": "Docker socket"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Home Assistant",
+    "image": "ghcr.io/home-assistant/home-assistant:stable",
+    "description": "Open source home automation platform",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/home-assistant.png",
+    "categories": ["home-automation"],
+    "project_url": "https://home-assistant.io",
+    "ports": [{"internal": 8123, "external": 8123, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Node-RED",
+    "image": "nodered/node-red:latest",
+    "description": "Flow-based programming tool for wiring IoT and APIs",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/node-red.png",
+    "categories": ["home-automation", "dev-tools"],
+    "project_url": "https://nodered.org",
+    "ports": [{"internal": 1880, "external": 1880, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Node-RED data"}],
+    "env": {"TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Mosquitto",
+    "image": "eclipse-mosquitto:latest",
+    "description": "Lightweight MQTT message broker for IoT",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mosquitto.png",
+    "categories": ["home-automation", "messaging"],
+    "project_url": "https://mosquitto.org",
+    "ports": [
+      {"internal": 1883, "external": 1883, "role": "mqtt"},
+      {"internal": 9001, "external": 9001, "role": "websocket"}
+    ],
+    "volumes": [
+      {"path": "/mosquitto/config", "description": "Configuration"},
+      {"path": "/mosquitto/data", "description": "Data"},
+      {"path": "/mosquitto/log", "description": "Logs"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Immich",
+    "image": "ghcr.io/immich-app/immich-server:release",
+    "description": "Self-hosted photo and video backup solution",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/immich.png",
+    "categories": ["photo", "backup"],
+    "project_url": "https://immich.app",
+    "ports": [{"internal": 2283, "external": 2283, "role": "web"}],
+    "volumes": [{"path": "/usr/src/app/upload", "description": "Upload storage"}],
+    "env": {"DB_HOSTNAME": "", "DB_USERNAME": "postgres", "DB_PASSWORD": "", "DB_DATABASE_NAME": "immich", "REDIS_HOSTNAME": ""},
+    "required_env": ["DB_HOSTNAME", "DB_PASSWORD", "REDIS_HOSTNAME"]
+  },
+  {
+    "name": "PhotoPrism",
+    "image": "photoprism/photoprism:latest",
+    "description": "AI-powered photo management application",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/photoprism.png",
+    "categories": ["photo"],
+    "project_url": "https://photoprism.app",
+    "ports": [{"internal": 2342, "external": 2342, "role": "web"}],
+    "volumes": [
+      {"path": "/photoprism/storage", "description": "Application storage"},
+      {"path": "/photoprism/originals", "description": "Photo originals"}
+    ],
+    "env": {"PHOTOPRISM_ADMIN_PASSWORD": "changeme", "PHOTOPRISM_SITE_URL": "http://localhost:2342/"},
+    "required_env": ["PHOTOPRISM_ADMIN_PASSWORD"]
+  },
+  {
+    "name": "Paperless-ngx",
+    "image": "ghcr.io/paperless-ngx/paperless-ngx:latest",
+    "description": "Document management system that transforms physical documents into searchable archive",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/paperless-ngx.png",
+    "categories": ["productivity", "documents"],
+    "project_url": "https://docs.paperless-ngx.com",
+    "ports": [{"internal": 8000, "external": 8000, "role": "web"}],
+    "volumes": [
+      {"path": "/usr/src/paperless/data", "description": "Application data"},
+      {"path": "/usr/src/paperless/media", "description": "Document storage"},
+      {"path": "/usr/src/paperless/consume", "description": "Consume directory"}
+    ],
+    "env": {"PAPERLESS_SECRET_KEY": "", "PAPERLESS_URL": "http://localhost:8000"},
+    "required_env": ["PAPERLESS_SECRET_KEY"]
+  },
+  {
+    "name": "Bookstack",
+    "image": "lscr.io/linuxserver/bookstack:latest",
+    "description": "Platform for organizing and storing information in a wiki-like format",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/bookstack.png",
+    "categories": ["wiki", "docs"],
+    "project_url": "https://bookstackapp.com",
+    "ports": [{"internal": 6875, "external": 6875, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "APP_URL": "", "DB_HOST": "", "DB_DATABASE": "bookstack", "DB_USERNAME": "bookstack", "DB_PASSWORD": ""},
+    "required_env": ["APP_URL", "DB_HOST", "DB_PASSWORD"]
+  },
+  {
+    "name": "Wiki.js",
+    "image": "ghcr.io/requarks/wiki:2",
+    "description": "Modern and powerful wiki engine with beautiful interface",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wikijs.png",
+    "categories": ["wiki", "docs"],
+    "project_url": "https://js.wiki",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [],
+    "env": {"DB_TYPE": "sqlite", "DB_FILEPATH": "/data/wiki.db"},
+    "required_env": []
+  },
+  {
+    "name": "Outline",
+    "image": "outlinewiki/outline:latest",
+    "description": "Team knowledge base and wiki with a beautiful editor",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/outline.png",
+    "categories": ["wiki", "docs", "productivity"],
+    "project_url": "https://getoutline.com",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/var/lib/outline/data", "description": "Application data"}],
+    "env": {"SECRET_KEY": "", "UTILS_SECRET": "", "DATABASE_URL": "", "REDIS_URL": ""},
+    "required_env": ["SECRET_KEY", "UTILS_SECRET", "DATABASE_URL", "REDIS_URL"]
+  },
+  {
+    "name": "Mealie",
+    "image": "ghcr.io/mealie-recipes/mealie:latest",
+    "description": "Self-hosted recipe manager and meal planner",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mealie.png",
+    "categories": ["productivity", "recipes"],
+    "project_url": "https://mealie.io",
+    "ports": [{"internal": 9000, "external": 9000, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Application data"}],
+    "env": {"ALLOW_SIGNUP": "true", "BASE_URL": "http://localhost:9000"},
+    "required_env": []
+  },
+  {
+    "name": "Tandoor Recipes",
+    "image": "ghcr.io/tandoorrecipes/recipes:latest",
+    "description": "Recipe management app for organizing cooking recipes",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tandoor.png",
+    "categories": ["productivity", "recipes"],
+    "project_url": "https://tandoor.dev",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/opt/recipes/mediafiles", "description": "Media files"},
+      {"path": "/opt/recipes/staticfiles", "description": "Static files"}
+    ],
+    "env": {"SECRET_KEY": "", "DB_ENGINE": "django.db.backends.sqlite3"},
+    "required_env": ["SECRET_KEY"]
+  },
+  {
+    "name": "FreshRSS",
+    "image": "freshrss/freshrss:latest",
+    "description": "Self-hosted RSS feed aggregator",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/freshrss.png",
+    "categories": ["rss"],
+    "project_url": "https://freshrss.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/var/www/FreshRSS/data", "description": "Application data"},
+      {"path": "/var/www/FreshRSS/extensions", "description": "Extensions"}
+    ],
+    "env": {"TZ": "Etc/UTC", "CRON_MIN": "1,31"},
+    "required_env": []
+  },
+  {
+    "name": "Miniflux",
+    "image": "miniflux/miniflux:latest",
+    "description": "Minimalist and opinionated feed reader",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/miniflux.png",
+    "categories": ["rss"],
+    "project_url": "https://miniflux.app",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {"DATABASE_URL": "", "RUN_MIGRATIONS": "1", "CREATE_ADMIN": "1", "ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": "changeme"},
+    "required_env": ["DATABASE_URL"]
+  },
+  {
+    "name": "Linkding",
+    "image": "sissbruecker/linkding:latest",
+    "description": "Self-hosted bookmark manager",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/linkding.png",
+    "categories": ["bookmarks"],
+    "project_url": "https://github.com/sissbruecker/linkding",
+    "ports": [{"internal": 9090, "external": 9090, "role": "web"}],
+    "volumes": [{"path": "/etc/linkding/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Wallabag",
+    "image": "wallabag/wallabag:latest",
+    "description": "Read-it-later app for saving and organizing web articles",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wallabag.png",
+    "categories": ["bookmarks"],
+    "project_url": "https://wallabag.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/www/wallabag/data", "description": "Application data"}],
+    "env": {"SYMFONY__ENV__DOMAIN_NAME": "http://localhost:8080"},
+    "required_env": []
+  },
+  {
+    "name": "Homepage",
+    "image": "ghcr.io/gethomepage/homepage:latest",
+    "description": "Highly customizable application dashboard",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/homepage.png",
+    "categories": ["dashboard"],
+    "project_url": "https://gethomepage.dev",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/app/config", "description": "Configuration"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Homarr",
+    "image": "ghcr.io/ajnart/homarr:latest",
+    "description": "Sleek, modern dashboard for managing your server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/homarr.png",
+    "categories": ["dashboard"],
+    "project_url": "https://homarr.dev",
+    "ports": [{"internal": 7575, "external": 7575, "role": "web"}],
+    "volumes": [
+      {"path": "/app/data/configs", "description": "Configuration"},
+      {"path": "/var/run/docker.sock", "description": "Docker socket"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Dashy",
+    "image": "lissy93/dashy:latest",
+    "description": "Feature-rich homepage for your homelab with web-based config",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/dashy.png",
+    "categories": ["dashboard"],
+    "project_url": "https://dashy.to",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/app/user-data", "description": "Configuration"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "WireGuard",
+    "image": "lscr.io/linuxserver/wireguard:latest",
+    "description": "Fast, modern VPN tunnel",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wireguard.png",
+    "categories": ["vpn", "networking"],
+    "project_url": "https://wireguard.com",
+    "ports": [{"internal": 51820, "external": 51820, "role": "vpn"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "SERVERURL": "", "PEERS": "1"},
+    "required_env": ["SERVERURL"]
+  },
+  {
+    "name": "Tailscale",
+    "image": "tailscale/tailscale:latest",
+    "description": "Zero-config mesh VPN built on WireGuard",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/tailscale.png",
+    "categories": ["vpn", "networking"],
+    "project_url": "https://tailscale.com",
+    "ports": [],
+    "volumes": [{"path": "/var/lib/tailscale", "description": "State data"}],
+    "env": {"TS_AUTHKEY": "", "TS_STATE_DIR": "/var/lib/tailscale"},
+    "required_env": ["TS_AUTHKEY"]
+  },
+  {
+    "name": "WG-Easy",
+    "image": "ghcr.io/wg-easy/wg-easy:latest",
+    "description": "Easy-to-use WireGuard VPN server with web UI",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wg-easy.png",
+    "categories": ["vpn", "networking"],
+    "project_url": "https://github.com/wg-easy/wg-easy",
+    "ports": [
+      {"internal": 51820, "external": 51820, "role": "vpn"},
+      {"internal": 51821, "external": 51821, "role": "web"}
+    ],
+    "volumes": [{"path": "/etc/wireguard", "description": "WireGuard config"}],
+    "env": {"WG_HOST": "", "PASSWORD_HASH": ""},
+    "required_env": ["WG_HOST"]
+  },
+  {
+    "name": "PostgreSQL",
+    "image": "postgres:17-alpine",
+    "description": "Advanced open-source relational database",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/postgres.png",
+    "categories": ["database"],
+    "project_url": "https://postgresql.org",
+    "ports": [{"internal": 5432, "external": 5432, "role": "database"}],
+    "volumes": [{"path": "/var/lib/postgresql/data", "description": "Database data"}],
+    "env": {"POSTGRES_USER": "postgres", "POSTGRES_PASSWORD": "", "POSTGRES_DB": "postgres"},
+    "required_env": ["POSTGRES_PASSWORD"]
+  },
+  {
+    "name": "MariaDB",
+    "image": "mariadb:latest",
+    "description": "Community-developed fork of MySQL relational database",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mariadb.png",
+    "categories": ["database"],
+    "project_url": "https://mariadb.org",
+    "ports": [{"internal": 3306, "external": 3306, "role": "database"}],
+    "volumes": [{"path": "/var/lib/mysql", "description": "Database data"}],
+    "env": {"MYSQL_ROOT_PASSWORD": "", "MYSQL_DATABASE": "", "MYSQL_USER": "", "MYSQL_PASSWORD": ""},
+    "required_env": ["MYSQL_ROOT_PASSWORD"]
+  },
+  {
+    "name": "MySQL",
+    "image": "mysql:8",
+    "description": "Popular open-source relational database",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mysql.png",
+    "categories": ["database"],
+    "project_url": "https://mysql.com",
+    "ports": [{"internal": 3306, "external": 3306, "role": "database"}],
+    "volumes": [{"path": "/var/lib/mysql", "description": "Database data"}],
+    "env": {"MYSQL_ROOT_PASSWORD": "", "MYSQL_DATABASE": "", "MYSQL_USER": "", "MYSQL_PASSWORD": ""},
+    "required_env": ["MYSQL_ROOT_PASSWORD"]
+  },
+  {
+    "name": "MongoDB",
+    "image": "mongo:latest",
+    "description": "Document-oriented NoSQL database",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png",
+    "categories": ["database"],
+    "project_url": "https://mongodb.com",
+    "ports": [{"internal": 27017, "external": 27017, "role": "database"}],
+    "volumes": [{"path": "/data/db", "description": "Database data"}],
+    "env": {"MONGO_INITDB_ROOT_USERNAME": "root", "MONGO_INITDB_ROOT_PASSWORD": ""},
+    "required_env": ["MONGO_INITDB_ROOT_PASSWORD"]
+  },
+  {
+    "name": "Redis",
+    "image": "redis:alpine",
+    "description": "In-memory data structure store used as database and cache",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/redis.png",
+    "categories": ["database", "cache"],
+    "project_url": "https://redis.io",
+    "ports": [{"internal": 6379, "external": 6379, "role": "database"}],
+    "volumes": [{"path": "/data", "description": "Data storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Valkey",
+    "image": "valkey/valkey:latest",
+    "description": "Open-source high-performance key/value store (Redis fork)",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/valkey.png",
+    "categories": ["database", "cache"],
+    "project_url": "https://valkey.io",
+    "ports": [{"internal": 6379, "external": 6379, "role": "database"}],
+    "volumes": [{"path": "/data", "description": "Data storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Minio",
+    "image": "minio/minio:latest",
+    "description": "S3-compatible object storage server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/minio.png",
+    "categories": ["storage", "s3"],
+    "project_url": "https://min.io",
+    "ports": [
+      {"internal": 9000, "external": 9000, "role": "api"},
+      {"internal": 9001, "external": 9001, "role": "web"}
+    ],
+    "volumes": [{"path": "/data", "description": "Object storage"}],
+    "env": {"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+    "required_env": []
+  },
+  {
+    "name": "Duplicati",
+    "image": "lscr.io/linuxserver/duplicati:latest",
+    "description": "Backup client with web UI supporting encrypted cloud backups",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/duplicati.png",
+    "categories": ["backup"],
+    "project_url": "https://duplicati.com",
+    "ports": [{"internal": 8200, "external": 8200, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/backups", "description": "Backup destination"},
+      {"path": "/source", "description": "Source data"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Restic Rest Server",
+    "image": "restic/rest-server:latest",
+    "description": "REST backend for the Restic backup tool",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/restic.png",
+    "categories": ["backup"],
+    "project_url": "https://restic.net",
+    "ports": [{"internal": 8000, "external": 8000, "role": "api"}],
+    "volumes": [{"path": "/data", "description": "Backup storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Drone CI",
+    "image": "drone/drone:latest",
+    "description": "Container-native continuous delivery platform",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/drone.png",
+    "categories": ["ci-cd", "dev-tools"],
+    "project_url": "https://drone.io",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Drone data"}],
+    "env": {"DRONE_GITEA_SERVER": "", "DRONE_GITEA_CLIENT_ID": "", "DRONE_GITEA_CLIENT_SECRET": "", "DRONE_RPC_SECRET": "", "DRONE_SERVER_HOST": "", "DRONE_SERVER_PROTO": "http"},
+    "required_env": ["DRONE_RPC_SECRET", "DRONE_SERVER_HOST"]
+  },
+  {
+    "name": "Woodpecker CI",
+    "image": "woodpeckerci/woodpecker-server:latest",
+    "description": "Simple yet powerful CI/CD engine with great extensibility",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/woodpecker.png",
+    "categories": ["ci-cd", "dev-tools"],
+    "project_url": "https://woodpecker-ci.org",
+    "ports": [{"internal": 8000, "external": 8000, "role": "web"}],
+    "volumes": [{"path": "/var/lib/woodpecker", "description": "Data"}],
+    "env": {"WOODPECKER_HOST": "", "WOODPECKER_AGENT_SECRET": ""},
+    "required_env": ["WOODPECKER_HOST", "WOODPECKER_AGENT_SECRET"]
+  },
+  {
+    "name": "Gitea Actions Runner",
+    "image": "gitea/act_runner:latest",
+    "description": "CI/CD runner compatible with Gitea Actions",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitea.png",
+    "categories": ["ci-cd", "dev-tools"],
+    "project_url": "https://docs.gitea.com/usage/actions/act-runner",
+    "ports": [],
+    "volumes": [
+      {"path": "/data", "description": "Runner data"},
+      {"path": "/var/run/docker.sock", "description": "Docker socket"}
+    ],
+    "env": {"GITEA_INSTANCE_URL": "", "GITEA_RUNNER_REGISTRATION_TOKEN": ""},
+    "required_env": ["GITEA_INSTANCE_URL", "GITEA_RUNNER_REGISTRATION_TOKEN"]
+  },
+  {
+    "name": "Docker Registry",
+    "image": "registry:2",
+    "description": "Self-hosted Docker image registry",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/docker.png",
+    "categories": ["dev-tools", "docker"],
+    "project_url": "https://docs.docker.com/registry/",
+    "ports": [{"internal": 5000, "external": 5000, "role": "api"}],
+    "volumes": [{"path": "/var/lib/registry", "description": "Image storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "SonarQube",
+    "image": "sonarqube:community",
+    "description": "Continuous code quality and security inspection",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/sonarqube.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://sonarqube.org",
+    "ports": [{"internal": 9000, "external": 9000, "role": "web"}],
+    "volumes": [
+      {"path": "/opt/sonarqube/data", "description": "Data"},
+      {"path": "/opt/sonarqube/extensions", "description": "Plugins"},
+      {"path": "/opt/sonarqube/logs", "description": "Logs"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Plausible Analytics",
+    "image": "ghcr.io/plausible/community-edition:latest",
+    "description": "Lightweight, privacy-friendly web analytics",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/plausible.png",
+    "categories": ["analytics"],
+    "project_url": "https://plausible.io",
+    "ports": [{"internal": 8000, "external": 8000, "role": "web"}],
+    "volumes": [{"path": "/var/lib/plausible", "description": "Application data"}],
+    "env": {"BASE_URL": "http://localhost:8000", "SECRET_KEY_BASE": "", "DATABASE_URL": "", "CLICKHOUSE_DATABASE_URL": ""},
+    "required_env": ["SECRET_KEY_BASE", "DATABASE_URL"]
+  },
+  {
+    "name": "Umami",
+    "image": "ghcr.io/umami-software/umami:postgresql-latest",
+    "description": "Simple, fast, privacy-focused website analytics",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/umami.png",
+    "categories": ["analytics"],
+    "project_url": "https://umami.is",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [],
+    "env": {"DATABASE_URL": ""},
+    "required_env": ["DATABASE_URL"]
+  },
+  {
+    "name": "Matomo",
+    "image": "matomo:latest",
+    "description": "Privacy-respecting Google Analytics alternative",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/matomo.png",
+    "categories": ["analytics"],
+    "project_url": "https://matomo.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/www/html", "description": "Application data"}],
+    "env": {"MATOMO_DATABASE_HOST": "", "MATOMO_DATABASE_USERNAME": "matomo", "MATOMO_DATABASE_PASSWORD": "", "MATOMO_DATABASE_DBNAME": "matomo"},
+    "required_env": ["MATOMO_DATABASE_HOST", "MATOMO_DATABASE_PASSWORD"]
+  },
+  {
+    "name": "Mattermost",
+    "image": "mattermost/mattermost-team-edition:latest",
+    "description": "Open-source Slack alternative for team communication",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mattermost.png",
+    "categories": ["communication", "chat"],
+    "project_url": "https://mattermost.com",
+    "ports": [{"internal": 8065, "external": 8065, "role": "web"}],
+    "volumes": [
+      {"path": "/mattermost/config", "description": "Configuration"},
+      {"path": "/mattermost/data", "description": "Data"},
+      {"path": "/mattermost/logs", "description": "Logs"}
+    ],
+    "env": {"MM_SQLSETTINGS_DRIVERNAME": "postgres", "MM_SQLSETTINGS_DATASOURCE": ""},
+    "required_env": ["MM_SQLSETTINGS_DATASOURCE"]
+  },
+  {
+    "name": "Rocket.Chat",
+    "image": "rocket.chat:latest",
+    "description": "Open-source team communication platform",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rocket-chat.png",
+    "categories": ["communication", "chat"],
+    "project_url": "https://rocket.chat",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/app/uploads", "description": "Uploads"}],
+    "env": {"MONGO_URL": "", "ROOT_URL": "http://localhost:3000"},
+    "required_env": ["MONGO_URL"]
+  },
+  {
+    "name": "Matrix Synapse",
+    "image": "matrixdotorg/synapse:latest",
+    "description": "Reference homeserver implementation for the Matrix protocol",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/matrix.png",
+    "categories": ["communication", "chat"],
+    "project_url": "https://matrix.org",
+    "ports": [{"internal": 8008, "external": 8008, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Synapse data"}],
+    "env": {"SYNAPSE_SERVER_NAME": "", "SYNAPSE_REPORT_STATS": "no"},
+    "required_env": ["SYNAPSE_SERVER_NAME"]
+  },
+  {
+    "name": "Gotify",
+    "image": "gotify/server:latest",
+    "description": "Simple server for sending and receiving push notifications",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gotify.png",
+    "categories": ["communication", "notifications"],
+    "project_url": "https://gotify.net",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Ntfy",
+    "image": "binwiederhier/ntfy:latest",
+    "description": "Simple HTTP-based pub-sub notification service",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ntfy.png",
+    "categories": ["communication", "notifications"],
+    "project_url": "https://ntfy.sh",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/cache/ntfy", "description": "Cache data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Mailcow",
+    "image": "mailcow/dovecot:latest",
+    "description": "Full-featured mail server suite with web administration",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mailcow.png",
+    "categories": ["email"],
+    "project_url": "https://mailcow.email",
+    "ports": [
+      {"internal": 25, "external": 25, "role": "smtp"},
+      {"internal": 143, "external": 143, "role": "imap"},
+      {"internal": 443, "external": 443, "role": "web"}
+    ],
+    "volumes": [{"path": "/var/vmail", "description": "Mail storage"}],
+    "env": {"MAILCOW_HOSTNAME": ""},
+    "required_env": ["MAILCOW_HOSTNAME"]
+  },
+  {
+    "name": "Mailu",
+    "image": "mailu/admin:latest",
+    "description": "Simple yet full-featured mail server as Docker containers",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mailu.png",
+    "categories": ["email"],
+    "project_url": "https://mailu.io",
+    "ports": [
+      {"internal": 25, "external": 25, "role": "smtp"},
+      {"internal": 143, "external": 143, "role": "imap"},
+      {"internal": 80, "external": 8080, "role": "web"}
+    ],
+    "volumes": [{"path": "/mailu", "description": "Mail data"}],
+    "env": {"DOMAIN": "", "SECRET_KEY": ""},
+    "required_env": ["DOMAIN", "SECRET_KEY"]
+  },
+  {
+    "name": "Ghostfolio",
+    "image": "ghostfolio/ghostfolio:latest",
+    "description": "Open-source wealth management and portfolio tracker",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ghostfolio.png",
+    "categories": ["finance"],
+    "project_url": "https://ghostfol.io",
+    "ports": [{"internal": 3333, "external": 3333, "role": "web"}],
+    "volumes": [],
+    "env": {"DATABASE_URL": "", "REDIS_HOST": "", "ACCESS_TOKEN_SALT": "", "JWT_SECRET_KEY": ""},
+    "required_env": ["DATABASE_URL", "REDIS_HOST", "ACCESS_TOKEN_SALT", "JWT_SECRET_KEY"]
+  },
+  {
+    "name": "Actual Budget",
+    "image": "actualbudget/actual-server:latest",
+    "description": "Local-first personal finance tool with sync",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/actual.png",
+    "categories": ["finance"],
+    "project_url": "https://actualbudget.org",
+    "ports": [{"internal": 5006, "external": 5006, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Firefly III",
+    "image": "fireflyiii/core:latest",
+    "description": "Personal finance manager to track expenses and budgets",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/firefly.png",
+    "categories": ["finance"],
+    "project_url": "https://firefly-iii.org",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/www/html/storage/upload", "description": "Uploads"}],
+    "env": {"APP_KEY": "", "DB_CONNECTION": "pgsql", "DB_HOST": "", "DB_PORT": "5432", "DB_DATABASE": "firefly", "DB_USERNAME": "firefly", "DB_PASSWORD": ""},
+    "required_env": ["APP_KEY", "DB_HOST", "DB_PASSWORD"]
+  },
+  {
+    "name": "Authentik",
+    "image": "ghcr.io/goauthentik/server:latest",
+    "description": "Identity provider and single sign-on solution",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authentik.png",
+    "categories": ["security", "identity"],
+    "project_url": "https://goauthentik.io",
+    "ports": [
+      {"internal": 9000, "external": 9000, "role": "web"},
+      {"internal": 9443, "external": 9443, "role": "https"}
+    ],
+    "volumes": [{"path": "/media", "description": "Media files"}],
+    "env": {"AUTHENTIK_SECRET_KEY": "", "AUTHENTIK_POSTGRESQL__HOST": "", "AUTHENTIK_POSTGRESQL__USER": "authentik", "AUTHENTIK_POSTGRESQL__PASSWORD": "", "AUTHENTIK_POSTGRESQL__NAME": "authentik", "AUTHENTIK_REDIS__HOST": ""},
+    "required_env": ["AUTHENTIK_SECRET_KEY", "AUTHENTIK_POSTGRESQL__HOST", "AUTHENTIK_POSTGRESQL__PASSWORD", "AUTHENTIK_REDIS__HOST"]
+  },
+  {
+    "name": "Keycloak",
+    "image": "quay.io/keycloak/keycloak:latest",
+    "description": "Open-source identity and access management",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/keycloak.png",
+    "categories": ["security", "identity"],
+    "project_url": "https://keycloak.org",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {"KC_DB": "postgres", "KC_DB_URL": "", "KC_DB_USERNAME": "keycloak", "KC_DB_PASSWORD": "", "KEYCLOAK_ADMIN": "admin", "KEYCLOAK_ADMIN_PASSWORD": ""},
+    "required_env": ["KC_DB_URL", "KC_DB_PASSWORD", "KEYCLOAK_ADMIN_PASSWORD"]
+  },
+  {
+    "name": "Authelia",
+    "image": "authelia/authelia:latest",
+    "description": "Authentication and authorization server with 2FA and SSO",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/authelia.png",
+    "categories": ["security", "identity"],
+    "project_url": "https://authelia.com",
+    "ports": [{"internal": 9091, "external": 9091, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Crowdsec",
+    "image": "crowdsecurity/crowdsec:latest",
+    "description": "Collaborative security engine for threat detection",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/crowdsec.png",
+    "categories": ["security"],
+    "project_url": "https://crowdsec.net",
+    "ports": [{"internal": 8080, "external": 8080, "role": "api"}],
+    "volumes": [
+      {"path": "/etc/crowdsec", "description": "Configuration"},
+      {"path": "/var/lib/crowdsec/data", "description": "Data"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Fail2ban",
+    "image": "lscr.io/linuxserver/fail2ban:latest",
+    "description": "Intrusion prevention framework that bans IPs after failed attempts",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/fail2ban.png",
+    "categories": ["security"],
+    "project_url": "https://fail2ban.org",
+    "ports": [],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/var/log", "description": "Log files to monitor"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Ghost",
+    "image": "ghost:latest",
+    "description": "Professional publishing platform for blogs and newsletters",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ghost.png",
+    "categories": ["cms", "blog"],
+    "project_url": "https://ghost.org",
+    "ports": [{"internal": 2368, "external": 2368, "role": "web"}],
+    "volumes": [{"path": "/var/lib/ghost/content", "description": "Content data"}],
+    "env": {"url": "http://localhost:2368"},
+    "required_env": []
+  },
+  {
+    "name": "WordPress",
+    "image": "wordpress:latest",
+    "description": "Popular CMS and blogging platform",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wordpress.png",
+    "categories": ["cms", "blog"],
+    "project_url": "https://wordpress.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/www/html", "description": "WordPress files"}],
+    "env": {"WORDPRESS_DB_HOST": "", "WORDPRESS_DB_USER": "wordpress", "WORDPRESS_DB_PASSWORD": "", "WORDPRESS_DB_NAME": "wordpress"},
+    "required_env": ["WORDPRESS_DB_HOST", "WORDPRESS_DB_PASSWORD"]
+  },
+  {
+    "name": "Directus",
+    "image": "directus/directus:latest",
+    "description": "Open data platform with headless CMS and real-time API",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/directus.png",
+    "categories": ["cms", "dev-tools"],
+    "project_url": "https://directus.io",
+    "ports": [{"internal": 8055, "external": 8055, "role": "web"}],
+    "volumes": [
+      {"path": "/directus/uploads", "description": "Uploads"},
+      {"path": "/directus/database", "description": "Database"}
+    ],
+    "env": {"SECRET": "", "DB_CLIENT": "sqlite3", "DB_FILENAME": "/directus/database/data.db", "ADMIN_EMAIL": "admin@example.com", "ADMIN_PASSWORD": ""},
+    "required_env": ["SECRET", "ADMIN_PASSWORD"]
+  },
+  {
+    "name": "Strapi",
+    "image": "strapi/strapi:latest",
+    "description": "Headless CMS for building APIs without writing code",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/strapi.png",
+    "categories": ["cms", "dev-tools"],
+    "project_url": "https://strapi.io",
+    "ports": [{"internal": 1337, "external": 1337, "role": "web"}],
+    "volumes": [{"path": "/srv/app", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "n8n",
+    "image": "n8nio/n8n:latest",
+    "description": "Workflow automation tool connecting apps and services",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/n8n.png",
+    "categories": ["automation", "productivity"],
+    "project_url": "https://n8n.io",
+    "ports": [{"internal": 5678, "external": 5678, "role": "web"}],
+    "volumes": [{"path": "/home/node/.n8n", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Huginn",
+    "image": "ghcr.io/huginn/huginn:latest",
+    "description": "System for building agents that perform automated tasks",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/huginn.png",
+    "categories": ["automation"],
+    "project_url": "https://github.com/huginn/huginn",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [],
+    "env": {"MYSQL_PORT_3306_TCP_ADDR": "", "MYSQL_ROOT_PASSWORD": ""},
+    "required_env": []
+  },
+  {
+    "name": "Changedetection.io",
+    "image": "ghcr.io/dgtlmoon/changedetection.io:latest",
+    "description": "Website change detection and notification",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/changedetection-io.png",
+    "categories": ["automation", "monitoring"],
+    "project_url": "https://changedetection.io",
+    "ports": [{"internal": 5000, "external": 5000, "role": "web"}],
+    "volumes": [{"path": "/datastore", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Wekan",
+    "image": "ghcr.io/wekan/wekan:latest",
+    "description": "Open-source kanban board (Trello alternative)",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wekan.png",
+    "categories": ["project-management", "productivity"],
+    "project_url": "https://wekan.github.io",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Application data"}],
+    "env": {"MONGO_URL": "", "ROOT_URL": "http://localhost:8080"},
+    "required_env": ["MONGO_URL"]
+  },
+  {
+    "name": "Vikunja",
+    "image": "vikunja/vikunja:latest",
+    "description": "Open-source to-do and task management application",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/vikunja.png",
+    "categories": ["project-management", "productivity"],
+    "project_url": "https://vikunja.io",
+    "ports": [{"internal": 3456, "external": 3456, "role": "web"}],
+    "volumes": [{"path": "/app/vikunja/files", "description": "Application files"}],
+    "env": {"VIKUNJA_SERVICE_JWTSECRET": ""},
+    "required_env": ["VIKUNJA_SERVICE_JWTSECRET"]
+  },
+  {
+    "name": "Planka",
+    "image": "ghcr.io/plankanban/planka:latest",
+    "description": "Elegant open-source project tracking built for everyone",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/planka.png",
+    "categories": ["project-management", "productivity"],
+    "project_url": "https://planka.app",
+    "ports": [{"internal": 1337, "external": 1337, "role": "web"}],
+    "volumes": [
+      {"path": "/app/public/user-avatars", "description": "Avatars"},
+      {"path": "/app/public/project-background-images", "description": "Backgrounds"},
+      {"path": "/app/private/attachments", "description": "Attachments"}
+    ],
+    "env": {"BASE_URL": "http://localhost:1337", "DATABASE_URL": "", "SECRET_KEY": ""},
+    "required_env": ["DATABASE_URL", "SECRET_KEY"]
+  },
+  {
+    "name": "Stirling PDF",
+    "image": "stirlingtools/stirling-pdf:latest",
+    "description": "Self-hosted PDF manipulation tool with web UI",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/stirling-pdf.png",
+    "categories": ["productivity", "documents"],
+    "project_url": "https://stirlingpdf.io",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/usr/share/tessdata", "description": "OCR language data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Filebrowser",
+    "image": "filebrowser/filebrowser:latest",
+    "description": "Web file manager with sharing and editing capabilities",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/filebrowser.png",
+    "categories": ["file-storage"],
+    "project_url": "https://filebrowser.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/srv", "description": "File storage root"},
+      {"path": "/database/filebrowser.db", "description": "Database"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Seafile",
+    "image": "seafileltd/seafile-mc:latest",
+    "description": "File syncing and sharing platform with versioning",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/seafile.png",
+    "categories": ["cloud", "file-storage"],
+    "project_url": "https://seafile.com",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/shared", "description": "Seafile data"}],
+    "env": {"DB_HOST": "", "DB_ROOT_PASSWD": "", "SEAFILE_ADMIN_EMAIL": "", "SEAFILE_ADMIN_PASSWORD": "", "SEAFILE_SERVER_HOSTNAME": ""},
+    "required_env": ["DB_HOST", "DB_ROOT_PASSWD", "SEAFILE_ADMIN_EMAIL", "SEAFILE_ADMIN_PASSWORD"]
+  },
+  {
+    "name": "Syncthing",
+    "image": "lscr.io/linuxserver/syncthing:latest",
+    "description": "Continuous peer-to-peer file synchronization",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/syncthing.png",
+    "categories": ["file-storage", "backup"],
+    "project_url": "https://syncthing.net",
+    "ports": [
+      {"internal": 8384, "external": 8384, "role": "web"},
+      {"internal": 22000, "external": 22000, "role": "sync"}
+    ],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/data", "description": "Sync data"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Audiobookshelf",
+    "image": "ghcr.io/advplyr/audiobookshelf:latest",
+    "description": "Self-hosted audiobook and podcast server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/audiobookshelf.png",
+    "categories": ["media", "books"],
+    "project_url": "https://audiobookshelf.org",
+    "ports": [{"internal": 80, "external": 13378, "role": "web"}],
+    "volumes": [
+      {"path": "/audiobooks", "description": "Audiobook library"},
+      {"path": "/podcasts", "description": "Podcast library"},
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/metadata", "description": "Metadata"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Calibre-Web",
+    "image": "lscr.io/linuxserver/calibre-web:latest",
+    "description": "Web app providing clean interface for browsing and reading e-books",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/calibre-web.png",
+    "categories": ["media", "books"],
+    "project_url": "https://github.com/janeczku/calibre-web",
+    "ports": [{"internal": 8083, "external": 8083, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/books", "description": "Book library"}
+    ],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Komga",
+    "image": "gotson/komga:latest",
+    "description": "Media server for comics and manga with web reader",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/komga.png",
+    "categories": ["media", "books"],
+    "project_url": "https://komga.org",
+    "ports": [{"internal": 25600, "external": 25600, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/data", "description": "Comic library"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Kavita",
+    "image": "jvmilazz0/kavita:latest",
+    "description": "Self-hosted digital library for reading manga, comics, and books",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kavita.png",
+    "categories": ["media", "books"],
+    "project_url": "https://kavitareader.com",
+    "ports": [{"internal": 5000, "external": 5000, "role": "web"}],
+    "volumes": [
+      {"path": "/kavita/config", "description": "Configuration"},
+      {"path": "/manga", "description": "Manga library"},
+      {"path": "/comics", "description": "Comics library"},
+      {"path": "/books", "description": "Book library"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Healthchecks",
+    "image": "lscr.io/linuxserver/healthchecks:latest",
+    "description": "Cron job monitoring service with alerting",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/healthchecks.png",
+    "categories": ["monitoring"],
+    "project_url": "https://healthchecks.io",
+    "ports": [{"internal": 8000, "external": 8000, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "SITE_ROOT": "http://localhost:8000", "SECRET_KEY": ""},
+    "required_env": ["SECRET_KEY"]
+  },
+  {
+    "name": "Netdata",
+    "image": "netdata/netdata:latest",
+    "description": "Real-time performance and health monitoring",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/netdata.png",
+    "categories": ["monitoring"],
+    "project_url": "https://netdata.cloud",
+    "ports": [{"internal": 19999, "external": 19999, "role": "web"}],
+    "volumes": [
+      {"path": "/etc/netdata", "description": "Configuration"},
+      {"path": "/var/lib/netdata", "description": "Data"},
+      {"path": "/var/cache/netdata", "description": "Cache"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Dozzle",
+    "image": "amir20/dozzle:latest",
+    "description": "Real-time Docker container log viewer",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/dozzle.png",
+    "categories": ["monitoring", "docker"],
+    "project_url": "https://dozzle.dev",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/var/run/docker.sock", "description": "Docker socket"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Watchtower",
+    "image": "containrrr/watchtower:latest",
+    "description": "Automatic Docker container image updater",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/watchtower.png",
+    "categories": ["docker", "automation"],
+    "project_url": "https://containrrr.dev/watchtower/",
+    "ports": [],
+    "volumes": [{"path": "/var/run/docker.sock", "description": "Docker socket"}],
+    "env": {"WATCHTOWER_CLEANUP": "true"},
+    "required_env": []
+  },
+  {
+    "name": "IT-Tools",
+    "image": "corentinth/it-tools:latest",
+    "description": "Collection of handy online tools for developers",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/it-tools.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://it-tools.tech",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Code Server",
+    "image": "lscr.io/linuxserver/code-server:latest",
+    "description": "VS Code running in the browser",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/code-server.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://coder.com",
+    "ports": [{"internal": 8443, "external": 8443, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration and workspace"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "PASSWORD": ""},
+    "required_env": []
+  },
+  {
+    "name": "Gitness",
+    "image": "harness/gitness:latest",
+    "description": "Open-source developer platform with Git hosting and CI/CD pipelines",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitness.png",
+    "categories": ["dev-tools", "git", "ci-cd"],
+    "project_url": "https://gitness.com",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Weblate",
+    "image": "weblate/weblate:latest",
+    "description": "Web-based continuous localization and translation platform",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/weblate.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://weblate.org",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Application data"}],
+    "env": {"WEBLATE_SITE_DOMAIN": "", "POSTGRES_HOST": "", "POSTGRES_PASSWORD": "", "REDIS_HOST": ""},
+    "required_env": ["WEBLATE_SITE_DOMAIN", "POSTGRES_HOST", "POSTGRES_PASSWORD", "REDIS_HOST"]
+  },
+  {
+    "name": "Appsmith",
+    "image": "appsmith/appsmith-ce:latest",
+    "description": "Low-code platform for building internal tools and dashboards",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/appsmith.png",
+    "categories": ["dev-tools", "productivity"],
+    "project_url": "https://appsmith.com",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/appsmith-stacks", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "NocoDB",
+    "image": "nocodb/nocodb:latest",
+    "description": "Open-source Airtable alternative with database views",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nocodb.png",
+    "categories": ["dev-tools", "productivity", "database"],
+    "project_url": "https://nocodb.com",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/usr/app/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Speedtest Tracker",
+    "image": "lscr.io/linuxserver/speedtest-tracker:latest",
+    "description": "Self-hosted internet speed test tracker with history",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/speedtest-tracker.png",
+    "categories": ["monitoring", "networking"],
+    "project_url": "https://docs.speedtest-tracker.dev",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "APP_KEY": "", "DB_CONNECTION": "sqlite"},
+    "required_env": ["APP_KEY"]
+  },
+  {
+    "name": "LibreSpeed",
+    "image": "lscr.io/linuxserver/librespeed:latest",
+    "description": "Self-hosted speed test with beautiful UI",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/librespeed.png",
+    "categories": ["monitoring", "networking"],
+    "project_url": "https://librespeed.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Heimdall",
+    "image": "lscr.io/linuxserver/heimdall:latest",
+    "description": "Application dashboard and launcher",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/heimdall.png",
+    "categories": ["dashboard"],
+    "project_url": "https://heimdall.site",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/config", "description": "Configuration"}],
+    "env": {"PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC"},
+    "required_env": []
+  },
+  {
+    "name": "Elasticsearch",
+    "image": "docker.elastic.co/elasticsearch/elasticsearch:8.15.0",
+    "description": "Distributed search and analytics engine",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/elasticsearch.png",
+    "categories": ["database", "search"],
+    "project_url": "https://elastic.co/elasticsearch",
+    "ports": [
+      {"internal": 9200, "external": 9200, "role": "api"},
+      {"internal": 9300, "external": 9300, "role": "transport"}
+    ],
+    "volumes": [{"path": "/usr/share/elasticsearch/data", "description": "Data"}],
+    "env": {"discovery.type": "single-node", "xpack.security.enabled": "false"},
+    "required_env": []
+  },
+  {
+    "name": "Meilisearch",
+    "image": "getmeili/meilisearch:latest",
+    "description": "Lightning-fast, typo-tolerant search engine",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/meilisearch.png",
+    "categories": ["database", "search"],
+    "project_url": "https://meilisearch.com",
+    "ports": [{"internal": 7700, "external": 7700, "role": "api"}],
+    "volumes": [{"path": "/meili_data", "description": "Data"}],
+    "env": {"MEILI_MASTER_KEY": ""},
+    "required_env": []
+  },
+  {
+    "name": "SearXNG",
+    "image": "searxng/searxng:latest",
+    "description": "Privacy-respecting metasearch engine",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/searxng.png",
+    "categories": ["search"],
+    "project_url": "https://docs.searxng.org",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/etc/searxng", "description": "Configuration"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Whoogle",
+    "image": "benbusby/whoogle-search:latest",
+    "description": "Self-hosted, ad-free, privacy-respecting Google search proxy",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/whoogle.png",
+    "categories": ["search"],
+    "project_url": "https://github.com/benbusby/whoogle-search",
+    "ports": [{"internal": 5000, "external": 5000, "role": "web"}],
+    "volumes": [],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Joplin Server",
+    "image": "joplin/server:latest",
+    "description": "Sync server for the Joplin note-taking application",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/joplin.png",
+    "categories": ["productivity", "notes"],
+    "project_url": "https://joplinapp.org",
+    "ports": [{"internal": 22300, "external": 22300, "role": "web"}],
+    "volumes": [],
+    "env": {"APP_BASE_URL": "http://localhost:22300", "DB_CLIENT": "sqlite3"},
+    "required_env": []
+  },
+  {
+    "name": "Standard Notes",
+    "image": "standardnotes/server:latest",
+    "description": "End-to-end encrypted note-taking app server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/standard-notes.png",
+    "categories": ["productivity", "notes"],
+    "project_url": "https://standardnotes.com",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/var/lib/server", "description": "Server data"}],
+    "env": {"DB_HOST": "", "DB_PORT": "3306", "DB_USERNAME": "", "DB_PASSWORD": "", "DB_DATABASE": "standard_notes"},
+    "required_env": ["DB_HOST", "DB_USERNAME", "DB_PASSWORD"]
+  },
+  {
+    "name": "Trilium Notes",
+    "image": "zadam/trilium:latest",
+    "description": "Hierarchical note-taking application with rich features",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/trilium.png",
+    "categories": ["productivity", "notes"],
+    "project_url": "https://github.com/zadam/trilium",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/home/node/trilium-data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Excalidraw",
+    "image": "excalidraw/excalidraw:latest",
+    "description": "Virtual whiteboard for sketching hand-drawn diagrams",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/excalidraw.png",
+    "categories": ["productivity"],
+    "project_url": "https://excalidraw.com",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "draw.io",
+    "image": "jgraph/drawio:latest",
+    "description": "Self-hosted diagram editor for creating flowcharts and diagrams",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/drawio.png",
+    "categories": ["productivity"],
+    "project_url": "https://draw.io",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Yacht",
+    "image": "selfhostedpro/yacht:latest",
+    "description": "Web UI for managing Docker containers with templates",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/yacht.png",
+    "categories": ["docker", "dev-tools"],
+    "project_url": "https://yacht.sh",
+    "ports": [{"internal": 8000, "external": 8000, "role": "web"}],
+    "volumes": [
+      {"path": "/config", "description": "Configuration"},
+      {"path": "/var/run/docker.sock", "description": "Docker socket"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Gluetun",
+    "image": "qmcgaw/gluetun:latest",
+    "description": "VPN client in a thin Docker container for routing other containers",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gluetun.png",
+    "categories": ["vpn", "networking"],
+    "project_url": "https://github.com/qdm12/gluetun",
+    "ports": [],
+    "volumes": [{"path": "/gluetun", "description": "Configuration"}],
+    "env": {"VPN_SERVICE_PROVIDER": "", "VPN_TYPE": "wireguard"},
+    "required_env": ["VPN_SERVICE_PROVIDER"]
+  },
+  {
+    "name": "Technitium DNS",
+    "image": "technitium/dns-server:latest",
+    "description": "Self-hosted authoritative and recursive DNS server",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/technitium.png",
+    "categories": ["dns", "networking"],
+    "project_url": "https://technitium.com/dns/",
+    "ports": [
+      {"internal": 5380, "external": 5380, "role": "web"},
+      {"internal": 53, "external": 53, "role": "dns"}
+    ],
+    "volumes": [{"path": "/etc/dns", "description": "Configuration and data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Unbound",
+    "image": "mvance/unbound:latest",
+    "description": "Validating, recursive, caching DNS resolver",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/unbound.png",
+    "categories": ["dns", "networking"],
+    "project_url": "https://nlnetlabs.nl/projects/unbound/about/",
+    "ports": [{"internal": 53, "external": 53, "role": "dns"}],
+    "volumes": [{"path": "/opt/unbound/etc/unbound", "description": "Configuration"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Lychee",
+    "image": "lycheeorg/lychee:latest",
+    "description": "Free photo management tool with web interface",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/lychee.png",
+    "categories": ["photo"],
+    "project_url": "https://lychee.electerious.com",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [
+      {"path": "/conf", "description": "Configuration"},
+      {"path": "/uploads", "description": "Photo uploads"},
+      {"path": "/sym", "description": "Symbolic links"}
+    ],
+    "env": {"DB_CONNECTION": "sqlite", "DB_DATABASE": "/conf/lychee.sqlite"},
+    "required_env": []
+  },
+  {
+    "name": "Zipline",
+    "image": "ghcr.io/diced/zipline:latest",
+    "description": "ShareX/file upload server with gallery and URL shortener",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/zipline.png",
+    "categories": ["file-storage"],
+    "project_url": "https://zipline.diced.sh",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [{"path": "/zipline/uploads", "description": "Uploads"}],
+    "env": {"CORE_SECRET": "", "CORE_DATABASE_URL": ""},
+    "required_env": ["CORE_SECRET", "CORE_DATABASE_URL"]
+  },
+  {
+    "name": "Snippet Box",
+    "image": "pawelmalak/snippet-box:latest",
+    "description": "Self-hosted code snippet organizer",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/snippet-box.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://github.com/pawelmalak/snippet-box",
+    "ports": [{"internal": 5000, "external": 5000, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Application data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Reactive Resume",
+    "image": "amruthpillai/reactive-resume:latest",
+    "description": "Free and open-source resume builder",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/reactive-resume.png",
+    "categories": ["productivity"],
+    "project_url": "https://rxresu.me",
+    "ports": [{"internal": 3000, "external": 3000, "role": "web"}],
+    "volumes": [],
+    "env": {"DATABASE_URL": "", "ACCESS_TOKEN_SECRET": "", "REFRESH_TOKEN_SECRET": ""},
+    "required_env": ["DATABASE_URL", "ACCESS_TOKEN_SECRET", "REFRESH_TOKEN_SECRET"]
+  },
+  {
+    "name": "Cyberchef",
+    "image": "ghcr.io/gchq/cyberchef:latest",
+    "description": "Web app for encryption, encoding, compression, and data analysis",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/cyberchef.png",
+    "categories": ["dev-tools", "security"],
+    "project_url": "https://github.com/gchq/CyberChef",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Haste Server",
+    "image": "rlister/hastebin:latest",
+    "description": "Open-source pastebin alternative",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/hastebin.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://github.com/toptal/haste-server",
+    "ports": [{"internal": 7777, "external": 7777, "role": "web"}],
+    "volumes": [{"path": "/app/data", "description": "Paste data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "PrivateBin",
+    "image": "privatebin/nginx-fpm-alpine:latest",
+    "description": "Minimalist, open-source online pastebin with zero knowledge encryption",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/privatebin.png",
+    "categories": ["dev-tools", "security"],
+    "project_url": "https://privatebin.info",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/srv/data", "description": "Paste data"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Ollama",
+    "image": "ollama/ollama:latest",
+    "description": "Run large language models locally",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ollama.png",
+    "categories": ["ai"],
+    "project_url": "https://ollama.com",
+    "ports": [{"internal": 11434, "external": 11434, "role": "api"}],
+    "volumes": [{"path": "/root/.ollama", "description": "Model storage"}],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "Open WebUI",
+    "image": "ghcr.io/open-webui/open-webui:main",
+    "description": "ChatGPT-style web interface for Ollama and OpenAI-compatible LLMs",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/open-webui.png",
+    "categories": ["ai"],
+    "project_url": "https://openwebui.com",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [{"path": "/app/backend/data", "description": "Application data"}],
+    "env": {"OLLAMA_BASE_URL": "http://ollama:11434"},
+    "required_env": []
+  },
+  {
+    "name": "Radicale",
+    "image": "tomsquest/docker-radicale:latest",
+    "description": "CalDAV and CardDAV server for calendar and contact sync",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/radicale.png",
+    "categories": ["productivity", "calendar"],
+    "project_url": "https://radicale.org",
+    "ports": [{"internal": 5232, "external": 5232, "role": "web"}],
+    "volumes": [
+      {"path": "/data", "description": "Calendar and contact data"},
+      {"path": "/config", "description": "Configuration"}
+    ],
+    "env": {},
+    "required_env": []
+  },
+  {
+    "name": "YOURLS",
+    "image": "yourls:latest",
+    "description": "Self-hosted URL shortener",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/yourls.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://yourls.org",
+    "ports": [{"internal": 80, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {"YOURLS_DB_HOST": "", "YOURLS_DB_USER": "yourls", "YOURLS_DB_PASS": "", "YOURLS_DB_NAME": "yourls", "YOURLS_SITE": "http://localhost:8080", "YOURLS_USER": "admin", "YOURLS_PASS": ""},
+    "required_env": ["YOURLS_DB_HOST", "YOURLS_DB_PASS", "YOURLS_PASS"]
+  },
+  {
+    "name": "Shlink",
+    "image": "shlinkio/shlink:latest",
+    "description": "PHP-based self-hosted URL shortener with API",
+    "logo_url": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/shlink.png",
+    "categories": ["dev-tools"],
+    "project_url": "https://shlink.io",
+    "ports": [{"internal": 8080, "external": 8080, "role": "web"}],
+    "volumes": [],
+    "env": {"DEFAULT_DOMAIN": "", "IS_HTTPS_ENABLED": "false"},
+    "required_env": ["DEFAULT_DOMAIN"]
+  }
+]

@@ -1,0 +1,23 @@
+ARG ELIXIR_VERSION=1.17.3
+ARG OTP_VERSION=27.2.4
+ARG ALPINE_VERSION=3.21.3
+
+FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-alpine-${ALPINE_VERSION}
+
+RUN apk add --no-cache build-base git inotify-tools
+
+WORKDIR /app
+
+ENV MIX_ENV=dev
+ENV PHX_SERVER=true
+ENV BOOTSTRAP=true
+
+RUN mix local.hex --force && mix local.rebar --force
+
+COPY mix.exs mix.lock ./
+RUN mix deps.get
+RUN mix deps.compile
+
+EXPOSE 4000
+
+CMD ["sh", "-c", "mix compile && mix phx.server"]

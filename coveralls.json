@@ -1,0 +1,24 @@
+{
+  "skip_files": [
+    "lib/homelab_web/components/core_components.ex",
+    "lib/homelab_web/components/layouts.ex",
+    "lib/homelab_web/endpoint.ex",
+    "lib/homelab_web/gettext.ex",
+    "lib/homelab/mailer.ex",
+    "lib/homelab/repo.ex",
+    "lib/homelab.ex",
+    "lib/homelab/orchestrators/docker_swarm.ex",
+    "lib/homelab/docker/client.ex",
+    "lib/homelab/backup_providers/restic.ex",
+    "lib/homelab/behaviours/orchestrator.ex",
+    "lib/homelab/behaviours/identity_broker.ex",
+    "lib/homelab/behaviours/gateway.ex",
+    "lib/homelab/behaviours/backup_provider.ex",
+    "lib/homelab/behaviours/dns_provider.ex",
+    "lib/homelab/reconciliation/diff.ex",
+    "test/support/integration_case.ex"
+  ],
+  "coverage_options": {
+    "minimum_coverage": 80
+  }
+}

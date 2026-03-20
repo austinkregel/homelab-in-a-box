@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: homelab
+      POSTGRES_PASSWORD: homelab
+      POSTGRES_DB: homelab_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Mount the Docker socket so the app can manage containers in dev
+  # Usage: docker compose up postgres
+  #        mix phx.server
+  # The socket is accessed directly from the host in dev mode.
+
+volumes:
+  pgdata:
