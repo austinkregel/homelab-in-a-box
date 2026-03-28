@@ -50,7 +50,6 @@ Homelab-in-a-Box is a control plane for your self-hosted infrastructure. It prov
 - **Self-Bootstrapping**: Automatically provisions its own Postgres database and networking on first run
 - **Setup Wizard**: Guided first-run configuration for OIDC authentication, Docker connectivity, and initial workspace setup
 - **OIDC Authentication**: Integrates with external identity providers (Authentik, Keycloak, etc.) via `.well-known` discovery
-- **Curated App Catalog**: 140+ hand-picked, server-side Docker applications with accurate image refs, ports, volumes, and env vars -- covering media, databases, monitoring, VPN, wikis, chat, CI/CD, and more. Catalog is stored as a JSON file (`priv/catalog/curated.json`) and can be extended by editing it directly
 - **Multi-Registry Search**: Discover additional container images on demand from:
   - Docker Hub (search any public image)
   - GitHub Container Registry (GHCR)
