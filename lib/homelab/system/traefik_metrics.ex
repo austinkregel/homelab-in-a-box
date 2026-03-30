@@ -9,14 +9,17 @@ defmodule Homelab.System.TraefikMetrics do
 
   require Logger
 
-  @metrics_url "http://homelab-traefik:8080/metrics"
+  defp metrics_url do
+    Application.get_env(:homelab, __MODULE__, [])[:metrics_url] ||
+      "http://homelab-traefik:8080/metrics"
+  end
 
   @doc """
   Fetches and parses all Traefik service metrics.
   Returns `{:ok, map}` keyed by service name, or `{:error, reason}`.
   """
   def collect do
-    case Req.get(@metrics_url, retry: false, receive_timeout: 5_000) do
+    case Req.get(metrics_url(), retry: false, receive_timeout: 5_000) do
       {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
         {:ok, parse_metrics(body)}
 

@@ -212,7 +212,8 @@ defmodule Homelab.Registrars.Namecheap do
   end
 
   defp base_url(creds) do
-    if creds.sandbox, do: @sandbox_url, else: @production_url
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] ||
+      if(creds.sandbox, do: @sandbox_url, else: @production_url)
   end
 
   defp credentials do

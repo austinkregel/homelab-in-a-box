@@ -73,7 +73,8 @@ defmodule Homelab.Catalogs.Hotio do
   end
 
   defp fetch_all_repos do
-    fetch_pages("https://hub.docker.com/v2/repositories/hotio/?page_size=100", [])
+    base = Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://hub.docker.com/v2"
+    fetch_pages("#{base}/repositories/hotio/?page_size=100", [])
   end
 
   defp fetch_pages(url, acc) do

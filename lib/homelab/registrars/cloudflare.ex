@@ -9,7 +9,10 @@ defmodule Homelab.Registrars.Cloudflare do
 
   @behaviour Homelab.Behaviours.RegistrarProvider
 
-  @base_url "https://api.cloudflare.com/client/v4"
+  defp base_url do
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] ||
+      "https://api.cloudflare.com/client/v4"
+  end
 
   @impl true
   def driver_id, do: "cloudflare"
@@ -38,7 +41,7 @@ defmodule Homelab.Registrars.Cloudflare do
         {:error, :not_configured}
 
       token ->
-        case Req.get("#{@base_url}/zones",
+        case Req.get("#{base_url()}/zones",
                headers: auth_headers(token),
                params: [name: domain, per_page: 1]
              ) do
@@ -58,7 +61,7 @@ defmodule Homelab.Registrars.Cloudflare do
   end
 
   defp fetch_all_zones(token, page, acc) do
-    case Req.get("#{@base_url}/zones",
+    case Req.get("#{base_url()}/zones",
            headers: auth_headers(token),
            params: [page: page, per_page: 50, status: "active"]
          ) do

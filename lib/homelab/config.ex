@@ -121,7 +121,8 @@ defmodule Homelab.Config do
     configured =
       registries()
       |> Enum.filter(fn mod ->
-        if function_exported?(mod, :configured?, 0), do: mod.configured?(), else: true
+        Code.ensure_loaded?(mod) and
+          if(function_exported?(mod, :configured?, 0), do: mod.configured?(), else: true)
       end)
       |> Enum.map(fn mod -> mod.driver_id() end)
 

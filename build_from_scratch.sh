@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # --- Dev OIDC seed values (skip setup wizard) ---
 HOMELAB_INSTANCE_NAME="Homelab"
-HOMELAB_BASE_DOMAIN=$(hostname)
-HOMELAB_OIDC_ISSUER=""
-HOMELAB_OIDC_CLIENT_ID=""
-HOMELAB_OIDC_CLIENT_SECRET=""
+HOMELAB_BASE_DOMAIN="dionysis.kregel.host"
+HOMELAB_OIDC_ISSUER="https://aut.hair"
+HOMELAB_OIDC_CLIENT_ID="17"
+HOMELAB_OIDC_CLIENT_SECRET="OtrRoAFu6DclcqsIDkEU8P3eJkpkGNs4EwDuSPs0"
 HOMELAB_ORCHESTRATOR="docker_engine"
 HOMELAB_GATEWAY="traefik"
 

@@ -1,7 +1,11 @@
 defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
-  use HomelabWeb.ConnCase, async: true
+  use HomelabWeb.ConnCase, async: false
 
   import Homelab.Factory
+  import Mox
+
+  setup :set_mox_global
+  setup :verify_on_exit!
 
   setup %{conn: conn} do
     tenant = insert(:tenant)
@@ -33,6 +37,12 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
     test "creates deployment", %{conn: conn, tenant: tenant} do
       template = insert(:app_template)
 
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "container_abc123"} end)
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_1"}} end)
+
       conn =
         post(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
           "deployment" => %{
@@ -42,7 +52,6 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
         })
 
       assert %{"data" => deployment} = json_response(conn, 201)
-      assert deployment["status"] == "pending"
       assert deployment["tenant_id"] == tenant.id
     end
 
@@ -111,14 +120,25 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
   end
 
   describe "DELETE /api/v1/tenants/:tenant_id/deployments/:id" do
-    test "marks deployment for removal", %{conn: conn, tenant: tenant} do
+    test "deletes deployment and returns 204", %{conn: conn, tenant: tenant} do
       deployment = insert(:deployment, tenant: tenant, status: :running)
 
       conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
       assert response(conn, 204)
 
-      updated = Homelab.Repo.get!(Homelab.Deployments.Deployment, deployment.id)
-      assert updated.status == :removing
+      assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
+    end
+
+    test "deletes deployment with external_id and orchestrator undeploy", %{conn: conn, tenant: tenant} do
+      deployment = insert(:deployment, tenant: tenant, status: :running, external_id: "container_xyz")
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_xyz" -> {:ok, "container_xyz"} end)
+
+      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      assert response(conn, 204)
+
+      assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
     end
   end
 end

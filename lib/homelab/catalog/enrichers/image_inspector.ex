@@ -54,7 +54,8 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
       {:error, {:inspect_failed, Exception.message(e)}}
   end
 
-  defp parse_image_ref(ref) do
+  @doc false
+  def parse_image_ref(ref) do
     ref = String.trim(ref)
 
     {registry_url, auth_url, rest} =
@@ -195,7 +196,8 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     end
   end
 
-  defp extract_metadata(config) do
+  @doc false
+  def extract_metadata(config) do
     container_config = config["config"] || config["container_config"] || %{}
 
     ports = parse_exposed_ports(container_config["ExposedPorts"])
@@ -206,9 +208,11 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     %{ports: ports, volumes: volumes, env: env, labels: labels}
   end
 
-  defp parse_exposed_ports(nil), do: []
+  @doc false
+  def parse_exposed_ports(nil), do: []
 
-  defp parse_exposed_ports(ports) when is_map(ports) do
+  @doc false
+  def parse_exposed_ports(ports) when is_map(ports) do
     Enum.map(ports, fn {port_spec, _} ->
       port_num =
         port_spec
@@ -225,9 +229,11 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     end)
   end
 
-  defp parse_volumes(nil), do: []
+  @doc false
+  def parse_volumes(nil), do: []
 
-  defp parse_volumes(volumes) when is_map(volumes) do
+  @doc false
+  def parse_volumes(volumes) when is_map(volumes) do
     Enum.map(volumes, fn {path, _} ->
       %{
         "path" => path,
@@ -237,9 +243,11 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     end)
   end
 
-  defp parse_env(nil), do: []
+  @doc false
+  def parse_env(nil), do: []
 
-  defp parse_env(env_list) when is_list(env_list) do
+  @doc false
+  def parse_env(env_list) when is_list(env_list) do
     env_list
     |> Enum.map(fn env_str ->
       case String.split(env_str, "=", parts: 2) do
@@ -258,7 +266,8 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
 
   @system_env_exact ~w(MEMORY_LIMIT LSIO_FIRST_PARTY)
 
-  defp system_env?(key) do
+  @doc false
+  def system_env?(key) do
     key in @system_env_exact or
       Enum.any?(@system_env_prefixes, fn prefix -> String.starts_with?(key, prefix) end)
   end

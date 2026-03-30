@@ -8,8 +8,8 @@ import Config
 config :homelab, Homelab.Repo,
   username: "homelab",
   password: "homelab",
-  hostname: "localhost",
-  port: 5433,
+  hostname: System.get_env("DB_HOST", "localhost"),
+  port: String.to_integer(System.get_env("DB_PORT", "5433")),
   database: "homelab_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
@@ -40,7 +40,7 @@ config :homelab,
   internal_dns_provider: Homelab.Mocks.DnsProvider,
   registrar: Homelab.Mocks.RegistrarProvider,
   start_services: false,
-  registries: [Homelab.Registries.LinuxServer, Homelab.Registries.DockerHub]
+  registries: [Homelab.Registries.DockerHub]
 
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime

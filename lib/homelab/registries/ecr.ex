@@ -3,7 +3,10 @@ defmodule Homelab.Registries.ECR do
 
   @behaviour Homelab.Behaviours.ContainerRegistry
 
-  @base_url "https://api.us-east-1.gallery.ecr.aws"
+  defp base_url do
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] ||
+      "https://api.us-east-1.gallery.ecr.aws"
+  end
 
   @impl true
   def driver_id, do: "ecr"
@@ -74,7 +77,7 @@ defmodule Homelab.Registries.ECR do
       {"x-amz-target", "SpencerFrontendService.DescribeImageTags"}
     ]
 
-    case Req.post("#{@base_url}/", json: body, headers: headers) do
+    case Req.post("#{base_url()}/", json: body, headers: headers) do
       {:ok, %{status: 200, body: %{"imageTagDetails" => details}}} ->
         tags =
           Enum.map(details, fn d ->
@@ -120,7 +123,7 @@ defmodule Homelab.Registries.ECR do
       {"x-amz-target", "SpencerFrontendService.DescribeRepositories"}
     ]
 
-    case Req.post("#{@base_url}/", json: body, headers: headers) do
+    case Req.post("#{base_url()}/", json: body, headers: headers) do
       {:ok, %{status: 200, body: %{"repositories" => repos}}} ->
         {:ok, repos}
 

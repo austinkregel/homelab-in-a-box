@@ -1,6 +1,8 @@
 defmodule Homelab.Registrars.NamecheapTest do
   use ExUnit.Case, async: true
 
+  require Record
+
   alias Homelab.Registrars.Namecheap
 
   @domains_response """

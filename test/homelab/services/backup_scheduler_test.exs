@@ -49,4 +49,27 @@ defmodule Homelab.Services.BackupSchedulerTest do
       assert status.jobs_dispatched == 0
     end
   end
+
+  describe "handle_info :check_schedules" do
+    test "does not crash the GenServer" do
+      pid = start_supervised!({BackupScheduler, enabled: false})
+      send(pid, :check_schedules)
+      _ = :sys.get_state(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "status/0 shape" do
+    test "returns map with expected keys" do
+      start_supervised!({BackupScheduler, enabled: false})
+      status = BackupScheduler.status()
+
+      assert is_map(status)
+      assert Map.has_key?(status, :last_check_at)
+      assert Map.has_key?(status, :jobs_dispatched)
+      assert Map.has_key?(status, :interval)
+      assert Map.has_key?(status, :enabled)
+      assert status.enabled == false
+    end
+  end
 end

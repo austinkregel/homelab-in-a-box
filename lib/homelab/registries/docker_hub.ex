@@ -20,7 +20,7 @@ defmodule Homelab.Registries.DockerHub do
     page_size = Keyword.get(opts, :page_size, 25)
 
     url =
-      "https://hub.docker.com/v2/search/repositories/?query=#{URI.encode_www_form(query)}&page_size=#{page_size}"
+      "#{base_url()}/search/repositories/?query=#{URI.encode_www_form(query)}&page_size=#{page_size}"
 
     case Req.get(url) do
       {:ok, %{status: 200, body: body}} ->
@@ -39,7 +39,7 @@ defmodule Homelab.Registries.DockerHub do
   def list_tags(image, opts \\ []) do
     # image is "namespace/repo" or just "repo" (for library)
     page_size = Keyword.get(opts, :page_size, 50)
-    url = "https://hub.docker.com/v2/repositories/#{image}/tags/?page_size=#{page_size}"
+    url = "#{base_url()}/repositories/#{image}/tags/?page_size=#{page_size}"
 
     case Req.get(url) do
       {:ok, %{status: 200, body: body}} ->
@@ -61,6 +61,10 @@ defmodule Homelab.Registries.DockerHub do
   end
 
   # --- Private ---
+
+  defp base_url do
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://hub.docker.com/v2"
+  end
 
   defp parse_search_results(%{"results" => results}) do
     Enum.map(results, fn r ->

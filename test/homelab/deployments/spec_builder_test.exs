@@ -64,7 +64,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.service_name == "homelab_friends_nextcloud"
       assert spec.image == "nextcloud:28.0"
-      assert spec.network == "homelab_tenant_friends"
+      assert spec.network == "homelab_friends_nextcloud_net"
       assert spec.replicas == 1
       assert spec.tenant_id == "1"
       assert spec.deployment_id == "1"

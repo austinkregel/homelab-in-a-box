@@ -24,10 +24,10 @@ defmodule Homelab.Registries.GHCR do
 
     # Try orgs first, then users
     org_url =
-      "https://api.github.com/orgs/#{URI.encode_www_form(query)}/packages?package_type=container"
+      "#{base_url()}/orgs/#{URI.encode_www_form(query)}/packages?package_type=container"
 
     user_url =
-      "https://api.github.com/users/#{URI.encode_www_form(query)}/packages?package_type=container"
+      "#{base_url()}/users/#{URI.encode_www_form(query)}/packages?package_type=container"
 
     with {:error, _} <- fetch_packages(org_url, headers, query),
          {:error, _} <- fetch_packages(user_url, headers, query) do
@@ -44,8 +44,8 @@ defmodule Homelab.Registries.GHCR do
       {:error, :invalid_image}
     else
       # Try orgs first, then users
-      org_url = "https://api.github.com/orgs/#{owner}/packages/container/#{package}/versions"
-      user_url = "https://api.github.com/users/#{owner}/packages/container/#{package}/versions"
+      org_url = "#{base_url()}/orgs/#{owner}/packages/container/#{package}/versions"
+      user_url = "#{base_url()}/users/#{owner}/packages/container/#{package}/versions"
 
       with {:error, _} <- fetch_versions(org_url),
            {:error, _} <- fetch_versions(user_url) do
@@ -69,6 +69,10 @@ defmodule Homelab.Registries.GHCR do
   def configured?, do: Homelab.Settings.get("ghcr_token") != nil
 
   # --- Private ---
+
+  defp base_url do
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://api.github.com"
+  end
 
   defp auth_headers do
     case Homelab.Settings.get("ghcr_token") do

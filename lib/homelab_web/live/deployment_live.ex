@@ -267,7 +267,7 @@ defmodule HomelabWeb.DeploymentLive do
 
   def handle_event("restart", _params, socket) do
     case Deployments.restart_deployment(socket.assigns.deployment) do
-      :ok ->
+      {:ok, _} ->
         {:noreply, put_flash(socket, :info, "Deployment restarting.")}
 
       {:error, _} ->

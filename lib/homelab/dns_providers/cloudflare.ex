@@ -9,7 +9,10 @@ defmodule Homelab.DnsProviders.Cloudflare do
 
   @behaviour Homelab.Behaviours.DnsProvider
 
-  @base_url "https://api.cloudflare.com/client/v4"
+  defp base_url do
+    Application.get_env(:homelab, __MODULE__, [])[:base_url] ||
+      "https://api.cloudflare.com/client/v4"
+  end
 
   @impl true
   def driver_id, do: "cloudflare"
@@ -41,7 +44,7 @@ defmodule Homelab.DnsProviders.Cloudflare do
         proxied: false
       }
 
-      case Req.post("#{@base_url}/zones/#{zone_id}/dns_records",
+      case Req.post("#{base_url()}/zones/#{zone_id}/dns_records",
              headers: auth_headers(token),
              json: body
            ) do
@@ -68,7 +71,7 @@ defmodule Homelab.DnsProviders.Cloudflare do
         proxied: false
       }
 
-      case Req.put("#{@base_url}/zones/#{zone_id}/dns_records/#{record_id}",
+      case Req.put("#{base_url()}/zones/#{zone_id}/dns_records/#{record_id}",
              headers: auth_headers(token),
              json: body
            ) do
@@ -87,7 +90,7 @@ defmodule Homelab.DnsProviders.Cloudflare do
   @impl true
   def delete_record(zone_id, record_id) do
     with {:ok, token} <- require_token() do
-      case Req.delete("#{@base_url}/zones/#{zone_id}/dns_records/#{record_id}",
+      case Req.delete("#{base_url()}/zones/#{zone_id}/dns_records/#{record_id}",
              headers: auth_headers(token)
            ) do
         {:ok, %Req.Response{status: 200}} ->
@@ -103,7 +106,7 @@ defmodule Homelab.DnsProviders.Cloudflare do
   end
 
   defp fetch_all_records(token, zone_id, page, acc) do
-    case Req.get("#{@base_url}/zones/#{zone_id}/dns_records",
+    case Req.get("#{base_url()}/zones/#{zone_id}/dns_records",
            headers: auth_headers(token),
            params: [page: page, per_page: 100]
          ) do

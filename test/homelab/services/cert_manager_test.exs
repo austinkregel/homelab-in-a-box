@@ -1,6 +1,7 @@
 defmodule Homelab.Services.CertManagerTest do
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Mox
   import Homelab.Factory
 
@@ -81,14 +82,43 @@ defmodule Homelab.Services.CertManagerTest do
       end)
 
       start_supervised!({CertManager, enabled: false, interval: :timer.hours(1)})
-      CertManager.check_now()
-      Process.sleep(200)
+
+      log =
+        capture_log(fn ->
+          CertManager.check_now()
+          Process.sleep(200)
+        end)
+
+      assert log =~ "Failed to renew TLS for failing.homelab.local: :acme_challenge_failed"
 
       status = CertManager.status()
       assert status.renewed_count == 0
 
       updated_domain = Homelab.Repo.get!(Homelab.Networking.Domain, domain.id)
       assert updated_domain.tls_status == :failed
+    end
+  end
+
+  describe "handle_info :check_certs with no gateway" do
+    test "does not crash when gateway is nil" do
+      pid = start_supervised!({CertManager, enabled: false})
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "status/0" do
+    test "returns expected map shape" do
+      start_supervised!({CertManager, enabled: false})
+      status = CertManager.status()
+
+      assert is_map(status)
+      assert Map.has_key?(status, :last_check_at)
+      assert Map.has_key?(status, :renewed_count)
+      assert Map.has_key?(status, :interval)
+      assert Map.has_key?(status, :enabled)
+      assert status.enabled == false
     end
   end
 end

@@ -185,6 +185,8 @@ defmodule HomelabWeb.CatalogLive do
            socket
            |> assign(:selected_template, template)
            |> assign(:deploy_form, deploy_form)
+           |> assign(:deploy_ports, template.ports || [])
+           |> assign(:deploy_volumes, template.volumes || [])
            |> assign(:tab, "curated")}
 
         {:error, changeset} ->
