@@ -82,6 +82,38 @@ defmodule HomelabWeb.Layouts do
 
           <div class="mt-5">
             <p class="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-base-content/25">
+              Data &amp; Trust
+            </p>
+            <div class="space-y-0.5">
+              <.sidebar_link
+                path={~p"/storage"}
+                icon="hero-circle-stack"
+                label="Storage"
+                active={@page_title == "Storage"}
+              />
+              <.sidebar_link
+                path={~p"/adoption"}
+                icon="hero-arrow-down-tray"
+                label="Adoption"
+                active={@page_title == "Adoption"}
+              />
+              <.sidebar_link
+                path={~p"/workbench"}
+                icon="hero-wrench-screwdriver"
+                label="Workbench"
+                active={String.starts_with?(@page_title || "", "Workbench")}
+              />
+              <.sidebar_link
+                path={~p"/nodes"}
+                icon="hero-server"
+                label="Nodes"
+                active={@page_title == "Nodes"}
+              />
+            </div>
+          </div>
+
+          <div class="mt-5">
+            <p class="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-base-content/25">
               Spaces
             </p>
             <div :if={@tenants == []} class="px-3 py-2">

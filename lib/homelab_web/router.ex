@@ -53,6 +53,11 @@ defmodule HomelabWeb.Router do
       live "/deployments/:id", DeploymentLive, :show
       live "/domains", DomainsLive, :index
       live "/backups", BackupsLive, :index
+      live "/storage", StorageLive, :index
+      live "/adoption", AdoptionLive, :index
+      live "/workbench", WorkbenchLive, :index
+      live "/workbench/:id", WorkbenchLive, :show
+      live "/nodes", NodesLive, :index
       live "/activity", ActivityLive, :index
       live "/settings", SettingsLive, :index
     end

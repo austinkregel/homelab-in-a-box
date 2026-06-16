@@ -992,9 +992,24 @@ defmodule HomelabWeb.DashboardLiveTest do
       {:ok, view, _html} = live(conn, ~p"/")
 
       events = [
-        %{level: :info, message: "Container started", source: "docker", timestamp: DateTime.utc_now()},
-        %{level: :warn, message: "SSL cert expiring soon", source: "domain", timestamp: DateTime.utc_now()},
-        %{level: :error, message: "Health check failed", source: "deploy", timestamp: DateTime.utc_now()}
+        %{
+          level: :info,
+          message: "Container started",
+          source: "docker",
+          timestamp: DateTime.utc_now()
+        },
+        %{
+          level: :warn,
+          message: "SSL cert expiring soon",
+          source: "domain",
+          timestamp: DateTime.utc_now()
+        },
+        %{
+          level: :error,
+          message: "Health check failed",
+          source: "deploy",
+          timestamp: DateTime.utc_now()
+        }
       ]
 
       for event <- events, do: send(view.pid, {:activity_event, event})

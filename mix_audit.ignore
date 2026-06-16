@@ -1,0 +1,2 @@
+# Low severity; no patched cowlib release yet (transitive via cowboy).
+GHSA-g2wm-735q-3f56

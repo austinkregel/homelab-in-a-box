@@ -86,6 +86,7 @@ defmodule HomelabWeb do
       import Phoenix.HTML
       # Core UI components
       import HomelabWeb.CoreComponents
+      import HomelabWeb.Components.StorageBanner
       import HomelabWeb.Topology
 
       # Common modules used in templates

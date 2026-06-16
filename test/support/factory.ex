@@ -34,7 +34,13 @@ defmodule Homelab.Factory do
       ports: [%{"container" => 8080, "protocol" => "tcp"}],
       resource_limits: %{"memory_mb" => 256, "cpu_shares" => 512},
       backup_policy: %{"enabled" => true, "schedule" => "0 2 * * *", "paths" => ["/data"]},
-      health_check: %{"path" => "/health", "interval" => 30},
+      health_check: %{
+        "type" => "http",
+        "endpoint" => "/health",
+        "timeout_seconds" => 5,
+        "retries" => 3,
+        "interval_seconds" => 30
+      },
       depends_on: []
     }
   end

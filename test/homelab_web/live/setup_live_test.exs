@@ -126,7 +126,9 @@ defmodule HomelabWeb.SetupLiveTest do
       |> render_submit()
 
       html = render(view)
-      assert html =~ "Orchestrator" or html =~ "Infrastructure" or html =~ "Docker" or html =~ "required"
+
+      assert html =~ "Orchestrator" or html =~ "Infrastructure" or html =~ "Docker" or
+               html =~ "required"
     end
 
     test "discover_oidc with empty issuer doesn't crash", %{conn: conn} do
@@ -389,7 +391,9 @@ defmodule HomelabWeb.SetupLiveTest do
       |> render_change()
 
       html = render_click(view, "test_oidc", %{})
-      assert html =~ "error" or html =~ "refused" or html =~ "econnrefused" or has_element?(view, "span")
+
+      assert html =~ "error" or html =~ "refused" or html =~ "econnrefused" or
+               has_element?(view, "span")
     end
   end
 
@@ -461,6 +465,7 @@ defmodule HomelabWeb.SetupLiveTest do
   describe "step indicator rendering" do
     test "step indicator shows all 5 steps", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/setup")
+
       for n <- 1..5 do
         assert html =~ to_string(n)
       end

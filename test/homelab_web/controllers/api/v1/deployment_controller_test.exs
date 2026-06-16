@@ -129,8 +129,12 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
     end
 
-    test "deletes deployment with external_id and orchestrator undeploy", %{conn: conn, tenant: tenant} do
-      deployment = insert(:deployment, tenant: tenant, status: :running, external_id: "container_xyz")
+    test "deletes deployment with external_id and orchestrator undeploy", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      deployment =
+        insert(:deployment, tenant: tenant, status: :running, external_id: "container_xyz")
 
       Homelab.Mocks.Orchestrator
       |> expect(:undeploy, fn "container_xyz" -> {:ok, "container_xyz"} end)

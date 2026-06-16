@@ -39,6 +39,9 @@ config :homelab,
   public_dns_provider: Homelab.Mocks.DnsProvider,
   internal_dns_provider: Homelab.Mocks.DnsProvider,
   registrar: Homelab.Mocks.RegistrarProvider,
+  zfs_impl: Homelab.Mocks.Storage.Zfs,
+  disks_impl: Homelab.Mocks.Storage.Disks,
+  restic_driver: Homelab.Mocks.Restic.Driver,
   start_services: false,
   registries: [Homelab.Registries.DockerHub]
 

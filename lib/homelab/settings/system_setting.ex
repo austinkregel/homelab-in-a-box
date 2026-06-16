@@ -6,6 +6,7 @@ defmodule Homelab.Settings.SystemSetting do
     field :key, :string
     field :value, :string
     field :encrypted, :boolean, default: false
+    field :vault_ref, :string
     field :category, :string, default: "general"
 
     timestamps()
@@ -13,7 +14,7 @@ defmodule Homelab.Settings.SystemSetting do
 
   def changeset(setting, attrs) do
     setting
-    |> cast(attrs, [:key, :value, :encrypted, :category])
+    |> cast(attrs, [:key, :value, :encrypted, :vault_ref, :category])
     |> validate_required([:key, :category])
     |> unique_constraint(:key)
   end

@@ -4,3 +4,8 @@ Mox.defmock(Homelab.Mocks.Gateway, for: Homelab.Behaviours.Gateway)
 Mox.defmock(Homelab.Mocks.BackupProvider, for: Homelab.Behaviours.BackupProvider)
 Mox.defmock(Homelab.Mocks.DnsProvider, for: Homelab.Behaviours.DnsProvider)
 Mox.defmock(Homelab.Mocks.RegistrarProvider, for: Homelab.Behaviours.RegistrarProvider)
+
+# Storage / backup driver behaviours (§18)
+Mox.defmock(Homelab.Mocks.Storage.Zfs, for: Homelab.Storage.Zfs)
+Mox.defmock(Homelab.Mocks.Storage.Disks, for: Homelab.Storage.Disks)
+Mox.defmock(Homelab.Mocks.Restic.Driver, for: Homelab.BackupProviders.Restic.Driver)

@@ -21,12 +21,15 @@ defmodule HomelabWeb.AuthControllerTest do
     Bypass.stub(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.resp(200, Jason.encode!(%{
-        "issuer" => url,
-        "authorization_endpoint" => "#{url}/authorize",
-        "token_endpoint" => "#{url}/token",
-        "userinfo_endpoint" => "#{url}/userinfo"
-      }))
+      |> Plug.Conn.resp(
+        200,
+        Jason.encode!(%{
+          "issuer" => url,
+          "authorization_endpoint" => "#{url}/authorize",
+          "token_endpoint" => "#{url}/token",
+          "userinfo_endpoint" => "#{url}/userinfo"
+        })
+      )
     end)
   end
 
@@ -60,7 +63,11 @@ defmodule HomelabWeb.AuthControllerTest do
 
     setup :setup_oidc_bypass
 
-    test "redirects to OIDC provider when configured", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "redirects to OIDC provider when configured", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       stub_discovery(bypass, url)
 
       conn = get(conn, "/auth/oidc")
@@ -122,27 +129,37 @@ defmodule HomelabWeb.AuthControllerTest do
 
     setup :setup_oidc_bypass
 
-    test "successful OIDC flow creates user and redirects", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "successful OIDC flow creates user and redirects", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       state = "test-state-value"
       stub_discovery(bypass, url)
 
       Bypass.expect_once(bypass, "POST", "/token", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "access_token" => "test-access-token",
-          "token_type" => "Bearer"
-        }))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "test-access-token",
+            "token_type" => "Bearer"
+          })
+        )
       end)
 
       Bypass.expect_once(bypass, "GET", "/userinfo", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "sub" => "oidc-callback-test-sub",
-          "email" => "callback@test.com",
-          "name" => "Callback User"
-        }))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "sub" => "oidc-callback-test-sub",
+            "email" => "callback@test.com",
+            "name" => "Callback User"
+          })
+        )
       end)
 
       conn =
@@ -156,7 +173,10 @@ defmodule HomelabWeb.AuthControllerTest do
       assert get_session(conn, :oidc_state) == nil
     end
 
-    test "redirects with error when discovery fails during callback", %{conn: conn, bypass: bypass} do
+    test "redirects with error when discovery fails during callback", %{
+      conn: conn,
+      bypass: bypass
+    } do
       state = "test-state"
 
       Bypass.stub(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
@@ -174,20 +194,28 @@ defmodule HomelabWeb.AuthControllerTest do
           assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "Failed to discover"
         end)
 
-      assert log =~ "OIDC discovery failed for http://localhost:#{bypass.port}: {:http_error, 500}"
+      assert log =~
+               "OIDC discovery failed for http://localhost:#{bypass.port}: {:http_error, 500}"
     end
 
-    test "redirects with error when token exchange returns non-200", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "redirects with error when token exchange returns non-200", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       state = "test-state"
       stub_discovery(bypass, url)
 
       Bypass.expect_once(bypass, "POST", "/token", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(400, Jason.encode!(%{
-          "error" => "invalid_grant",
-          "error_description" => "Code has expired"
-        }))
+        |> Plug.Conn.resp(
+          400,
+          Jason.encode!(%{
+            "error" => "invalid_grant",
+            "error_description" => "Code has expired"
+          })
+        )
       end)
 
       log =
@@ -207,7 +235,11 @@ defmodule HomelabWeb.AuthControllerTest do
       assert log =~ "OIDC token exchange failed: {:token_error, 400,"
     end
 
-    test "redirects with error when token exchange returns non-200 with plain body", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "redirects with error when token exchange returns non-200 with plain body", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       state = "test-state"
       stub_discovery(bypass, url)
 
@@ -232,7 +264,11 @@ defmodule HomelabWeb.AuthControllerTest do
       assert log =~ "OIDC token exchange failed: {:token_error, 500,"
     end
 
-    test "redirects with error when token exchange returns non-200 with error key only", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "redirects with error when token exchange returns non-200 with error key only", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       state = "test-state"
       stub_discovery(bypass, url)
 
@@ -258,17 +294,24 @@ defmodule HomelabWeb.AuthControllerTest do
       assert log =~ "OIDC token exchange failed: {:token_error, 401,"
     end
 
-    test "redirects with error when userinfo fetch fails", %{conn: conn, bypass: bypass, oidc_url: url} do
+    test "redirects with error when userinfo fetch fails", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
       state = "test-state"
       stub_discovery(bypass, url)
 
       Bypass.expect_once(bypass, "POST", "/token", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "access_token" => "test-access-token",
-          "token_type" => "Bearer"
-        }))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "test-access-token",
+            "token_type" => "Bearer"
+          })
+        )
       end)
 
       Bypass.expect_once(bypass, "GET", "/userinfo", fn conn ->

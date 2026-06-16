@@ -3,9 +3,15 @@ defmodule Homelab.Deployments.Deployment do
   import Ecto.Changeset
 
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
+  @storage_backends [:docker_volume, :zfs]
+  @placement_affinities [:any, :fixed_node]
 
   schema "deployments" do
     field :status, Ecto.Enum, values: @statuses, default: :pending
+    field :storage_backend, Ecto.Enum, values: @storage_backends, default: :docker_volume
+    field :image_digest_pin, :string
+    field :placement_affinity, Ecto.Enum, values: @placement_affinities, default: :any
+    field :pinned_node_id, :string
     field :external_id, :string
     field :domain, :string
     field :env_overrides, :map, default: %{}
@@ -24,7 +30,8 @@ defmodule Homelab.Deployments.Deployment do
   end
 
   @required_fields ~w(tenant_id app_template_id)a
-  @optional_fields ~w(status external_id domain env_overrides computed_spec
+  @optional_fields ~w(status storage_backend image_digest_pin placement_affinity pinned_node_id
+                      external_id domain env_overrides computed_spec
                       last_reconciled_at error_message)a
 
   def changeset(deployment, attrs) do

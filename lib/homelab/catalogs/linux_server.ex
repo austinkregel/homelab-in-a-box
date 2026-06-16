@@ -62,7 +62,9 @@ defmodule Homelab.Catalogs.LinuxServer do
   end
 
   defp fetch_and_cache_catalog(cache_key) do
-    base = Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://api.linuxserver.io"
+    base =
+      Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://api.linuxserver.io"
+
     case Req.get("#{base}/api/v1/images?include_config=true") do
       {:ok, %{status: 200, body: body}} ->
         entries = parse_response(body)

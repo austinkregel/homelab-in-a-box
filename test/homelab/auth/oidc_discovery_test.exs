@@ -53,7 +53,8 @@ defmodule Homelab.Auth.OidcDiscoveryTest do
         Plug.Conn.resp(conn, 404, "Not Found")
       end)
 
-      assert {:error, {:http_error, 404}} = OidcDiscovery.discover("http://localhost:#{bypass.port}")
+      assert {:error, {:http_error, 404}} =
+               OidcDiscovery.discover("http://localhost:#{bypass.port}")
     end
 
     test "returns error for connection failures" do

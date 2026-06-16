@@ -13,15 +13,28 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def docker_hub(bypass, opts \\ []) do
-    search_results = Keyword.get(opts, :search_results, [
-      %{"repo_name" => "nginx", "repo_owner" => "library", "short_description" => "Nginx web server",
-        "star_count" => 1000, "pull_count" => 500_000, "is_official" => true}
-    ])
+    search_results =
+      Keyword.get(opts, :search_results, [
+        %{
+          "repo_name" => "nginx",
+          "repo_owner" => "library",
+          "short_description" => "Nginx web server",
+          "star_count" => 1000,
+          "pull_count" => 500_000,
+          "is_official" => true
+        }
+      ])
 
-    tag_results = Keyword.get(opts, :tag_results, [
-      %{"name" => "latest", "digest" => "sha256:abc123", "last_updated" => "2024-01-01T00:00:00Z",
-        "full_size" => 50_000_000, "images" => [%{"architecture" => "amd64"}]}
-    ])
+    tag_results =
+      Keyword.get(opts, :tag_results, [
+        %{
+          "name" => "latest",
+          "digest" => "sha256:abc123",
+          "last_updated" => "2024-01-01T00:00:00Z",
+          "full_size" => 50_000_000,
+          "images" => [%{"architecture" => "amd64"}]
+        }
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       cond do
@@ -40,19 +53,24 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def ghcr(bypass, opts \\ []) do
-    packages = Keyword.get(opts, :packages, [
-      %{"name" => "myapp", "html_url" => "https://github.com/org/myapp"}
-    ])
+    packages =
+      Keyword.get(opts, :packages, [
+        %{"name" => "myapp", "html_url" => "https://github.com/org/myapp"}
+      ])
 
-    versions = Keyword.get(opts, :versions, [
-      %{"name" => "v1.0.0", "created_at" => "2024-01-01T00:00:00Z",
-        "metadata" => %{"container" => %{"tags" => ["latest", "v1.0.0"]}}}
-    ])
+    versions =
+      Keyword.get(opts, :versions, [
+        %{
+          "name" => "v1.0.0",
+          "created_at" => "2024-01-01T00:00:00Z",
+          "metadata" => %{"container" => %{"tags" => ["latest", "v1.0.0"]}}
+        }
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       cond do
         String.contains?(conn.request_path, "/packages/container/") and
-          String.contains?(conn.request_path, "/versions") ->
+            String.contains?(conn.request_path, "/versions") ->
           json_resp(conn, 200, versions)
 
         String.contains?(conn.request_path, "/packages") ->
@@ -67,13 +85,20 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def ecr(bypass, opts \\ []) do
-    repos = Keyword.get(opts, :repositories, [
-      %{"repositoryName" => "nginx", "repositoryDescription" => "Nginx image"}
-    ])
+    repos =
+      Keyword.get(opts, :repositories, [
+        %{"repositoryName" => "nginx", "repositoryDescription" => "Nginx image"}
+      ])
 
-    tags = Keyword.get(opts, :tags, [
-      %{"imageTag" => "latest", "imageDigest" => "sha256:abc", "imagePushedAt" => 1704067200, "imageSizeInBytes" => 50_000_000}
-    ])
+    tags =
+      Keyword.get(opts, :tags, [
+        %{
+          "imageTag" => "latest",
+          "imageDigest" => "sha256:abc",
+          "imagePushedAt" => 1_704_067_200,
+          "imageSizeInBytes" => 50_000_000
+        }
+      ])
 
     Bypass.stub(bypass, "POST", "/", fn conn ->
       {:ok, _body, conn} = Plug.Conn.read_body(conn)
@@ -98,9 +123,17 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def cloudflare_dns(bypass, opts \\ []) do
-    records = Keyword.get(opts, :records, [
-      %{"id" => "rec_1", "name" => "app.example.com", "type" => "A", "content" => "1.2.3.4", "ttl" => 300, "proxied" => false}
-    ])
+    records =
+      Keyword.get(opts, :records, [
+        %{
+          "id" => "rec_1",
+          "name" => "app.example.com",
+          "type" => "A",
+          "content" => "1.2.3.4",
+          "ttl" => 300,
+          "proxied" => false
+        }
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       cond do
@@ -133,9 +166,15 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def cloudflare_registrar(bypass, opts \\ []) do
-    zones = Keyword.get(opts, :zones, [
-      %{"name" => "example.com", "id" => "zone_1", "status" => "active", "name_servers" => ["ns1.cloudflare.com", "ns2.cloudflare.com"]}
-    ])
+    zones =
+      Keyword.get(opts, :zones, [
+        %{
+          "name" => "example.com",
+          "id" => "zone_1",
+          "status" => "active",
+          "name_servers" => ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+        }
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       if conn.method == "GET" and String.contains?(conn.request_path, "/zones") do
@@ -161,13 +200,15 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def pihole(bypass, opts \\ []) do
-    cname_records = Keyword.get(opts, :cname_records, [
-      %{"domain" => "app.local", "target" => "server.local"}
-    ])
+    cname_records =
+      Keyword.get(opts, :cname_records, [
+        %{"domain" => "app.local", "target" => "server.local"}
+      ])
 
-    a_records = Keyword.get(opts, :a_records, [
-      %{"domain" => "host.local", "ip" => "192.168.1.10"}
-    ])
+    a_records =
+      Keyword.get(opts, :a_records, [
+        %{"domain" => "host.local", "ip" => "192.168.1.10"}
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       cond do
@@ -192,9 +233,16 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def unifi(bypass, opts \\ []) do
-    records = Keyword.get(opts, :records, [
-      %{"_id" => "rec_1", "key" => "app.local", "record_type" => "A", "value" => "192.168.1.10", "ttl" => 300}
-    ])
+    records =
+      Keyword.get(opts, :records, [
+        %{
+          "_id" => "rec_1",
+          "key" => "app.local",
+          "record_type" => "A",
+          "value" => "192.168.1.10",
+          "ttl" => 300
+        }
+      ])
 
     Bypass.stub(bypass, :any, :any, fn conn ->
       cond do
@@ -227,13 +275,14 @@ defmodule Homelab.TestFixtures.ApiServer do
   end
 
   def traefik_metrics(bypass, opts \\ []) do
-    metrics_text = Keyword.get(opts, :metrics, """
-    traefik_service_requests_total{code="200",method="GET",protocol="http",service="myapp@docker"} 150
-    traefik_service_requests_total{code="404",method="GET",protocol="http",service="myapp@docker"} 5
-    traefik_service_requests_total{code="500",method="GET",protocol="http",service="myapp@docker"} 2
-    traefik_service_requests_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 1024000
-    traefik_service_responses_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 5120000
-    """)
+    metrics_text =
+      Keyword.get(opts, :metrics, """
+      traefik_service_requests_total{code="200",method="GET",protocol="http",service="myapp@docker"} 150
+      traefik_service_requests_total{code="404",method="GET",protocol="http",service="myapp@docker"} 5
+      traefik_service_requests_total{code="500",method="GET",protocol="http",service="myapp@docker"} 2
+      traefik_service_requests_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 1024000
+      traefik_service_responses_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 5120000
+      """)
 
     Bypass.stub(bypass, "GET", "/metrics", fn conn ->
       conn

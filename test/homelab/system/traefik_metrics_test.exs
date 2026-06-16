@@ -8,7 +8,10 @@ defmodule Homelab.System.TraefikMetricsTest do
     bypass = Bypass.open()
     ApiServer.traefik_metrics(bypass)
 
-    Application.put_env(:homelab, TraefikMetrics, metrics_url: "http://localhost:#{bypass.port}/metrics")
+    Application.put_env(:homelab, TraefikMetrics,
+      metrics_url: "http://localhost:#{bypass.port}/metrics"
+    )
+
     on_exit(fn -> Application.delete_env(:homelab, TraefikMetrics) end)
 
     {:ok, bypass: bypass}

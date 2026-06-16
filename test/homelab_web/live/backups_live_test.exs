@@ -26,6 +26,24 @@ defmodule HomelabWeb.BackupsLiveTest do
     |> stub(:restore, fn _snapshot_id, _opts -> :ok end)
     |> stub(:list_snapshots, fn _dep_id -> {:ok, []} end)
 
+    Homelab.Mocks.Restic.Driver
+    |> stub(:init_repo, fn _, _, _ -> :ok end)
+    |> stub(:backup, fn _, _, _, _, _ ->
+      {:ok,
+       %{
+         snapshot_id: "test_snap_#{System.unique_integer([:positive])}",
+         files_new: 1,
+         files_changed: 0,
+         files_unmodified: 0,
+         bytes_added: 1024,
+         total_bytes: 1024
+       }}
+    end)
+    |> stub(:check, fn _, _, _ -> :ok end)
+    |> stub(:restore, fn _, _, _, _, _ -> :ok end)
+    |> stub(:list_snapshots, fn _, _, _, _ -> {:ok, []} end)
+    |> stub(:forget, fn _, _, _, _ -> {:ok, %{"forgot" => 0, "kept" => 0}} end)
+
     {:ok, conn: conn, tenant: tenant, template: template}
   end
 
@@ -72,9 +90,7 @@ defmodule HomelabWeb.BackupsLiveTest do
         )
 
       {:ok,
-       deployment: deployment,
-       completed_backup: completed_backup,
-       pending_backup: pending_backup}
+       deployment: deployment, completed_backup: completed_backup, pending_backup: pending_backup}
     end
 
     test "shows backup table", %{conn: conn, template: template} do
@@ -119,6 +135,7 @@ defmodule HomelabWeb.BackupsLiveTest do
       assert html =~ "trigger_backup" or has_element?(view, "[phx-click=trigger_backup]")
 
       html = render_click(view, "toggle_backup_dropdown", %{})
+
       refute has_element?(view, "[phx-click=trigger_backup][phx-value-deployment_id]") and
                html =~ "SHOULD_NOT_MATCH"
     end
@@ -236,7 +253,7 @@ defmodule HomelabWeb.BackupsLiveTest do
       html =
         render_click(view, "trigger_backup", %{"deployment_id" => "0"})
 
-      assert html =~ "Failed to create backup job"
+      assert html =~ "Deployment not found"
     end
   end
 
@@ -316,7 +333,6 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, _view, html} = live(conn, ~p"/backups")
       assert html =~ "Failed"
     end
-
   end
 
   describe "backup with running status and additional checks" do
@@ -357,7 +373,10 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, deployment: deployment}
     end
 
-    test "shows dash instead of restore button when completed but no snapshot_id", %{conn: conn, deployment: dep} do
+    test "shows dash instead of restore button when completed but no snapshot_id", %{
+      conn: conn,
+      deployment: dep
+    } do
       insert(:backup_job,
         deployment: dep,
         status: :completed,

@@ -150,11 +150,25 @@ defmodule Homelab.Settings do
     end
   end
 
-  defp decode_value(%SystemSetting{encrypted: true, value: value}) when is_binary(value) do
+  defp decode_value(%SystemSetting{vault_ref: ref}) when is_binary(ref) and ref != "" do
+    case Homelab.Storage.Secrets.read(ref) do
+      {:ok, value} -> value
+      {:error, :vault_unavailable} -> raise_vault_unavailable(ref)
+      {:error, _} -> nil
+    end
+  end
+
+  defp decode_value(%SystemSetting{encrypted: true, value: value})
+       when is_binary(value) and value != "" do
     decrypt(value)
   end
 
   defp decode_value(%SystemSetting{value: value}), do: value
+
+  defp raise_vault_unavailable(ref) do
+    raise Homelab.Storage.Secrets.VaultUnavailableError,
+      message: "Vault is sealed or unreachable; cannot read #{ref}"
+  end
 
   defp encrypt(plaintext) do
     secret = encryption_key()

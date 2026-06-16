@@ -9,6 +9,7 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
     :persistent_term.erase({AwesomeSelfhosted, :catalog})
     bypass = Bypass.open()
     base_url = "http://localhost:#{bypass.port}"
+
     Application.put_env(:homelab, AwesomeSelfhosted,
       github_api_url: base_url,
       raw_url: base_url
@@ -43,13 +44,16 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
           String.contains?(conn.request_path, "/git/trees/") ->
             conn
             |> Plug.Conn.put_resp_content_type("application/json")
-            |> Plug.Conn.resp(200, Jason.encode!(%{
-              "tree" => [
-                %{"path" => "software/nextcloud.yml", "type" => "blob"},
-                %{"path" => "software/gitea.yml", "type" => "blob"},
-                %{"path" => "README.md", "type" => "blob"}
-              ]
-            }))
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "tree" => [
+                  %{"path" => "software/nextcloud.yml", "type" => "blob"},
+                  %{"path" => "software/gitea.yml", "type" => "blob"},
+                  %{"path" => "README.md", "type" => "blob"}
+                ]
+              })
+            )
 
           String.contains?(conn.request_path, "nextcloud.yml") ->
             Plug.Conn.resp(conn, 200, """
@@ -129,9 +133,12 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
           String.contains?(conn.request_path, "/git/trees/") ->
             conn
             |> Plug.Conn.put_resp_content_type("application/json")
-            |> Plug.Conn.resp(200, Jason.encode!(%{
-              "tree" => [%{"path" => "software/noname.yml", "type" => "blob"}]
-            }))
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "tree" => [%{"path" => "software/noname.yml", "type" => "blob"}]
+              })
+            )
 
           String.contains?(conn.request_path, "noname.yml") ->
             Plug.Conn.resp(conn, 200, """
@@ -167,7 +174,11 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
   describe "search/2" do
     test "filters by name" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "Nextcloud", description: "Cloud", categories: ["Cloud"]},
+        %Homelab.Catalog.CatalogEntry{
+          name: "Nextcloud",
+          description: "Cloud",
+          categories: ["Cloud"]
+        },
         %Homelab.Catalog.CatalogEntry{name: "Gitea", description: "Git", categories: ["Dev"]}
       ]
 
@@ -180,7 +191,11 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
 
     test "filters by description" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "Nextcloud", description: "Cloud storage", categories: []},
+        %Homelab.Catalog.CatalogEntry{
+          name: "Nextcloud",
+          description: "Cloud storage",
+          categories: []
+        },
         %Homelab.Catalog.CatalogEntry{name: "Gitea", description: "Git hosting", categories: []}
       ]
 
@@ -192,8 +207,16 @@ defmodule Homelab.Catalogs.AwesomeSelfhostedTest do
 
     test "filters by category" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "Nextcloud", description: "Cloud", categories: ["Cloud Storage"]},
-        %Homelab.Catalog.CatalogEntry{name: "Gitea", description: "Git", categories: ["Development"]}
+        %Homelab.Catalog.CatalogEntry{
+          name: "Nextcloud",
+          description: "Cloud",
+          categories: ["Cloud Storage"]
+        },
+        %Homelab.Catalog.CatalogEntry{
+          name: "Gitea",
+          description: "Git",
+          categories: ["Development"]
+        }
       ]
 
       :persistent_term.put({AwesomeSelfhosted, :catalog}, entries)

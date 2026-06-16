@@ -1,0 +1,17 @@
+# Agent-agnostic git hooks — install: pre-commit install
+# https://pre-commit.com/
+
+repos:
+  - repo: local
+    hooks:
+      - id: mix-precommit
+        name: mix precommit
+        entry: mix precommit
+        language: system
+        pass_filenames: false
+        files: \.(ex|exs|heex)$
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

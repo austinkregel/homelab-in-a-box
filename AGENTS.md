@@ -1,5 +1,47 @@
 This is a web application written using the Phoenix web framework.
 
+## Homelab-in-a-Box (project-specific)
+
+**Homelab-in-a-Box** is a Docker-native self-hosting control plane: Phoenix LiveView UI, Docker Engine API orchestration, Traefik gateway, Restic backups, DNS/registrar integrations, and multi-tenant spaces. It is **not** Kubernetes-first.
+
+### Related repository
+
+The operator's live Compose stack lives separately (e.g. `homelab` repo): Nginx Proxy Manager, Prometheus, Grafana, Alertmanager, Healthchecks, aut.hair OIDC, and a restricted **docker-socket-proxy**. This app uses **Traefik** and mounts the Docker socket directly — do not confuse the two stacks.
+
+### Auth in this codebase
+
+- Web UI: `current_user` assign + `HomelabWeb.Live.Hooks` / `RequireAuth` plug — **not** Phoenix v1.8 `current_scope`
+- OIDC via setup wizard and `AuthController`
+- REST `/api/v1/*` has **no authentication** today — treat as a known gap; do not expose without a plug
+
+### Testing rules
+
+- Use **Mox** and behaviour fakes from `test/support/mocks.ex` and `config/test.exs`
+- **Never** call real Docker, ZFS, or Restic in tests — use fake drivers (`Restic.Driver.Fake`, etc.)
+- Use `start_supervised!/1` in tests; avoid `Process.sleep/1`
+- Prefer `has_element?(view, "#dom-id")` over raw HTML assertions
+
+### Security boundaries
+
+- Do not commit secrets, `.env`, or copy values from `build_from_scratch.sh` — use `.env.example`
+- `Homelab.Storage.Secrets` Vault backend is a stub; settings encryption uses `SECRET_KEY_BASE`
+- Control-plane container runs with Docker socket access — high privilege
+- Prefer documenting socket-proxy patterns from the homelab stack over widening socket access
+
+### Agent commands
+
+```bash
+mix precommit              # required before finishing (compile, format, credo, test)
+mix precommit.ci           # full gate (sobelow, deps.audit, format --check)
+mix test test/path/file.exs:42
+```
+
+### Supplementary playbooks
+
+See [`docs/agent/`](docs/agent/) for domain, security, homelab stack ops, incident triage, LiveView review, and MCP setup (`mcp.json.example`).
+
+---
+
 ## Project guidelines
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues

@@ -1,0 +1,12 @@
+# Sobelow config for homelab-in-a-box.
+# HTTPS/CSP are enforced at the reverse proxy (Traefik/NPM), not always in Phoenix config.
+[
+  verbose: false,
+  private: false,
+  skip: false,
+  router: "",
+  exit: "false",
+  format: "txt",
+  ignore: ["Config.CSP", "Config.HTTPS"],
+  ignore_files: []
+]

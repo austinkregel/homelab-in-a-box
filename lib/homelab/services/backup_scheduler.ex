@@ -48,6 +48,7 @@ defmodule Homelab.Services.BackupScheduler do
   @impl true
   def handle_info(:check_schedules, state) do
     now = DateTime.utc_now()
+    _ = Homelab.Backups.enqueue_due_scheduled_backups(now)
     due_jobs = Homelab.Backups.list_due_backups(now)
 
     dispatched =

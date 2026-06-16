@@ -120,7 +120,10 @@ defmodule Homelab.Catalog.Enrichers.RepoScanner do
     branches = ["main", "master"]
 
     Enum.find_value(branches, fn branch ->
-      base = Application.get_env(:homelab, __MODULE__, [])[:base_url] || "https://raw.githubusercontent.com"
+      base =
+        Application.get_env(:homelab, __MODULE__, [])[:base_url] ||
+          "https://raw.githubusercontent.com"
+
       url = "#{base}/#{owner}/#{repo}/#{branch}/#{path}"
 
       case Req.get(url, receive_timeout: 10_000) do

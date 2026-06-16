@@ -1,0 +1,68 @@
+{
+  "_comment": "Copy to your agent MCP config. Secrets via environment variables only — never commit tokens.",
+  "_paths": {
+    "cursor": "~/.cursor/mcp.json or .cursor/mcp.json",
+    "claude_code": "~/.claude/mcp.json",
+    "vscode_copilot": ".vscode/mcp.json",
+    "windsurf": "~/.codeium/windsurf/mcp_config.json"
+  },
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "tidewave": {
+      "url": "http://localhost:4000/tidewave/mcp",
+      "_note": "Requires {:tidewave, ...} in mix.exs dev deps and plug in endpoint.ex"
+    },
+    "github": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}"
+      }
+    },
+    "grafana": {
+      "_enabled": "ops / incident triage only",
+      "command": "uvx",
+      "args": ["mcp-grafana"],
+      "env": {
+        "GRAFANA_URL": "http://localhost:3000",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "${env:GRAFANA_SERVICE_ACCOUNT_TOKEN}"
+      }
+    },
+    "prometheus": {
+      "_enabled": "ops / incident triage only",
+      "command": "uvx",
+      "args": ["prometheus-mcp-server"],
+      "env": {
+        "PROMETHEUS_URL": "http://localhost:9090"
+      }
+    },
+    "alertmanager": {
+      "_enabled": "ops / incident triage only",
+      "command": "uvx",
+      "args": ["alertmanager-mcp-server"],
+      "env": {
+        "ALERTMANAGER_URL": "http://localhost:9093"
+      }
+    },
+    "trivy": {
+      "_enabled": "pre-deploy image scans",
+      "command": "trivy",
+      "args": ["mcp", "--transport", "stdio"]
+    },
+    "semgrep": {
+      "_enabled": "optional SAST",
+      "command": "semgrep",
+      "args": ["mcp"]
+    }
+  }
+}

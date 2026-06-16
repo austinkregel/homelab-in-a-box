@@ -106,7 +106,7 @@ defmodule Homelab.Catalog.MetadataEnricher do
     end
   end
 
-  defp merge_into_entry(entry, image_result, repo_result) do
+  defp merge_into_entry(%CatalogEntry{} = entry, image_result, repo_result) do
     enriched_ports =
       pick_first_nonempty([
         repo_result && repo_result[:ports],

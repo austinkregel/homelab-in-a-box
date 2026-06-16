@@ -16,7 +16,9 @@ defmodule Homelab.MixProject do
       preferred_cli_env: [
         coveralls: :test,
         "coveralls.detail": :test,
-        "coveralls.html": :test
+        "coveralls.html": :test,
+        precommit: :test,
+        "precommit.ci": :test
       ]
     ]
   end
@@ -33,7 +35,7 @@ defmodule Homelab.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, "precommit.ci": :test]
     ]
   end
 
@@ -46,10 +48,10 @@ defmodule Homelab.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:phoenix, "~> 1.8.3"},
+      {:phoenix, "~> 1.8.6"},
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.13"},
-      {:postgrex, ">= 0.0.0"},
+      {:postgrex, ">= 0.22.2"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.1.0"},
@@ -72,7 +74,7 @@ defmodule Homelab.MixProject do
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"},
+      {:bandit, "~> 1.11"},
       {:dotenvy, "~> 1.0"},
       # Testing
       {:mox, "~> 1.1", only: :test},
@@ -82,7 +84,9 @@ defmodule Homelab.MixProject do
       {:excoveralls, "~> 0.18", only: :test},
       # Static analysis
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -105,7 +109,22 @@ defmodule Homelab.MixProject do
         "esbuild homelab --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "credo --min-priority high --mute-exit-status",
+        "test"
+      ],
+      "precommit.ci": [
+        "compile --warnings-as-errors",
+        "format --check-formatted",
+        "credo --min-priority high --mute-exit-status",
+        "sobelow --config",
+        "deps.audit --ignore-file mix_audit.ignore",
+        "hex.audit",
+        "test"
+      ]
     ]
   end
 end

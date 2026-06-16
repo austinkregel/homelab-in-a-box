@@ -32,7 +32,8 @@ defmodule Homelab.Deployments.SpecBuilder do
     template = deployment.app_template
     tenant = deployment.tenant
 
-    with :ok <- validate_required_env(template, deployment.env_overrides) do
+    with :ok <- validate_required_env(template, deployment.env_overrides),
+         {:ok, volumes} <- build_volumes(deployment, template, tenant) do
       service_mode? = template.exposure_mode == :service
       ports = build_ports(template, service_mode?)
 
@@ -44,9 +45,10 @@ defmodule Homelab.Deployments.SpecBuilder do
 
       spec = %{
         service_name: service_name(tenant, template),
-        image: template.image,
+        image: resolve_image(deployment, template),
         env: build_env(template, tenant, deployment),
-        volumes: build_volumes(template, tenant),
+        volumes: volumes,
+        placement_constraints: build_placement_constraints(deployment),
         ports: ports,
         network: primary_network,
         bridge_networks: bridge_networks,
@@ -149,18 +151,48 @@ defmodule Homelab.Deployments.SpecBuilder do
     }
   end
 
-  defp build_volumes(template, tenant) do
-    (template.volumes || [])
-    |> Enum.map(fn vol ->
-      container_path = vol["container_path"] || vol["path"] || "/data"
-
-      %{
-        source: volume_name(tenant.slug, template.slug, container_path),
-        target: container_path,
-        type: "volume"
-      }
-    end)
+  defp build_volumes(%Deployment{storage_backend: :zfs}, _template, _tenant) do
+    if Homelab.Storage.available?() do
+      {:error,
+       {:storage_dataset_create_failed, "ZFS volume mode not yet enabled without pool setup"}}
+    else
+      {:error,
+       {:storage_unavailable,
+        "ZFS storage backend requires homelab-zfs-agent; use docker_volume until ZFS is installed"}}
+    end
   end
+
+  defp build_volumes(%Deployment{} = _deployment, template, tenant) do
+    volumes =
+      (template.volumes || [])
+      |> Enum.map(fn vol ->
+        container_path = vol["container_path"] || vol["path"] || "/data"
+
+        %{
+          source: volume_name(tenant.slug, template.slug, container_path),
+          target: container_path,
+          type: "volume"
+        }
+      end)
+
+    {:ok, volumes}
+  end
+
+  defp resolve_image(%Deployment{image_digest_pin: pin}, _template)
+       when is_binary(pin) and pin != "",
+       do: pin
+
+  defp resolve_image(_deployment, template), do: template.image
+
+  defp build_placement_constraints(%Deployment{
+         placement_affinity: :fixed_node,
+         pinned_node_id: id
+       })
+       when is_binary(id) and id != "" do
+    [%{"constraint" => "node.id", "value" => id}]
+  end
+
+  defp build_placement_constraints(_), do: []
 
   defp volume_name(tenant_slug, app_slug, container_path) do
     path_slug =

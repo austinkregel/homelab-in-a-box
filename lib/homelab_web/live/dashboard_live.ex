@@ -18,6 +18,8 @@ defmodule HomelabWeb.DashboardLive do
     socket =
       socket
       |> assign(:page_title, "Dashboard")
+      |> assign(:storage_available, Homelab.Storage.available?())
+      |> assign(:storage_reason, Homelab.Storage.unavailable_reason())
       |> assign(:show_create_space, false)
       |> assign(:space_form, to_form(Tenants.change_tenant(%Tenant{})))
       |> assign(:metrics, nil)
@@ -164,6 +166,8 @@ defmodule HomelabWeb.DashboardLive do
             <span>Deploy App</span>
           </.link>
         </div>
+
+        <.storage_unavailable :if={!@storage_available} reason={@storage_reason} />
 
         <%!-- System health --%>
         <%= if @metrics do %>

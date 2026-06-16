@@ -30,21 +30,30 @@ defmodule HomelabWeb.BackupsLive do
   def handle_event("trigger_backup", %{"deployment_id" => deployment_id}, socket) do
     deployment_id = String.to_integer(deployment_id)
 
-    case Backups.create_backup_job(%{
-           deployment_id: deployment_id,
-           scheduled_at: DateTime.utc_now()
-         }) do
-      {:ok, job} ->
-        Backups.execute_backup(job)
+    with {:ok, deployment} <- Deployments.get_deployment(deployment_id),
+         target_ref <- Backups.default_restic_lan_target_ref(deployment) do
+      case Backups.create_backup_job(%{
+             deployment_id: deployment_id,
+             tier: :restic_lan,
+             provider_driver_id: "restic_lan",
+             target_ref: target_ref,
+             scheduled_at: DateTime.utc_now()
+           }) do
+        {:ok, job} ->
+          Backups.execute_backup(job)
 
-        {:noreply,
-         socket
-         |> assign(:backups, Backups.list_backup_jobs())
-         |> assign(:show_backup_dropdown, false)
-         |> put_flash(:info, "Backup triggered successfully!")}
+          {:noreply,
+           socket
+           |> assign(:backups, Backups.list_backup_jobs())
+           |> assign(:show_backup_dropdown, false)
+           |> put_flash(:info, "Backup triggered successfully!")}
 
-      {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Failed to create backup job")}
+        {:error, _changeset} ->
+          {:noreply, put_flash(socket, :error, "Failed to create backup job")}
+      end
+    else
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Deployment not found")}
     end
   end
 

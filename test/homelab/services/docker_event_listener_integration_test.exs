@@ -13,7 +13,9 @@ defmodule Homelab.Services.DockerEventListenerIntegrationTest do
     end
 
     on_exit(fn ->
-      case Client.get("/containers/json?all=true&filters=#{URI.encode_www_form(Jason.encode!(%{"label" => ["homelab.test=true"]}))}" ) do
+      case Client.get(
+             "/containers/json?all=true&filters=#{URI.encode_www_form(Jason.encode!(%{"label" => ["homelab.test=true"]}))}"
+           ) do
         {:ok, containers} when is_list(containers) ->
           Enum.each(containers, fn c ->
             Client.delete("/containers/#{c["Id"]}?force=true")
@@ -41,7 +43,10 @@ defmodule Homelab.Services.DockerEventListenerIntegrationTest do
         "Cmd" => ["sleep", "30"]
       }
 
-      case Client.post("/containers/create?name=homelab-integration-test-#{System.unique_integer([:positive])}", body) do
+      case Client.post(
+             "/containers/create?name=homelab-integration-test-#{System.unique_integer([:positive])}",
+             body
+           ) do
         {:ok, %{"Id" => id}} ->
           Client.post("/containers/#{id}/start")
           Process.sleep(2_000)

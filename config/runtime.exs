@@ -15,6 +15,10 @@ config :homelab, HomelabWeb.Endpoint,
 bootstrap? = System.get_env("BOOTSTRAP") in ~w(true 1)
 config :homelab, bootstrap: bootstrap?
 
+if path = System.get_env("HOMELAB_ZFS_AGENT_SOCKET") do
+  config :homelab, :zfs_agent_socket, path
+end
+
 if bootstrap? do
   config :homelab, :docker_socket, System.get_env("DOCKER_SOCKET", "/var/run/docker.sock")
 
