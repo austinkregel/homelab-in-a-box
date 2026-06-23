@@ -38,14 +38,32 @@ defmodule Homelab.Catalogs.HotioTest do
       Bypass.stub(bypass, :any, :any, fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "results" => [
-            %{"name" => "radarr", "description" => "Movie automation", "star_count" => 50, "pull_count" => 100000},
-            %{"name" => "sonarr", "description" => "TV automation", "star_count" => 40, "pull_count" => 80000},
-            %{"name" => "plex", "description" => "Media server", "star_count" => 30, "pull_count" => 60000}
-          ],
-          "next" => nil
-        }))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "results" => [
+              %{
+                "name" => "radarr",
+                "description" => "Movie automation",
+                "star_count" => 50,
+                "pull_count" => 100_000
+              },
+              %{
+                "name" => "sonarr",
+                "description" => "TV automation",
+                "star_count" => 40,
+                "pull_count" => 80000
+              },
+              %{
+                "name" => "plex",
+                "description" => "Media server",
+                "star_count" => 30,
+                "pull_count" => 60000
+              }
+            ],
+            "next" => nil
+          })
+        )
       end)
 
       {:ok, entries} = Hotio.browse()
@@ -85,12 +103,21 @@ defmodule Homelab.Catalogs.HotioTest do
         body =
           if count == 1 do
             %{
-              "results" => [%{"name" => "radarr", "description" => "Movie", "star_count" => 1, "pull_count" => 1}],
+              "results" => [
+                %{
+                  "name" => "radarr",
+                  "description" => "Movie",
+                  "star_count" => 1,
+                  "pull_count" => 1
+                }
+              ],
               "next" => "http://localhost:#{bypass.port}/v2/repositories/hotio/?page=2"
             }
           else
             %{
-              "results" => [%{"name" => "sonarr", "description" => "TV", "star_count" => 1, "pull_count" => 1}],
+              "results" => [
+                %{"name" => "sonarr", "description" => "TV", "star_count" => 1, "pull_count" => 1}
+              ],
               "next" => nil
             }
           end
@@ -123,8 +150,16 @@ defmodule Homelab.Catalogs.HotioTest do
   describe "search/2" do
     test "filters by name" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "radarr", description: "Movie automation", categories: ["Automation"]},
-        %Homelab.Catalog.CatalogEntry{name: "sonarr", description: "TV automation", categories: ["Automation"]}
+        %Homelab.Catalog.CatalogEntry{
+          name: "radarr",
+          description: "Movie automation",
+          categories: ["Automation"]
+        },
+        %Homelab.Catalog.CatalogEntry{
+          name: "sonarr",
+          description: "TV automation",
+          categories: ["Automation"]
+        }
       ]
 
       :persistent_term.put({Hotio, :catalog}, entries)
@@ -137,7 +172,11 @@ defmodule Homelab.Catalogs.HotioTest do
     test "filters by category" do
       entries = [
         %Homelab.Catalog.CatalogEntry{name: "plex", description: "Media", categories: ["Media"]},
-        %Homelab.Catalog.CatalogEntry{name: "radarr", description: "Automation", categories: ["Automation"]}
+        %Homelab.Catalog.CatalogEntry{
+          name: "radarr",
+          description: "Automation",
+          categories: ["Automation"]
+        }
       ]
 
       :persistent_term.put({Hotio, :catalog}, entries)

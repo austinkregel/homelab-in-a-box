@@ -72,9 +72,7 @@ defmodule HomelabWeb.BackupsLiveTest do
         )
 
       {:ok,
-       deployment: deployment,
-       completed_backup: completed_backup,
-       pending_backup: pending_backup}
+       deployment: deployment, completed_backup: completed_backup, pending_backup: pending_backup}
     end
 
     test "shows backup table", %{conn: conn, template: template} do
@@ -119,6 +117,7 @@ defmodule HomelabWeb.BackupsLiveTest do
       assert html =~ "trigger_backup" or has_element?(view, "[phx-click=trigger_backup]")
 
       html = render_click(view, "toggle_backup_dropdown", %{})
+
       refute has_element?(view, "[phx-click=trigger_backup][phx-value-deployment_id]") and
                html =~ "SHOULD_NOT_MATCH"
     end
@@ -316,7 +315,6 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, _view, html} = live(conn, ~p"/backups")
       assert html =~ "Failed"
     end
-
   end
 
   describe "backup with running status and additional checks" do
@@ -357,7 +355,10 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, deployment: deployment}
     end
 
-    test "shows dash instead of restore button when completed but no snapshot_id", %{conn: conn, deployment: dep} do
+    test "shows dash instead of restore button when completed but no snapshot_id", %{
+      conn: conn,
+      deployment: dep
+    } do
       insert(:backup_job,
         deployment: dep,
         status: :completed,

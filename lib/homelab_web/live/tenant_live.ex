@@ -79,8 +79,11 @@ defmodule HomelabWeb.TenantLive do
     deployment = Deployments.get_deployment!(String.to_integer(id))
 
     case Deployments.restart_deployment(deployment) do
-      {:ok, _} -> {:noreply, put_flash(socket, :info, "#{deployment.app_template.name} restarting.")}
-      {:error, _} -> {:noreply, put_flash(socket, :error, "Failed to restart.")}
+      {:ok, _} ->
+        {:noreply, put_flash(socket, :info, "#{deployment.app_template.name} restarting.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Failed to restart.")}
     end
   end
 

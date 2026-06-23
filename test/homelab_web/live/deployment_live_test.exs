@@ -539,7 +539,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
 
     test "masks secret values", %{conn: conn, tenant: tenant} do
-      template = insert(:app_template, default_env: %{"DB_PASSWORD" => "s3cret", "APP_KEY" => "val"})
+      template =
+        insert(:app_template, default_env: %{"DB_PASSWORD" => "s3cret", "APP_KEY" => "val"})
 
       dep =
         insert(:deployment,
@@ -615,7 +616,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "bg-success"
     end
 
-    test "stopped deployment shows Stopped status pill", %{conn: conn, tenant: tenant, template: template} do
+    test "stopped deployment shows Stopped status pill", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -628,7 +633,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "Stopped"
     end
 
-    test "deploying deployment shows Deploying status pill", %{conn: conn, tenant: tenant, template: template} do
+    test "deploying deployment shows Deploying status pill", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -690,7 +699,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ template.name
     end
 
-    test "breadcrumb has links to dashboard and tenant", %{conn: conn, deployment: dep, tenant: tenant} do
+    test "breadcrumb has links to dashboard and tenant", %{
+      conn: conn,
+      deployment: dep,
+      tenant: tenant
+    } do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       assert has_element?(view, "a[href='/']", "Dashboard")
       assert has_element?(view, "a[href='/tenants/#{tenant.id}']")
@@ -706,7 +719,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       refute has_element?(view, "button", "Start")
     end
 
-    test "stopped deployment shows Start but not Stop or Restart", %{conn: conn, tenant: tenant, template: template} do
+    test "stopped deployment shows Start but not Stop or Restart", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -721,7 +738,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       refute has_element?(view, "button", "Stop")
     end
 
-    test "failed deployment shows Start and Delete only", %{conn: conn, tenant: tenant, template: template} do
+    test "failed deployment shows Start and Delete only", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -738,7 +759,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       refute has_element?(view, "button", "Restart")
     end
 
-    test "pending deployment without external_id hides Restart", %{conn: conn, tenant: tenant, template: template} do
+    test "pending deployment without external_id hides Restart", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -794,7 +819,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "traffic"})
-      assert html =~ "No traffic data available" or html =~ "Metrics will appear" or html =~ "Traffic"
+
+      assert html =~ "No traffic data available" or html =~ "Metrics will appear" or
+               html =~ "Traffic"
     end
   end
 
@@ -850,7 +877,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "Environment updated"
     end
 
-    test "save_env with invalid data shows error", %{conn: conn, tenant: tenant, template: template} do
+    test "save_env with invalid data shows error", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -877,7 +908,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
   end
 
   describe "start event on deployment page" do
-    test "starts a stopped deployment from detail page", %{conn: conn, tenant: tenant, template: template} do
+    test "starts a stopped deployment from detail page", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -897,7 +932,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "started" or html =~ "Started" or html =~ dep.app_template.name
     end
 
-    test "start failure still succeeds with status update", %{conn: conn, tenant: tenant, template: template} do
+    test "start failure still succeeds with status update", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -941,7 +980,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
   end
 
   describe "delete event on deployment page" do
-    test "deletes deployment and redirects to root", %{conn: conn, tenant: tenant, template: template} do
+    test "deletes deployment and redirects to root", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -979,7 +1022,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
   end
 
   describe "load_logs with different deployment states" do
-    test "shows pending message for pending deployment", %{conn: conn, tenant: tenant, template: template} do
+    test "shows pending message for pending deployment", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -995,7 +1042,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "pending" or html =~ "Pending" or html =~ "waiting"
     end
 
-    test "shows deploying message for deploying deployment", %{conn: conn, tenant: tenant, template: template} do
+    test "shows deploying message for deploying deployment", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       dep =
         insert(:deployment,
           tenant: tenant,
@@ -1032,11 +1083,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "OOM killed"
     end
 
-    test "shows no container message for deployment with no external_id and non-special status", %{
-      conn: conn,
-      tenant: tenant,
-      template: template
-    } do
+    test "shows no container message for deployment with no external_id and non-special status",
+         %{
+           conn: conn,
+           tenant: tenant,
+           template: template
+         } do
       dep =
         insert(:deployment,
           tenant: tenant,

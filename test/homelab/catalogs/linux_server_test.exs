@@ -38,50 +38,58 @@ defmodule Homelab.Catalogs.LinuxServerTest do
       Bypass.stub(bypass, "GET", "/api/v1/images", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "status" => "OK",
-          "data" => %{
-            "repositories" => %{
-              "linuxserver" => [
-                %{
-                  "name" => "nextcloud",
-                  "description" => "A self-hosted productivity platform",
-                  "project_logo" => "https://example.com/logo.png",
-                  "version" => "29.0.0",
-                  "project_url" => "https://nextcloud.com",
-                  "stars" => 100,
-                  "monthly_pulls" => 50000,
-                  "deprecated" => false,
-                  "category" => "Cloud, Productivity",
-                  "architectures" => [%{"arch" => "amd64"}, %{"arch" => "arm64"}],
-                  "config" => %{
-                    "application_setup" => "https://docs.nextcloud.com",
-                    "volumes" => [
-                      %{"path" => "/config", "desc" => "Config files", "optional" => false},
-                      %{"path" => "/data", "desc" => "User data", "optional" => false}
-                    ],
-                    "ports" => [
-                      %{"internal" => "443", "external" => "443", "desc" => "HTTPS", "optional" => false}
-                    ]
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "status" => "OK",
+            "data" => %{
+              "repositories" => %{
+                "linuxserver" => [
+                  %{
+                    "name" => "nextcloud",
+                    "description" => "A self-hosted productivity platform",
+                    "project_logo" => "https://example.com/logo.png",
+                    "version" => "29.0.0",
+                    "project_url" => "https://nextcloud.com",
+                    "stars" => 100,
+                    "monthly_pulls" => 50000,
+                    "deprecated" => false,
+                    "category" => "Cloud, Productivity",
+                    "architectures" => [%{"arch" => "amd64"}, %{"arch" => "arm64"}],
+                    "config" => %{
+                      "application_setup" => "https://docs.nextcloud.com",
+                      "volumes" => [
+                        %{"path" => "/config", "desc" => "Config files", "optional" => false},
+                        %{"path" => "/data", "desc" => "User data", "optional" => false}
+                      ],
+                      "ports" => [
+                        %{
+                          "internal" => "443",
+                          "external" => "443",
+                          "desc" => "HTTPS",
+                          "optional" => false
+                        }
+                      ]
+                    }
+                  },
+                  %{
+                    "name" => "plex",
+                    "description" => "Media server",
+                    "project_logo" => nil,
+                    "version" => "1.40",
+                    "project_url" => "https://plex.tv",
+                    "stars" => 200,
+                    "monthly_pulls" => 100_000,
+                    "deprecated" => false,
+                    "category" => "Media",
+                    "architectures" => [%{"arch" => "amd64"}],
+                    "config" => %{}
                   }
-                },
-                %{
-                  "name" => "plex",
-                  "description" => "Media server",
-                  "project_logo" => nil,
-                  "version" => "1.40",
-                  "project_url" => "https://plex.tv",
-                  "stars" => 200,
-                  "monthly_pulls" => 100000,
-                  "deprecated" => false,
-                  "category" => "Media",
-                  "architectures" => [%{"arch" => "amd64"}],
-                  "config" => %{}
-                }
-              ]
+                ]
+              }
             }
-          }
-        }))
+          })
+        )
       end)
 
       {:ok, entries} = LinuxServer.browse()
@@ -104,12 +112,24 @@ defmodule Homelab.Catalogs.LinuxServerTest do
       Bypass.stub(bypass, "GET", "/api/v1/images", fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{
-          "status" => "OK",
-          "data" => %{"repositories" => %{"linuxserver" => [
-            %{"name" => "test", "description" => "Test", "config" => %{}, "category" => "Test"}
-          ]}}
-        }))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "status" => "OK",
+            "data" => %{
+              "repositories" => %{
+                "linuxserver" => [
+                  %{
+                    "name" => "test",
+                    "description" => "Test",
+                    "config" => %{},
+                    "category" => "Test"
+                  }
+                ]
+              }
+            }
+          })
+        )
       end)
 
       {:ok, _} = LinuxServer.browse()
@@ -164,8 +184,16 @@ defmodule Homelab.Catalogs.LinuxServerTest do
   describe "search/2" do
     test "filters entries by name" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "nextcloud", description: "Cloud storage", categories: ["Cloud"]},
-        %Homelab.Catalog.CatalogEntry{name: "plex", description: "Media server", categories: ["Media"]}
+        %Homelab.Catalog.CatalogEntry{
+          name: "nextcloud",
+          description: "Cloud storage",
+          categories: ["Cloud"]
+        },
+        %Homelab.Catalog.CatalogEntry{
+          name: "plex",
+          description: "Media server",
+          categories: ["Media"]
+        }
       ]
 
       :persistent_term.put({LinuxServer, :catalog}, entries)
@@ -177,7 +205,11 @@ defmodule Homelab.Catalogs.LinuxServerTest do
 
     test "filters entries by description" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "nextcloud", description: "Cloud storage", categories: []},
+        %Homelab.Catalog.CatalogEntry{
+          name: "nextcloud",
+          description: "Cloud storage",
+          categories: []
+        },
         %Homelab.Catalog.CatalogEntry{name: "plex", description: "Media server", categories: []}
       ]
 
@@ -190,7 +222,11 @@ defmodule Homelab.Catalogs.LinuxServerTest do
 
     test "filters entries by category" do
       entries = [
-        %Homelab.Catalog.CatalogEntry{name: "nextcloud", description: "Cloud", categories: ["Cloud", "Productivity"]},
+        %Homelab.Catalog.CatalogEntry{
+          name: "nextcloud",
+          description: "Cloud",
+          categories: ["Cloud", "Productivity"]
+        },
         %Homelab.Catalog.CatalogEntry{name: "plex", description: "Media", categories: ["Media"]}
       ]
 

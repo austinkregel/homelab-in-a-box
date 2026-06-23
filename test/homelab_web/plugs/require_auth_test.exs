@@ -2,6 +2,7 @@ defmodule HomelabWeb.Plugs.RequireAuthTest do
   use HomelabWeb.ConnCase, async: false
 
   alias HomelabWeb.Plugs.RequireAuth
+
   describe "when setup is not completed" do
     test "allows unauthenticated requests through", %{conn: conn} do
       Homelab.Settings.set("setup_completed", "false")

@@ -230,7 +230,11 @@ defmodule HomelabWeb.TenantLiveTest do
       {:ok, deployment: deployment}
     end
 
-    test "stop deployment still succeeds even if undeploy errors", %{conn: conn, tenant: tenant, deployment: dep} do
+    test "stop deployment still succeeds even if undeploy errors", %{
+      conn: conn,
+      tenant: tenant,
+      deployment: dep
+    } do
       Homelab.Mocks.Orchestrator
       |> stub(:undeploy, fn _spec -> {:error, "failed to stop"} end)
 
@@ -321,7 +325,11 @@ defmodule HomelabWeb.TenantLiveTest do
   end
 
   describe "start deployment failure" do
-    test "start still succeeds with status update even on deploy error", %{conn: conn, tenant: tenant, template: template} do
+    test "start still succeeds with status update even on deploy error", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       stopped =
         insert(:deployment,
           tenant: tenant,
@@ -371,7 +379,11 @@ defmodule HomelabWeb.TenantLiveTest do
   end
 
   describe "relative_time branches" do
-    test "shows 'just now' for very recent reconciliation", %{conn: conn, tenant: tenant, template: template} do
+    test "shows 'just now' for very recent reconciliation", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -384,7 +396,11 @@ defmodule HomelabWeb.TenantLiveTest do
       assert html =~ "just now"
     end
 
-    test "shows seconds ago for recent reconciliation", %{conn: conn, tenant: tenant, template: template} do
+    test "shows seconds ago for recent reconciliation", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -397,7 +413,11 @@ defmodule HomelabWeb.TenantLiveTest do
       assert html =~ "s ago"
     end
 
-    test "shows minutes ago for reconciliation minutes back", %{conn: conn, tenant: tenant, template: template} do
+    test "shows minutes ago for reconciliation minutes back", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -410,7 +430,11 @@ defmodule HomelabWeb.TenantLiveTest do
       assert html =~ "m ago"
     end
 
-    test "shows hours ago for reconciliation hours back", %{conn: conn, tenant: tenant, template: template} do
+    test "shows hours ago for reconciliation hours back", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -423,7 +447,11 @@ defmodule HomelabWeb.TenantLiveTest do
       assert html =~ "h ago"
     end
 
-    test "shows date for reconciliation days back", %{conn: conn, tenant: tenant, template: template} do
+    test "shows date for reconciliation days back", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -436,7 +464,11 @@ defmodule HomelabWeb.TenantLiveTest do
       assert html =~ ~r/\d{4}-\d{2}-\d{2}/
     end
 
-    test "shows 'never reconciled' when last_reconciled_at is nil", %{conn: conn, tenant: tenant, template: template} do
+    test "shows 'never reconciled' when last_reconciled_at is nil", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,
@@ -451,7 +483,11 @@ defmodule HomelabWeb.TenantLiveTest do
   end
 
   describe "infrastructure topology section" do
-    test "renders topology section when deployments exist", %{conn: conn, tenant: tenant, template: template} do
+    test "renders topology section when deployments exist", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
       insert(:deployment,
         tenant: tenant,
         app_template: template,

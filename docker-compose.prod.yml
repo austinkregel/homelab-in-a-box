@@ -1,0 +1,90 @@
+# Production deployment for homelab-in-a-box.
+#
+# The app self-provisions its OWN Postgres (container `homelab-iab-postgres`,
+# isolated from any shared `homelab-postgres` on the host) via the mounted
+# Docker socket when BOOTSTRAP=true — so this file only runs the app itself.
+#
+# Single node:   docker compose -f docker-compose.prod.yml up -d
+# Build image:   ./build_from_scratch.sh prod   (or `docker build -t homelab-in-a-box:latest .`)
+# Secrets/config: copy .env.example -> .env and fill it in (gitignored).
+#
+# Swarm note: `docker stack deploy` ignores `env_file:`, `container_name:` and
+# `restart:` (it uses the `deploy:` block). To deploy on a swarm, render with
+# `docker compose -f docker-compose.prod.yml config | docker stack deploy -c - homelab`
+# so the .env values are baked in. Also note your socket-proxy has SWARM=0.
+
+services:
+  homelab:
+    image: homelab-in-a-box:latest
+    container_name: homelab
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # The release already sets PHX_SERVER/BOOTSTRAP, but be explicit here.
+      PHX_SERVER: "true"
+      BOOTSTRAP: "true"
+      HOMELAB_SEED_SETUP: "true"
+      HOMELAB_INSTANCE_NAME: ${HOMELAB_INSTANCE_NAME:-Homelab}
+      HOMELAB_BASE_DOMAIN: ${HOMELAB_BASE_DOMAIN:?set HOMELAB_BASE_DOMAIN in .env}
+      HOMELAB_OIDC_ISSUER: ${HOMELAB_OIDC_ISSUER}
+      HOMELAB_OIDC_CLIENT_ID: ${HOMELAB_OIDC_CLIENT_ID}
+      HOMELAB_OIDC_CLIENT_SECRET: ${HOMELAB_OIDC_CLIENT_SECRET:?set HOMELAB_OIDC_CLIENT_SECRET in .env}
+      HOMELAB_ORCHESTRATOR: ${HOMELAB_ORCHESTRATOR:-docker_engine}
+      HOMELAB_GATEWAY: ${HOMELAB_GATEWAY:-traefik}
+      # Public URL used to build absolute links/redirects (fixes localhost:4000).
+      PHX_HOST: ${PHX_HOST:?set PHX_HOST in .env, e.g. homelab.example.com}
+      PHX_SCHEME: ${PHX_SCHEME:-https}
+      PHX_PORT: ${PHX_PORT:-443}
+      # Error tracking — inert unless set. Point at your stack's Sentry.
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENV: ${SENTRY_ENV:-production}
+    volumes:
+      # Lets the app manage containers and self-provision its database.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Durable secrets (secret_key_base, pg password) — survive restarts.
+      - homelab-iab-secrets:/run/secrets
+    ports:
+      # Point your reverse proxy (nginx-proxy-manager) at this.
+      - "4000:4000"
+    networks:
+      - homelab-internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: ${HOMELAB_MEMORY_LIMIT:-1g}
+          cpus: "${HOMELAB_CPU_LIMIT:-2}"
+      restart_policy:
+        condition: any
+
+    # --- Integrating with your existing homelab stack -----------------------
+    # To let nginx-proxy-manager route to it and Prometheus scrape :9568,
+    # attach the app to the stack's internal network instead of publishing
+    # ports. Uncomment below (and the external network at the bottom), then
+    # drop the `ports:` mapping above.
+    #
+    #   networks:
+    #     - homelab-internal
+    #     - stack-internal
+
+volumes:
+  homelab-iab-secrets:
+    name: homelab-iab-secrets
+
+networks:
+  # Named exactly so the app's bootstrap (which expects `homelab-internal`)
+  # and its managed apps share one network.
+  homelab-internal:
+    name: homelab-internal
+
+  # Your existing compose stack's internal network (project-prefixed). Uncomment
+  # to let NPM/Prometheus reach this app without publishing ports to the host.
+  # stack-internal:
+  #   external: true
+  #   name: homelab_internal

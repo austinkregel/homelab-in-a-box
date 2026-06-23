@@ -53,7 +53,10 @@ defmodule Homelab.Registrars.CloudflareTest do
       Bypass.expect(bypass, fn conn ->
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{"result" => [], "result_info" => %{"total_pages" => 1}}))
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"result" => [], "result_info" => %{"total_pages" => 1}})
+        )
       end)
 
       Application.put_env(:homelab, Cloudflare, base_url: "http://localhost:#{bypass.port}")

@@ -22,7 +22,16 @@ defmodule HomelabWeb.DeployWizardLiveTest do
         image: "testapp:latest",
         default_env: %{"APP_ENV" => "production", "APP_URL" => ""},
         required_env: ["APP_SECRET"],
-        ports: [%{"internal" => "8080", "external" => "", "description" => "HTTP", "role" => "http", "optional" => false, "published" => false}],
+        ports: [
+          %{
+            "internal" => "8080",
+            "external" => "",
+            "description" => "HTTP",
+            "role" => "http",
+            "optional" => false,
+            "published" => false
+          }
+        ],
         volumes: [%{"container_path" => "/data", "description" => "App data"}]
       )
 
@@ -206,7 +215,9 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       |> render_submit()
 
       html = render(view)
-      assert html =~ "Ports" or html =~ "Volumes" or html =~ "my-nginx" or html =~ "My Nginx" or html =~ "nginx"
+
+      assert html =~ "Ports" or html =~ "Volumes" or html =~ "my-nginx" or html =~ "My Nginx" or
+               html =~ "nginx"
     end
 
     test "custom image with blank image shows error flash", %{conn: conn} do
@@ -224,7 +235,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=app&type=container")
 
       view
-      |> form("form[phx-submit=select_custom]", %{"image" => "ghcr.io/owner/myapp:v2", "name" => ""})
+      |> form("form[phx-submit=select_custom]", %{
+        "image" => "ghcr.io/owner/myapp:v2",
+        "name" => ""
+      })
       |> render_submit()
 
       html = render(view)
@@ -405,7 +419,11 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "network configuration" do
-    test "update_network with form params sets domain and tenant_id", %{conn: conn, template: template, tenant: tenant} do
+    test "update_network with form params sets domain and tenant_id", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
 
       view
@@ -457,7 +475,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "topology events" do
-    test "topology_change with exposure key updates exposure_mode", %{conn: conn, template: template} do
+    test "topology_change with exposure key updates exposure_mode", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       render_click(view, "topology_change", %{
@@ -522,7 +543,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert is_binary(html)
     end
 
-    test "add_companion_custom with duplicate image shows error", %{conn: conn, template: template} do
+    test "add_companion_custom with duplicate image shows error", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       render_click(view, "add_companion_custom", %{"image" => "redis:7"})
@@ -576,7 +600,14 @@ defmodule HomelabWeb.DeployWizardLiveTest do
         description: "Enriched description",
         categories: ["web"],
         required_ports: [
-          %{"internal" => "9090", "external" => "", "description" => "Metrics", "role" => "metrics", "optional" => true, "published" => false}
+          %{
+            "internal" => "9090",
+            "external" => "",
+            "description" => "Metrics",
+            "role" => "metrics",
+            "optional" => true,
+            "published" => false
+          }
         ],
         required_volumes: [
           %{"path" => "/config", "description" => "Config volume"}
@@ -673,7 +704,8 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       |> stub(:list_services, fn -> {:ok, []} end)
       |> stub(:get_service, fn _id -> {:error, :not_found} end)
 
-      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=review&template_id=#{simple_template.id}")
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=review&template_id=#{simple_template.id}")
 
       render_click(view, "deploy", %{
         "tenant_id" => to_string(tenant.id),
@@ -710,7 +742,8 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       |> stub(:update_record, fn _zone, _id, _record -> {:ok, %{id: "rec_1"}} end)
       |> stub(:delete_record, fn _zone, _id -> :ok end)
 
-      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=review&template_id=#{simple_template.id}")
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=review&template_id=#{simple_template.id}")
 
       render_click(view, "deploy", %{
         "tenant_id" => to_string(tenant.id),
@@ -782,7 +815,8 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       |> stub(:update_record, fn _zone, _id, _record -> {:ok, %{id: "rec_1"}} end)
       |> stub(:delete_record, fn _zone, _id -> :ok end)
 
-      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{simple_template.id}")
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=config&template_id=#{simple_template.id}")
 
       render_click(view, "add_companion_custom", %{"image" => "redis:7"})
 
@@ -820,7 +854,11 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "review step rendering" do
-    test "review step shows template info and form", %{conn: conn, template: template, tenant: tenant} do
+    test "review step shows template info and form", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
 
       view
@@ -844,7 +882,11 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "domain prefilling for config step" do
-    test "prefills APP_URL env vars when domain is set", %{conn: conn, template: template, tenant: tenant} do
+    test "prefills APP_URL env vars when domain is set", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
 
       view
@@ -927,7 +969,14 @@ defmodule HomelabWeb.DeployWizardLiveTest do
         description: "Enriched app",
         categories: ["tools"],
         required_ports: [
-          %{"internal" => "9090", "external" => "", "description" => "Metrics", "role" => "metrics", "optional" => true, "published" => false}
+          %{
+            "internal" => "9090",
+            "external" => "",
+            "description" => "Metrics",
+            "role" => "metrics",
+            "optional" => true,
+            "published" => false
+          }
         ],
         required_volumes: [
           %{"path" => "/config", "description" => "Config volume"}
@@ -947,7 +996,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "wire_db_secrets event" do
-    test "wires database secrets into env vars when db suggestion exists", %{conn: conn, template: template} do
+    test "wires database secrets into env vars when db suggestion exists", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       clear_enrichment(view)
@@ -994,7 +1046,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert is_binary(html_before)
     end
 
-    test "apply_infra with specific infra-id applies that suggestion", %{conn: conn, template: template} do
+    test "apply_infra with specific infra-id applies that suggestion", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       clear_enrichment(view)
@@ -1036,7 +1091,9 @@ defmodule HomelabWeb.DeployWizardLiveTest do
           "full_ref" => "redis:7-alpine",
           "description" => "In-memory data store",
           "categories" => ["Database"],
-          "required_ports" => [%{"internal" => "6379", "external" => "", "description" => "Redis port"}],
+          "required_ports" => [
+            %{"internal" => "6379", "external" => "", "description" => "Redis port"}
+          ],
           "required_volumes" => [%{"path" => "/data", "description" => "Redis data"}],
           "default_env" => %{},
           "required_env" => []
@@ -1078,7 +1135,10 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   end
 
   describe "add_companion_custom duplicate name error" do
-    test "adding the same custom companion image three times shows error on third", %{conn: conn, template: template} do
+    test "adding the same custom companion image three times shows error on third", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       render_click(view, "add_companion_custom", %{"image" => "memcached:latest"})
@@ -1094,7 +1154,8 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert html =~ "already added"
     end
 
-    test "adding different custom companions with same base name but different tags shows error", %{conn: conn, template: template} do
+    test "adding different custom companions with same base name but different tags shows error",
+         %{conn: conn, template: template} do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
       render_click(view, "add_companion_custom", %{"image" => "valkey:7"})

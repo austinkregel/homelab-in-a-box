@@ -33,16 +33,17 @@ defmodule Homelab.Services.DockerEventListenerTest do
 
       Homelab.Mocks.Orchestrator
       |> expect(:list_services, fn ->
-        {:ok, [
-          %{
-            id: "container_123",
-            name: "test-app",
-            state: :stopped,
-            replicas: 0,
-            image: "testapp:latest",
-            labels: %{"homelab.managed" => "true"}
-          }
-        ]}
+        {:ok,
+         [
+           %{
+             id: "container_123",
+             name: "test-app",
+             state: :stopped,
+             replicas: 0,
+             image: "testapp:latest",
+             labels: %{"homelab.managed" => "true"}
+           }
+         ]}
       end)
 
       Phoenix.PubSub.subscribe(Homelab.PubSub, "deployments:status")
@@ -93,16 +94,17 @@ defmodule Homelab.Services.DockerEventListenerTest do
 
       Homelab.Mocks.Orchestrator
       |> expect(:list_services, fn ->
-        {:ok, [
-          %{
-            id: "container_run",
-            name: "test-app",
-            state: :running,
-            replicas: 1,
-            image: "testapp:latest",
-            labels: %{"homelab.managed" => "true"}
-          }
-        ]}
+        {:ok,
+         [
+           %{
+             id: "container_run",
+             name: "test-app",
+             state: :running,
+             replicas: 1,
+             image: "testapp:latest",
+             labels: %{"homelab.managed" => "true"}
+           }
+         ]}
       end)
 
       Phoenix.PubSub.subscribe(Homelab.PubSub, "deployments:status")

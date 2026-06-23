@@ -477,8 +477,18 @@ defmodule Homelab.NetworkingTest do
       |> expect(:list_domains, fn ->
         {:ok,
          [
-           %{name: "example.com", provider_zone_id: "zone_123", status: "active", name_servers: []},
-           %{name: "example.org", provider_zone_id: "zone_456", status: "active", name_servers: []}
+           %{
+             name: "example.com",
+             provider_zone_id: "zone_123",
+             status: "active",
+             name_servers: []
+           },
+           %{
+             name: "example.org",
+             provider_zone_id: "zone_456",
+             status: "active",
+             name_servers: []
+           }
          ]}
       end)
       |> expect(:driver_id, fn -> "mock_registrar" end)
@@ -499,7 +509,14 @@ defmodule Homelab.NetworkingTest do
       Homelab.Mocks.RegistrarProvider
       |> expect(:list_domains, fn ->
         {:ok,
-         [%{name: "example.com", provider_zone_id: "zone_123", status: "active", name_servers: []}]}
+         [
+           %{
+             name: "example.com",
+             provider_zone_id: "zone_123",
+             status: "active",
+             name_servers: []
+           }
+         ]}
       end)
       |> expect(:driver_id, fn -> "mock_registrar" end)
 

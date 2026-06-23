@@ -67,7 +67,9 @@ defmodule Homelab.NotificationsTest do
   describe "list_recent/2" do
     test "returns notifications for a user with limit" do
       user = insert(:user)
-      for i <- 1..5, do: Notifications.create(%{user_id: user.id, title: "N#{i}", severity: "info"})
+
+      for i <- 1..5,
+          do: Notifications.create(%{user_id: user.id, title: "N#{i}", severity: "info"})
 
       assert length(Notifications.list_recent(user.id, 3)) == 3
     end
@@ -76,7 +78,10 @@ defmodule Homelab.NotificationsTest do
   describe "mark_read/1" do
     test "sets read_at on the notification" do
       user = insert(:user)
-      {:ok, notification} = Notifications.create(%{user_id: user.id, title: "To read", severity: "info"})
+
+      {:ok, notification} =
+        Notifications.create(%{user_id: user.id, title: "To read", severity: "info"})
+
       assert notification.read_at == nil
 
       {:ok, updated} = Notifications.mark_read(notification)
@@ -87,7 +92,9 @@ defmodule Homelab.NotificationsTest do
   describe "mark_all_read/1" do
     test "marks all notifications as read for a user" do
       user = insert(:user)
-      for _ <- 1..3, do: Notifications.create(%{user_id: user.id, title: "Unread", severity: "info"})
+
+      for _ <- 1..3,
+          do: Notifications.create(%{user_id: user.id, title: "Unread", severity: "info"})
 
       assert Notifications.unread_count(user.id) == 3
       Notifications.mark_all_read(user.id)

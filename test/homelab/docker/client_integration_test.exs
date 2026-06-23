@@ -12,7 +12,9 @@ defmodule Homelab.Docker.ClientIntegrationTest do
     end
 
     on_exit(fn ->
-      case Client.get("/containers/json?all=true&filters=#{URI.encode_www_form(Jason.encode!(%{"label" => ["homelab.test=true"]}))}" ) do
+      case Client.get(
+             "/containers/json?all=true&filters=#{URI.encode_www_form(Jason.encode!(%{"label" => ["homelab.test=true"]}))}"
+           ) do
         {:ok, containers} when is_list(containers) ->
           Enum.each(containers, fn c ->
             Client.delete("/containers/#{c["Id"]}?force=true")

@@ -957,6 +957,7 @@ defmodule HomelabWeb.CatalogLiveTest do
 
       _ = :sys.get_state(view.pid)
       html = render(view)
+
       assert has_element?(view, "#deploy-modal") or html =~ "Deploy" or html =~ "Fail App" or
                html =~ "Failed to create"
     end

@@ -80,7 +80,9 @@ defmodule Homelab.Catalogs.AwesomeSelfhosted do
   end
 
   defp fetch_file_list do
-    base = Application.get_env(:homelab, __MODULE__, [])[:github_api_url] || "https://api.github.com"
+    base =
+      Application.get_env(:homelab, __MODULE__, [])[:github_api_url] || "https://api.github.com"
+
     url = "#{base}/repos/#{@repo}/git/trees/#{@branch}?recursive=1"
 
     case Req.get(url, headers: github_headers()) do
@@ -120,7 +122,10 @@ defmodule Homelab.Catalogs.AwesomeSelfhosted do
   end
 
   defp fetch_and_parse_entry(path) do
-    raw_base = Application.get_env(:homelab, __MODULE__, [])[:raw_url] || "https://raw.githubusercontent.com"
+    raw_base =
+      Application.get_env(:homelab, __MODULE__, [])[:raw_url] ||
+        "https://raw.githubusercontent.com"
+
     url = "#{raw_base}/#{@repo}/#{@branch}/#{path}"
 
     case Req.get(url, headers: github_headers()) do

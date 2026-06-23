@@ -179,7 +179,10 @@ defmodule Homelab.DeploymentsTest do
       deployment = insert(:deployment, status: :pending)
 
       assert {:ok, updated} =
-               Deployments.update_deployment(deployment, %{status: :running, domain: "new.homelab.local"})
+               Deployments.update_deployment(deployment, %{
+                 status: :running,
+                 domain: "new.homelab.local"
+               })
 
       assert updated.status == :running
       assert updated.domain == "new.homelab.local"
@@ -451,7 +454,9 @@ defmodule Homelab.DeploymentsTest do
   describe "start_deployment/1 spec build failure" do
     test "sets status to failed when spec build fails" do
       template = insert(:app_template, required_env: ["NEEDED_VAR"])
-      deployment = insert(:deployment, status: :stopped, app_template: template, env_overrides: %{})
+
+      deployment =
+        insert(:deployment, status: :stopped, app_template: template, env_overrides: %{})
 
       assert {:ok, failed} = Deployments.start_deployment(deployment)
       assert failed.status == :failed
