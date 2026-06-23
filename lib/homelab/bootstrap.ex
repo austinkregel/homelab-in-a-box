@@ -11,9 +11,12 @@ defmodule Homelab.Bootstrap do
 
   alias Homelab.Docker.Client
 
-  @postgres_container "homelab-postgres"
-  @postgres_volume "homelab-postgres-data"
-  @secrets_volume "homelab-secrets"
+  # Names are prefixed `homelab-iab-` so this app's self-provisioned Postgres
+  # never collides with an unrelated `homelab-postgres` container that may
+  # already exist on the host (e.g. a shared database in another compose stack).
+  @postgres_container "homelab-iab-postgres"
+  @postgres_volume "homelab-iab-postgres-data"
+  @secrets_volume "homelab-iab-secrets"
   @network "homelab-internal"
   @postgres_image "postgres:17-alpine"
   @postgres_user "homelab"

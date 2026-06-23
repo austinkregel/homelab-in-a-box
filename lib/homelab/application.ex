@@ -5,6 +5,8 @@ defmodule Homelab.Application do
 
   @impl true
   def start(_type, _args) do
+    maybe_attach_sentry_logger()
+
     case Homelab.Bootstrap.ensure_infrastructure() do
       :ok -> :ok
       {:error, reason} -> raise "Bootstrap failed: #{inspect(reason)}"
@@ -36,6 +38,16 @@ defmodule Homelab.Application do
   def config_change(changed, _new, removed) do
     HomelabWeb.Endpoint.config_change(changed, removed)
     :ok
+  end
+
+  # Routes crash/error logs to Sentry, but only when a DSN is configured so
+  # dev and test stay quiet. Safe to call once at startup.
+  defp maybe_attach_sentry_logger do
+    if Application.get_env(:sentry, :dsn) do
+      :logger.add_handler(:homelab_sentry_handler, Sentry.LoggerHandler, %{
+        config: %{metadata: [:file, :line], level: :error}
+      })
+    end
   end
 
   defp services_children do

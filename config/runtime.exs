@@ -39,18 +39,77 @@ if config_env() == :prod do
       socket_options: maybe_ipv6
   end
 
+  # Secrets are persisted to a durable directory (mount the `homelab-iab-secrets`
+  # volume at HOMELAB_SECRETS_DIR) so they survive container restarts. An
+  # explicit env var always wins — that is how you supply a Docker/Swarm secret.
+  #
+  # This matters because secret_key_base is also the key that encrypts every
+  # credential stored in the database (see Homelab.Settings). If it is
+  # regenerated on each boot, all encrypted settings become undecryptable.
+  secrets_dir = System.get_env("HOMELAB_SECRETS_DIR", "/run/secrets")
+
+  fetch_or_create_secret = fn name, generate ->
+    path = Path.join(secrets_dir, name)
+
+    case File.read(path) do
+      {:ok, contents} ->
+        case String.trim(contents) do
+          "" -> generate.()
+          value -> value
+        end
+
+      {:error, _} ->
+        value = generate.()
+        _ = File.mkdir_p(secrets_dir)
+
+        case File.write(path, value) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            IO.warn(
+              "Could not persist #{name} to #{path} (#{inspect(reason)}); using an " <>
+                "ephemeral value. Mount the homelab-iab-secrets volume to persist secrets."
+            )
+        end
+
+        value
+    end
+  end
+
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      Base.encode64(:crypto.strong_rand_bytes(48))
+      fetch_or_create_secret.("secret_key_base", fn ->
+        Base.encode64(:crypto.strong_rand_bytes(48))
+      end)
 
-  host = System.get_env("PHX_HOST", "localhost")
+  host =
+    System.get_env("PHX_HOST") ||
+      raise """
+      environment variable PHX_HOST is missing.
+      Set it to the public hostname users reach this app at, e.g. homelab.example.com
+      """
+
+  scheme = System.get_env("PHX_SCHEME", "https")
+  url_port = String.to_integer(System.get_env("PHX_PORT", "443"))
 
   config :homelab, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
   config :homelab, HomelabWeb.Endpoint,
-    url: [host: host, port: String.to_integer(System.get_env("PHX_PORT", "4000")), scheme: "http"],
+    url: [host: host, port: url_port, scheme: scheme],
     http: [
       ip: {0, 0, 0, 0, 0, 0, 0, 0}
     ],
     secret_key_base: secret_key_base
+
+  # Error tracking. Inert unless SENTRY_DSN is set — point it at the Sentry
+  # instance in your homelab stack to start receiving crash reports.
+  config :sentry,
+    dsn: System.get_env("SENTRY_DSN"),
+    environment_name: System.get_env("SENTRY_ENV", "production"),
+    release: System.get_env("RELEASE_VSN")
+
+  # Structured JSON logs in production for easier aggregation/searching.
+  config :logger, :default_handler,
+    formatter: LoggerJSON.Formatters.Basic.new(metadata: [:request_id])
 end

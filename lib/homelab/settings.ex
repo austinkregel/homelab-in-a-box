@@ -176,7 +176,11 @@ defmodule Homelab.Settings do
   defp encryption_key do
     base =
       Application.get_env(:homelab, HomelabWeb.Endpoint)[:secret_key_base] ||
-        "default-dev-key-that-should-be-replaced-in-production!!"
+        raise """
+        secret_key_base is not configured, so stored secrets cannot be \
+        encrypted or decrypted. Set SECRET_KEY_BASE (production) or ensure the \
+        endpoint config provides :secret_key_base.\
+        """
 
     :crypto.hash(:sha256, base)
   end

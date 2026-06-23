@@ -22,5 +22,15 @@ config :swoosh, local: false
 # Do not print debug messages in production
 config :logger, level: :info
 
+# Expose Prometheus metrics on this port (scraped over the internal Docker
+# network by your existing Prometheus). See HomelabWeb.Telemetry.
+config :homelab, prometheus_exporter_port: 9568
+
+# Build-time Sentry settings; the DSN itself is supplied at runtime so the
+# integration stays inert unless SENTRY_DSN is set. See config/runtime.exs.
+config :sentry,
+  enable_source_code_context: false,
+  tags: %{app: "homelab-in-a-box"}
+
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.
