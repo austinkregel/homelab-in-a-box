@@ -102,6 +102,7 @@ defmodule Homelab.Factory do
       id: sequence(:id, &"svc_#{&1}"),
       name: sequence(:name, &"homelab_tenant_app_#{&1}"),
       state: :running,
+      health: :none,
       replicas: 1,
       image: "testapp:latest",
       labels: %{

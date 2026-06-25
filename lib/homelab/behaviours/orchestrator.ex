@@ -10,26 +10,31 @@ defmodule Homelab.Behaviours.Orchestrator do
   @type service_id :: String.t()
 
   @type service_spec :: %{
-          service_name: String.t(),
-          image: String.t(),
-          env: map(),
-          volumes: [map()],
-          network: String.t(),
-          labels: map(),
-          replicas: pos_integer(),
-          memory_limit: pos_integer(),
-          cpu_limit: pos_integer(),
-          tenant_id: String.t(),
-          deployment_id: String.t()
+          :service_name => String.t(),
+          :image => String.t(),
+          :env => map(),
+          :volumes => [map()],
+          :network => String.t(),
+          :labels => map(),
+          :replicas => pos_integer(),
+          :memory_limit => pos_integer(),
+          :cpu_limit => pos_integer(),
+          :tenant_id => String.t(),
+          :deployment_id => String.t(),
+          optional(:bridge_networks) => [String.t()],
+          optional(:ports) => [map()],
+          optional(:service_mode) => boolean(),
+          optional(:health_check) => map() | nil
         }
 
   @type service_status :: %{
-          id: service_id(),
-          name: String.t(),
-          state: :running | :stopped | :failed | :pending,
-          replicas: non_neg_integer(),
-          image: String.t(),
-          labels: map()
+          :id => service_id(),
+          :name => String.t(),
+          :state => :running | :stopped | :failed | :pending,
+          :replicas => non_neg_integer(),
+          :image => String.t(),
+          :labels => map(),
+          optional(:health) => :healthy | :unhealthy | :starting | :none
         }
 
   @callback driver_id() :: String.t()
@@ -38,6 +43,18 @@ defmodule Homelab.Behaviours.Orchestrator do
 
   @callback deploy(service_spec()) :: {:ok, service_id()} | {:error, term()}
   @callback undeploy(service_id()) :: :ok | {:error, term()}
+
+  @doc """
+  Grants external reachability to a deployment's network (connects the reverse
+  proxy to it). Called only after the deployment is verified ready. Idempotent.
+  """
+  @callback publish(network :: String.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Revokes external reachability for a deployment's network (disconnects the
+  reverse proxy from it). Never touches workload containers. Idempotent.
+  """
+  @callback unpublish(network :: String.t()) :: :ok | {:error, term()}
   @callback update(service_id(), service_spec()) :: :ok | {:error, term()}
   @callback restart(service_id()) :: :ok | {:error, term()}
   @callback list_services() :: {:ok, [service_status()]} | {:error, term()}

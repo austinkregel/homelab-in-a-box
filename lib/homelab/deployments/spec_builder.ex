@@ -34,7 +34,8 @@ defmodule Homelab.Deployments.SpecBuilder do
 
     with :ok <- validate_required_env(template, deployment.env_overrides) do
       service_mode? = template.exposure_mode == :service
-      ports = build_ports(template, service_mode?)
+      ingress? = is_binary(deployment.domain) and deployment.domain != ""
+      ports = build_ports(template, service_mode?, ingress?)
 
       primary_network = deployment_network(tenant, template)
       bridge_networks = build_bridge_networks(template, tenant)
@@ -56,12 +57,74 @@ defmodule Homelab.Deployments.SpecBuilder do
         cpu_limit: cpu_limit_nanocpus(template),
         tenant_id: to_string(tenant.id),
         deployment_id: to_string(deployment.id),
-        service_mode: service_mode?
+        service_mode: service_mode?,
+        health_check: build_health_check(template)
       }
 
       {:ok, spec}
     end
   end
+
+  @doc """
+  True when a template declares a usable healthcheck — an explicit command
+  (`"test"`/`"command"`) or a non-empty HTTP `"path"`. An empty path (used by
+  non-HTTP services that omit a check) does NOT count; those fall back to a
+  running-and-stable readiness window. Never guesses an HTTP probe.
+  """
+  def declares_healthcheck?(%{health_check: hc}), do: declares_healthcheck?(hc)
+  def declares_healthcheck?(hc) when is_map(hc), do: health_test(hc, nil) != nil
+  def declares_healthcheck?(_), do: false
+
+  @doc """
+  Builds a Docker `Healthcheck` payload from a template's declared healthcheck,
+  or `nil` when none is declared. HTTP `path` checks become a `wget`/`curl`
+  probe against the template's primary port; `test`/`command` checks pass through.
+  """
+  def build_health_check(template) do
+    hc = template.health_check || %{}
+
+    case health_test(hc, primary_port(template)) do
+      nil ->
+        nil
+
+      test ->
+        %{
+          "Test" => test,
+          "Interval" => seconds_to_ns(hc["interval"] || 30),
+          "Timeout" => seconds_to_ns(hc["timeout"] || 10),
+          "Retries" => hc["retries"] || 3,
+          "StartPeriod" => seconds_to_ns(hc["start_period"] || 10)
+        }
+    end
+  end
+
+  defp health_test(hc, port) do
+    cond do
+      is_list(hc["test"]) and hc["test"] != [] ->
+        hc["test"]
+
+      is_binary(hc["command"]) and hc["command"] != "" ->
+        ["CMD-SHELL", hc["command"]]
+
+      is_binary(hc["path"]) and hc["path"] != "" and not is_nil(port) ->
+        url = "http://localhost:#{port}#{hc["path"]}"
+
+        [
+          "CMD-SHELL",
+          "wget -qO- #{url} >/dev/null 2>&1 || curl -fsS #{url} >/dev/null 2>&1 || exit 1"
+        ]
+
+      is_binary(hc["path"]) and hc["path"] != "" ->
+        # `declares_healthcheck?/1` calls this with port=nil just to detect intent.
+        ["CMD-SHELL", "true"]
+
+      true ->
+        nil
+    end
+  end
+
+  defp seconds_to_ns(seconds) when is_integer(seconds), do: seconds * 1_000_000_000
+  defp seconds_to_ns(_), do: 30_000_000_000
 
   @doc """
   Builds a service name from tenant and template slugs.
@@ -75,7 +138,16 @@ defmodule Homelab.Deployments.SpecBuilder do
   Builds a per-deployment isolated network name.
   """
   def deployment_network(tenant, template) do
-    "homelab_#{sanitize(tenant.slug)}_#{sanitize(template.slug)}_net"
+    deployment_network_for(tenant.slug, template.slug)
+  end
+
+  @doc """
+  Builds a per-deployment network name directly from tenant and app slugs
+  (e.g. from container labels, when no struct is at hand).
+  """
+  def deployment_network_for(tenant_slug, app_slug)
+      when is_binary(tenant_slug) and is_binary(app_slug) do
+    "homelab_#{sanitize(tenant_slug)}_#{sanitize(app_slug)}_net"
   end
 
   @doc """
@@ -172,9 +244,15 @@ defmodule Homelab.Deployments.SpecBuilder do
     "homelab-#{sanitize(tenant_slug)}-#{sanitize(app_slug)}-#{path_slug}"
   end
 
-  defp build_ports(_template, true = _service_mode?), do: []
+  # Service-mode containers never publish ports (internal-only).
+  defp build_ports(_template, true = _service_mode?, _ingress?), do: []
 
-  defp build_ports(template, _service_mode?) do
+  # Ingress-routed deployments are reached through Traefik over the deployment
+  # network, so they must NOT bind a host port — that would both bypass Traefik
+  # and collide with whatever already owns the port (e.g. Traefik's own :8080).
+  defp build_ports(_template, _service_mode?, true = _ingress?), do: []
+
+  defp build_ports(template, _service_mode?, _ingress?) do
     (template.ports || [])
     |> Enum.filter(fn port -> port["published"] == true end)
     |> Enum.map(fn port ->
