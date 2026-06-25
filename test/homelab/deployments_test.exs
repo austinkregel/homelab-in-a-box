@@ -301,13 +301,15 @@ defmodule Homelab.DeploymentsTest do
       assert started.external_id == "container_123"
     end
 
-    test "sets status to failed when orchestrator returns error" do
+    test "sets status to failed and returns error when orchestrator returns error" do
       deployment = insert(:deployment, status: :stopped)
 
       Homelab.Mocks.Orchestrator
       |> expect(:deploy, fn _spec -> {:error, "out of resources"} end)
 
-      assert {:ok, failed} = Deployments.start_deployment(deployment)
+      assert {:error, "out of resources"} = Deployments.start_deployment(deployment)
+
+      failed = Deployments.get_deployment!(deployment.id)
       assert failed.status == :failed
       assert failed.error_message != nil
     end
@@ -458,9 +460,104 @@ defmodule Homelab.DeploymentsTest do
       deployment =
         insert(:deployment, status: :stopped, app_template: template, env_overrides: %{})
 
-      assert {:ok, failed} = Deployments.start_deployment(deployment)
+      assert {:error, {:missing_required_env, ["NEEDED_VAR"]}} =
+               Deployments.start_deployment(deployment)
+
+      failed = Deployments.get_deployment!(deployment.id)
       assert failed.status == :failed
       assert failed.error_message =~ "missing_required_env"
+    end
+  end
+
+  describe "transition_status/4 (guarded compare-and-set)" do
+    test "applies the transition when the row is in an allowed from-state" do
+      deployment = insert(:deployment, status: :deploying)
+
+      assert {:ok, updated} =
+               Deployments.transition_status(deployment, :running, [:pending, :deploying])
+
+      assert updated.status == :running
+    end
+
+    test "is a no-op when the current status is not in from-states" do
+      deployment = insert(:deployment, status: :running)
+
+      assert {:noop, current} =
+               Deployments.transition_status(deployment, :deploying, [:pending])
+
+      assert current.status == :running
+    end
+
+    test "records error and external_id via opts" do
+      deployment = insert(:deployment, status: :deploying)
+
+      assert {:ok, updated} =
+               Deployments.transition_status(deployment, :failed, [:deploying],
+                 error: "boom",
+                 external_id: "ext_1"
+               )
+
+      assert updated.status == :failed
+      assert updated.error_message == "boom"
+      assert updated.external_id == "ext_1"
+    end
+  end
+
+  describe "deploy_now/1 race with the event stream" do
+    test "a :running written mid-deploy is not clobbered back to :deploying" do
+      tenant = insert(:tenant)
+      template = insert(:app_template)
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_dns"}} end)
+
+      # Simulate the Docker `start`/health event landing while deploy/1 is still
+      # in flight: the row is advanced to :running before deploy/1 returns.
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec ->
+        [dep] = Deployments.list_deployments()
+        {:ok, _} = Deployments.transition_status(dep, :running, [:pending, :deploying])
+        {:ok, "container_race"}
+      end)
+
+      attrs = %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        domain: "race.tenant.homelab.local"
+      }
+
+      assert {:ok, deployment} = Deployments.deploy_now(attrs)
+      # The guarded write must NOT have demoted it back to :deploying...
+      assert deployment.status == :running
+      # ...and the container id is still persisted even though the guard no-op'd.
+      assert deployment.external_id == "container_race"
+    end
+  end
+
+  describe "publish_deployment/1 and unpublish_deployment/1" do
+    test "ingress-published deployment connects/disconnects its network via the orchestrator" do
+      tenant = insert(:tenant, slug: "acme")
+      template = insert(:app_template, slug: "blog")
+
+      deployment =
+        insert(:deployment, tenant: tenant, app_template: template, domain: "blog.acme.test")
+
+      net = "homelab_acme_blog_net"
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:publish, fn ^net -> :ok end)
+      |> expect(:unpublish, fn ^net -> :ok end)
+
+      assert :ok = Deployments.publish_deployment(deployment)
+      assert :ok = Deployments.unpublish_deployment(deployment)
+    end
+
+    test "internal-only (no domain) deployment never touches ingress" do
+      deployment = insert(:deployment, domain: nil)
+
+      # No publish/unpublish expectations set: a call would fail verify_on_exit!.
+      assert :ok = Deployments.publish_deployment(deployment)
+      assert :ok = Deployments.unpublish_deployment(deployment)
     end
   end
 end

@@ -9,6 +9,7 @@ defmodule Homelab.Deployments do
   import Ecto.Query
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.SpecBuilder
   alias Homelab.Services.ActivityLog
 
   def list_deployments do
@@ -79,6 +80,113 @@ defmodule Homelab.Deployments do
     |> Repo.update()
   end
 
+  @doc """
+  Atomically transitions a deployment's status, but only if the row is currently
+  in one of `from_states`. This is a compare-and-set evaluated in the database, so
+  it is race-free against the event stream and the reconciler both writing at once.
+
+  Returns `{:ok, deployment}` if the transition was applied, or `{:noop, deployment}`
+  if the guard did not match (some other writer already advanced the row).
+
+  `opts` may carry `:error` (sets `error_message`) and `:external_id`.
+  """
+  def transition_status(%Deployment{id: id}, to, from_states, opts \\ [])
+      when is_atom(to) and is_list(from_states) do
+    set =
+      [status: to, updated_at: naive_now()]
+      |> maybe_set(:error_message, Keyword.get(opts, :error))
+      |> maybe_set(:external_id, Keyword.get(opts, :external_id))
+
+    {count, _} =
+      Deployment
+      |> where([d], d.id == ^id and d.status in ^from_states)
+      |> Repo.update_all(set: set)
+
+    deployment = get_deployment!(id)
+    if count == 1, do: {:ok, deployment}, else: {:noop, deployment}
+  end
+
+  @doc """
+  Records `external_id` only if the row does not already have one. Used after a
+  guarded status transition no-ops (e.g. the `start`/health event raced ahead of
+  the deploy call), so the container id is never lost.
+  """
+  def ensure_external_id(%Deployment{id: id}, external_id) when is_binary(external_id) do
+    Deployment
+    |> where([d], d.id == ^id and is_nil(d.external_id))
+    |> Repo.update_all(set: [external_id: external_id, updated_at: naive_now()])
+  end
+
+  def ensure_external_id(_deployment, _external_id), do: {0, nil}
+
+  @doc """
+  True when a deployment carries a public Traefik route (it has a domain). Such
+  deployments are subject to ingress enforcement; router-less / `:service`
+  deployments are internal-only and never publicly reachable.
+  """
+  def ingress_published?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+
+  @doc """
+  Makes an ingress-published deployment publicly reachable by connecting Traefik
+  to its per-deployment network. No-op for internal-only deployments. This is the
+  *only* action that grants external reachability.
+  """
+  def publish_deployment(%Deployment{} = deployment) do
+    deployment = Repo.preload(deployment, [:tenant, :app_template])
+
+    if ingress_published?(deployment) do
+      network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
+      Homelab.Config.orchestrator().publish(network)
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Severs an ingress-published deployment's public path by disconnecting Traefik
+  from its per-deployment network. Idempotent; no-op for internal-only deployments.
+  Never touches the workload container's own networks.
+  """
+  def unpublish_deployment(%Deployment{} = deployment) do
+    deployment = Repo.preload(deployment, [:tenant, :app_template])
+
+    if ingress_published?(deployment) do
+      network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
+      Homelab.Config.orchestrator().unpublish(network)
+    else
+      :ok
+    end
+  end
+
+  @doc "Lists all ingress-published deployments (any status), preloaded."
+  def list_ingress_deployments do
+    Deployment
+    |> where([d], not is_nil(d.domain) and d.domain != "")
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
+  @doc "Lists ingress-published deployments currently in `:running`, preloaded."
+  def list_published_running do
+    Deployment
+    |> where([d], d.status == :running and not is_nil(d.domain) and d.domain != "")
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
+  @doc "All non-nil external_ids across every deployment, for orphan detection."
+  def list_all_external_ids do
+    Deployment
+    |> where([d], not is_nil(d.external_id))
+    |> select([d], d.external_id)
+    |> Repo.all()
+  end
+
+  defp maybe_set(set, _key, nil), do: set
+  defp maybe_set(set, key, value), do: Keyword.put(set, key, value)
+
+  defp naive_now, do: NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+
   def mark_for_removal(%Deployment{} = deployment) do
     update_status(deployment, :removing)
   end
@@ -117,14 +225,26 @@ defmodule Homelab.Deployments do
       {:ok, spec} ->
         case orchestrator.deploy(spec) do
           {:ok, external_id} ->
-            update_status(deployment, :deploying, external_id: external_id)
+            case transition_status(
+                   deployment,
+                   :deploying,
+                   [:pending, :deploying, :stopped, :failed],
+                   external_id: external_id
+                 ) do
+              {:ok, _} -> :ok
+              {:noop, _} -> ensure_external_id(deployment, external_id)
+            end
+
+            {:ok, get_deployment!(deployment.id)}
 
           {:error, reason} ->
             update_status(deployment, :failed, error: inspect(reason))
+            {:error, reason}
         end
 
       {:error, reason} ->
         update_status(deployment, :failed, error: inspect(reason))
+        {:error, reason}
     end
   end
 
@@ -180,7 +300,16 @@ defmodule Homelab.Deployments do
               external_id: external_id
             })
 
-            {:ok, _} = update_status(deployment, :deploying, external_id: external_id)
+            # Guarded: never clobber a :running/:failed the event stream may have
+            # already written while deploy/1 was in flight. If it no-ops, still
+            # persist the container id so reconciliation can match it later.
+            case transition_status(deployment, :deploying, [:pending, :deploying],
+                   external_id: external_id
+                 ) do
+              {:ok, _} -> :ok
+              {:noop, _} -> ensure_external_id(deployment, external_id)
+            end
+
             post_deploy_hooks(deployment)
             {:ok, get_deployment!(deployment.id)}
 

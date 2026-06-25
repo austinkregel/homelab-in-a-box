@@ -63,6 +63,14 @@ defmodule Homelab.Accounts do
   end
 
   @doc """
+  Lists all admin users (recipients for system alerts).
+  """
+  def list_admins do
+    import Ecto.Query
+    Repo.all(from u in User, where: u.role == :admin)
+  end
+
+  @doc """
   Updates a user.
   """
   def update_user(%User{} = user, attrs) do

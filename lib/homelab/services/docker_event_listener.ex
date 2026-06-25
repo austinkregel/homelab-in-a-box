@@ -3,11 +3,11 @@ defmodule Homelab.Services.DockerEventListener do
   Streams real-time container lifecycle events from the Docker daemon
   and updates deployment status accordingly.
 
-  Replaces the polling-based Reconciler and HealthMonitor with an
-  event-driven approach using Docker's `/events` API endpoint.
-
-  On startup, performs a one-time sync to reconcile any state changes
-  that occurred while the application was offline.
+  Provides the fast, event-driven path for deployment status: a container
+  becoming healthy publishes it and marks it `:running`; a container dying
+  unpublishes it. Continuous convergence (and recovery of any events missed
+  while disconnected) is owned by `Homelab.Services.Reconciler`, which this
+  listener nudges on every (re)connect.
   """
 
   use GenServer
@@ -16,6 +16,7 @@ defmodule Homelab.Services.DockerEventListener do
   alias Homelab.Docker.Client, as: DockerClient
   alias Homelab.Deployments
   alias Homelab.Services.ActivityLog
+  alias Homelab.Services.Reconciler
 
   @pubsub_topic "deployments:status"
   @reconnect_base_ms 1_000
@@ -37,12 +38,11 @@ defmodule Homelab.Services.DockerEventListener do
       connected: false
     }
 
-    {:ok, state, {:continue, :startup_sync}}
+    {:ok, state, {:continue, :startup}}
   end
 
   @impl true
-  def handle_continue(:startup_sync, state) do
-    startup_sync()
+  def handle_continue(:startup, state) do
     send(self(), :connect)
     {:noreply, state}
   end
@@ -57,6 +57,8 @@ defmodule Homelab.Services.DockerEventListener do
     case DockerClient.stream_events(filters) do
       {:ok, resp} ->
         Logger.info("[DockerEventListener] Connected to Docker event stream")
+        # Recover any lifecycle events missed while we were disconnected.
+        Reconciler.request_sync()
 
         {:noreply,
          %{state | stream_resp: resp, buffer: "", reconnect_attempts: 0, connected: true}}
@@ -171,14 +173,47 @@ defmodule Homelab.Services.DockerEventListener do
     end
   end
 
+  # A bare start no longer means "running". The container exists but is not yet
+  # verified ready, so it stays inaccessible (:deploying). Readiness is signalled
+  # by a healthcheck (health_status: healthy) or, for checkless containers, by the
+  # reconciler's running-and-stable window. Fail-closed.
   defp apply_event("start", deployment, _attrs) do
-    if deployment.status != :running do
-      Deployments.update_status(deployment, :running)
-      broadcast_status(deployment.id, :running)
-
-      app_name = deployment.app_template.name
-      ActivityLog.info("deploy", "#{app_name} is running")
+    case Deployments.transition_status(deployment, :deploying, [:pending]) do
+      {:ok, _} -> broadcast_status(deployment.id, :deploying)
+      {:noop, _} -> :ok
     end
+  end
+
+  # Verified ready: grant the public route (ingress only) and mark running.
+  defp apply_event("health_status: healthy", deployment, _attrs) do
+    case Deployments.transition_status(deployment, :running, [:pending, :deploying, :running]) do
+      {:ok, updated} ->
+        Deployments.publish_deployment(updated)
+        broadcast_status(deployment.id, :running)
+
+        if deployment.status != :running do
+          ActivityLog.info("deploy", "#{deployment.app_template.name} is healthy and live", %{
+            deployment_id: deployment.id
+          })
+        end
+
+      {:noop, _} ->
+        :ok
+    end
+  end
+
+  # Sustained unhealthy: sever the public route and demote so it can recover.
+  defp apply_event("health_status: unhealthy", deployment, _attrs) do
+    Deployments.unpublish_deployment(deployment)
+
+    case Deployments.transition_status(deployment, :deploying, [:running]) do
+      {:ok, _} -> broadcast_status(deployment.id, :deploying)
+      {:noop, _} -> :ok
+    end
+
+    ActivityLog.warn("deploy", "#{deployment.app_template.name} health check: unhealthy", %{
+      deployment_id: deployment.id
+    })
   end
 
   defp apply_event("die", deployment, attrs) do
@@ -189,47 +224,46 @@ defmodule Homelab.Services.DockerEventListener do
         :ok
 
       exit_code == 0 ->
-        if deployment.status != :stopped do
-          Deployments.update_status(deployment, :stopped)
-          broadcast_status(deployment.id, :stopped)
-        end
+        mark_down(deployment, :stopped, [:pending, :deploying, :running])
 
       true ->
+        Deployments.unpublish_deployment(deployment)
         error_msg = "Container exited with code #{exit_code}"
-        Deployments.update_status(deployment, :failed, error: error_msg)
-        broadcast_status(deployment.id, :failed)
 
-        app_name = deployment.app_template.name
+        case Deployments.transition_status(deployment, :failed, [:pending, :deploying, :running],
+               error: error_msg
+             ) do
+          {:ok, _} ->
+            broadcast_status(deployment.id, :failed)
 
-        ActivityLog.error("deploy", "#{app_name} failed: #{error_msg}", %{
-          deployment_id: deployment.id
-        })
+            ActivityLog.error("deploy", "#{deployment.app_template.name} failed: #{error_msg}", %{
+              deployment_id: deployment.id
+            })
+
+          {:noop, _} ->
+            :ok
+        end
     end
   end
 
   defp apply_event("stop", deployment, _attrs) do
-    if deployment.status not in [:stopped, :removing] do
-      Deployments.update_status(deployment, :stopped)
-      broadcast_status(deployment.id, :stopped)
-    end
+    mark_down(deployment, :stopped, [:pending, :deploying, :running])
   end
 
   defp apply_event("kill", deployment, _attrs) do
-    if deployment.status not in [:stopped, :removing] do
-      Deployments.update_status(deployment, :stopped)
-      broadcast_status(deployment.id, :stopped)
-    end
-  end
-
-  defp apply_event("health_status: unhealthy", deployment, _attrs) do
-    app_name = deployment.app_template.name
-
-    ActivityLog.warn("deploy", "#{app_name} health check: unhealthy", %{
-      deployment_id: deployment.id
-    })
+    mark_down(deployment, :stopped, [:pending, :deploying, :running])
   end
 
   defp apply_event(_action, _deployment, _attrs), do: :ok
+
+  defp mark_down(deployment, status, from_states) do
+    Deployments.unpublish_deployment(deployment)
+
+    case Deployments.transition_status(deployment, status, from_states) do
+      {:ok, _} -> broadcast_status(deployment.id, status)
+      {:noop, _} -> :ok
+    end
+  end
 
   defp parse_exit_code(nil), do: 1
 
@@ -256,56 +290,4 @@ defmodule Homelab.Services.DockerEventListener do
     Process.send_after(self(), :reconnect, delay)
     %{state | reconnect_attempts: attempts, connected: false, stream_resp: nil}
   end
-
-  defp startup_sync do
-    case Homelab.Config.orchestrator() do
-      nil ->
-        :ok
-
-      orchestrator ->
-        Logger.info("[DockerEventListener] Running startup sync")
-
-        case orchestrator.list_services() do
-          {:ok, services} ->
-            managed =
-              Enum.filter(services, &(Map.get(&1.labels, "homelab.managed") == "true"))
-
-            actual_by_id = Map.new(managed, &{&1.id, &1})
-
-            deployments = Deployments.list_desired_states()
-
-            Enum.each(deployments, fn deployment ->
-              if deployment.external_id do
-                case Map.get(actual_by_id, deployment.external_id) do
-                  nil ->
-                    if deployment.status not in [:stopped, :pending] do
-                      Deployments.update_status(deployment, :failed,
-                        error: "Container not found after restart"
-                      )
-
-                      broadcast_status(deployment.id, :failed)
-                    end
-
-                  service ->
-                    expected = derive_status(service)
-
-                    if deployment.status != expected do
-                      Deployments.update_status(deployment, expected)
-                      broadcast_status(deployment.id, expected)
-                    end
-                end
-              end
-            end)
-
-          {:error, reason} ->
-            Logger.error("[DockerEventListener] Startup sync failed: #{inspect(reason)}")
-        end
-    end
-  end
-
-  defp derive_status(%{state: :running}), do: :running
-  defp derive_status(%{state: :failed}), do: :failed
-  defp derive_status(%{state: :stopped}), do: :stopped
-  defp derive_status(%{state: :pending}), do: :deploying
-  defp derive_status(_), do: :running
 end

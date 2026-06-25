@@ -14,10 +14,14 @@ defmodule Homelab.Infrastructure do
     "traefik" => %{
       name: "Traefik",
       image: "traefik:v3.6",
+      # Only the public web entrypoints are bound to the host. Traefik's API and
+      # dashboard stay on :8080 *inside* the container (reached over the Docker
+      # network as homelab-traefik:8080 for metrics/API) and are deliberately NOT
+      # host-exposed — that insecure dashboard must never be reachable externally,
+      # and host-binding it also collided with app deployments' own ports.
       ports: [
         %{"host" => 80, "container" => 80},
-        %{"host" => 443, "container" => 443},
-        %{"host" => 8080, "container" => 8080}
+        %{"host" => 443, "container" => 443}
       ],
       volumes: [
         %{
@@ -215,23 +219,64 @@ defmodule Homelab.Infrastructure do
   end
 
   @doc """
-  Connects Traefik to all `homelab_*_net` deployment networks. Called after Traefik starts
-  to ensure it can reach every existing deployment.
+  Disconnects Traefik from a network, severing the external route to whatever is on it.
+  Safe to call multiple times — skips if not connected. Never touches workload containers.
   """
-  def sync_traefik_networks do
-    case Client.get("/networks") do
-      {:ok, networks} when is_list(networks) ->
-        deployment_nets =
-          networks
-          |> Enum.filter(fn n -> String.starts_with?(n["Name"] || "", "homelab_") end)
-          |> Enum.map(& &1["Name"])
+  def disconnect_traefik_from_network(network_name) do
+    case Client.get("/containers/homelab-traefik/json") do
+      {:ok, %{"Id" => traefik_id, "NetworkSettings" => %{"Networks" => networks}}} ->
+        if Map.has_key?(networks, network_name) do
+          Logger.info("Infrastructure: disconnecting Traefik from network #{network_name}")
 
-        Enum.each(deployment_nets, &connect_traefik_to_network/1)
+          Client.post("/networks/#{network_name}/disconnect", %{
+            "Container" => traefik_id,
+            "Force" => true
+          })
+        end
+
         :ok
 
-      _ ->
+      {:error, {:not_found, _}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Infrastructure: failed to inspect Traefik: #{inspect(reason)}")
         :ok
     end
+  end
+
+  @doc """
+  Returns the list of network names Traefik is currently connected to.
+  """
+  def traefik_networks do
+    case Client.get("/containers/homelab-traefik/json") do
+      {:ok, %{"NetworkSettings" => %{"Networks" => networks}}} when is_map(networks) ->
+        Map.keys(networks)
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
+  Connects Traefik only to the networks of currently-running, ingress-published
+  deployments. Called after Traefik starts. Fail-closed: it deliberately does NOT
+  reconnect Traefik to unready, failed, or orphaned deployment networks — that is
+  the reconciler's job to enforce continuously.
+  """
+  def sync_traefik_networks do
+    Homelab.Deployments.list_published_running()
+    |> Enum.each(fn deployment ->
+      network =
+        Homelab.Deployments.SpecBuilder.deployment_network(
+          deployment.tenant,
+          deployment.app_template
+        )
+
+      connect_traefik_to_network(network)
+    end)
+
+    :ok
   end
 
   defp ensure_network(network_name) do

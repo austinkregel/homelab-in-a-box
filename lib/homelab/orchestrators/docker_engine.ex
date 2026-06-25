@@ -169,6 +169,10 @@ defmodule Homelab.Orchestrators.DockerEngine do
     end
   end
 
+  # Connects the workload container to its internal networks (bridge nets for
+  # DB/service dependencies and the shared mesh). It deliberately does NOT connect
+  # Traefik to the deployment network — external reachability is granted later,
+  # only after the deployment is verified ready, via `publish/1`. Fail-closed.
   defp maybe_connect_routing_network(container_id, spec) do
     bridge_networks = Map.get(spec, :bridge_networks, [])
 
@@ -183,8 +187,18 @@ defmodule Homelab.Orchestrators.DockerEngine do
     if needs_routing? do
       ensure_network(@routing_network)
       Client.post("/networks/#{@routing_network}/connect", %{"Container" => container_id})
-      Homelab.Infrastructure.connect_traefik_to_network(spec.network)
     end
+  end
+
+  @impl true
+  def publish(network) do
+    ensure_network(network)
+    Homelab.Infrastructure.connect_traefik_to_network(network)
+  end
+
+  @impl true
+  def unpublish(network) do
+    Homelab.Infrastructure.disconnect_traefik_from_network(network)
   end
 
   # --- Image Management ---
@@ -224,11 +238,21 @@ defmodule Homelab.Orchestrators.DockerEngine do
       }
     }
 
-    if map_size(exposed_ports) > 0 do
-      Map.put(payload, "ExposedPorts", exposed_ports)
-    else
-      payload
-    end
+    payload
+    |> maybe_put_exposed_ports(exposed_ports)
+    |> maybe_put_healthcheck(Map.get(spec, :health_check))
+  end
+
+  defp maybe_put_exposed_ports(payload, exposed_ports) when map_size(exposed_ports) > 0 do
+    Map.put(payload, "ExposedPorts", exposed_ports)
+  end
+
+  defp maybe_put_exposed_ports(payload, _exposed_ports), do: payload
+
+  defp maybe_put_healthcheck(payload, nil), do: payload
+
+  defp maybe_put_healthcheck(payload, healthcheck) when is_map(healthcheck) do
+    Map.put(payload, "Healthcheck", healthcheck)
   end
 
   defp build_port_config(ports) when is_list(ports) and length(ports) > 0 do
@@ -324,6 +348,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
       id: container["Id"],
       name: name,
       state: map_container_state(container["State"]),
+      health: parse_health_string(container["Status"]),
       replicas: if(container["State"] == "running", do: 1, else: 0),
       image: container["Image"] || "",
       labels: labels
@@ -339,6 +364,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
       id: container["Id"],
       name: name,
       state: map_inspect_state(state),
+      health: parse_health_status(get_in(state, ["Health", "Status"])),
       replicas: if(state["Running"], do: 1, else: 0),
       image: config["Image"] || "",
       labels: config["Labels"] || %{}
@@ -356,6 +382,24 @@ defmodule Homelab.Orchestrators.DockerEngine do
   defp map_inspect_state(%{"Dead" => true}), do: :failed
   defp map_inspect_state(%{"Restarting" => true}), do: :pending
   defp map_inspect_state(_), do: :stopped
+
+  # `/containers/json` reports health inside the human-readable Status string,
+  # e.g. "Up 2 minutes (healthy)". `:none` means no healthcheck is defined.
+  defp parse_health_string(status) when is_binary(status) do
+    cond do
+      String.contains?(status, "(healthy)") -> :healthy
+      String.contains?(status, "(unhealthy)") -> :unhealthy
+      String.contains?(status, "(health: starting)") -> :starting
+      true -> :none
+    end
+  end
+
+  defp parse_health_string(_), do: :none
+
+  defp parse_health_status("healthy"), do: :healthy
+  defp parse_health_status("unhealthy"), do: :unhealthy
+  defp parse_health_status("starting"), do: :starting
+  defp parse_health_status(_), do: :none
 
   defp parse_stats(data) do
     cpu_percent = calc_cpu_percent(data)

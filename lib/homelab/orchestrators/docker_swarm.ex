@@ -61,6 +61,16 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   end
 
   @impl true
+  def publish(network) do
+    Homelab.Infrastructure.connect_traefik_to_network(network)
+  end
+
+  @impl true
+  def unpublish(network) do
+    Homelab.Infrastructure.disconnect_traefik_from_network(network)
+  end
+
+  @impl true
   def update(service_id, spec) do
     with {:ok, existing} <- Client.get("/services/#{service_id}"),
          version <- get_in(existing, ["Version", "Index"]) do
@@ -230,10 +240,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       "Name" => spec.service_name,
       "Labels" => spec.labels,
       "TaskTemplate" => %{
-        "ContainerSpec" => %{
-          "Image" => spec.image,
-          "Env" => env_to_list(spec.env)
-        },
+        "ContainerSpec" => build_container_spec(spec),
         "Resources" => %{
           "Limits" => %{
             "MemoryBytes" => spec.memory_limit,
@@ -255,6 +262,18 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       "EndpointSpec" => build_endpoint_spec(spec.ports)
     }
     |> maybe_add_mounts(spec)
+  end
+
+  defp build_container_spec(spec) do
+    base = %{
+      "Image" => spec.image,
+      "Env" => env_to_list(spec.env)
+    }
+
+    case Map.get(spec, :health_check) do
+      nil -> base
+      healthcheck when is_map(healthcheck) -> Map.put(base, "Healthcheck", healthcheck)
+    end
   end
 
   defp build_networks(spec) do
@@ -332,6 +351,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       id: service["ID"],
       name: spec["Name"],
       state: infer_service_state(service),
+      health: :none,
       replicas: replicas,
       image: container_spec["Image"] || "",
       labels: spec["Labels"] || %{}

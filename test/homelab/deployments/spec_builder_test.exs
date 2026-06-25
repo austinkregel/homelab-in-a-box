@@ -235,4 +235,93 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert SpecBuilder.tenant_network(tenant) == "homelab_tenant_friends"
     end
   end
+
+  describe "deployment_network_for/2" do
+    test "builds a per-deployment network name from slugs" do
+      assert SpecBuilder.deployment_network_for("acme", "blog") == "homelab_acme_blog_net"
+    end
+  end
+
+  describe "healthcheck translation" do
+    test "an HTTP path becomes a wget/curl probe against the primary port" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          health_check: %{"path" => "/status.php"},
+          ports: [%{"internal" => 8080, "role" => "web"}]
+        })
+
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert ["CMD-SHELL", cmd] = spec.health_check["Test"]
+      assert cmd =~ "http://localhost:8080/status.php"
+      assert spec.health_check["Interval"] == 30_000_000_000
+    end
+
+    test "an explicit command check passes through" do
+      tenant = build_tenant()
+      template = build_template(%{health_check: %{"test" => ["CMD", "pg_isready", "-U", "app"]}})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.health_check["Test"] == ["CMD", "pg_isready", "-U", "app"]
+    end
+
+    test "no declared check yields no Docker healthcheck" do
+      tenant = build_tenant()
+      template = build_template(%{health_check: %{}})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.health_check == nil
+    end
+
+    test "an empty path is not a declared check (non-HTTP services fall back to stability)" do
+      refute SpecBuilder.declares_healthcheck?(%{"path" => ""})
+      refute SpecBuilder.declares_healthcheck?(%{})
+      assert SpecBuilder.declares_healthcheck?(%{"path" => "/health"})
+      assert SpecBuilder.declares_healthcheck?(%{"command" => "redis-cli ping"})
+      assert SpecBuilder.declares_healthcheck?(%{"test" => ["CMD", "true"]})
+    end
+  end
+
+  describe "host port bindings" do
+    test "an ingress-routed deployment binds no host ports (Traefik-only ingress)" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{ports: [%{"internal" => 8080, "published" => true, "host_port" => 8080}]})
+
+      deployment = build_deployment(tenant, template, %{domain: "app.friends.homelab.local"})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == []
+    end
+
+    test "a non-ingress deployment keeps its explicitly published host ports" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{ports: [%{"internal" => 9000, "published" => true, "host_port" => 9000}]})
+
+      deployment = build_deployment(tenant, template, %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert [%{internal: "9000", external: "9000"}] = spec.ports
+    end
+  end
+
+  describe "routing labels" do
+    test "ingress route targets the per-deployment network (the Traefik-connection lever)" do
+      tenant = build_tenant()
+      template = build_template()
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["traefik.enable"] == "true"
+      assert spec.labels["traefik.docker.network"] == "homelab_friends_nextcloud_net"
+    end
+  end
 end
