@@ -27,7 +27,7 @@ defmodule Homelab.Services.Reconciler do
 
   alias Homelab.Accounts
   alias Homelab.Deployments
-  alias Homelab.Deployments.SpecBuilder
+  alias Homelab.Deployments.{ReleaseRunner, Releases, SpecBuilder}
   alias Homelab.Notifications
   alias Homelab.Services.ActivityLog
 
@@ -113,8 +113,12 @@ defmodule Homelab.Services.Reconciler do
 
             actual_by_id = Map.new(managed, &{&1.id, &1})
 
-            converge(actual_by_id)
-            sweep_deploying_timeouts()
+            # Deployments owned by an in-flight release are left to the saga.
+            leased = Releases.leased_deployment_ids()
+
+            resume_stuck_releases()
+            converge(actual_by_id, leased)
+            sweep_deploying_timeouts(leased)
             enforce_ingress_invariant()
 
             state
@@ -128,11 +132,23 @@ defmodule Homelab.Services.Reconciler do
     end
   end
 
+  # Resume releases whose lease has expired (e.g. the runner's node crashed). A
+  # release with no live owner is re-enqueued; the runner reclaims it or, if it
+  # had already failed mid-rollback, drives it to a terminal state. This is what
+  # gives stuck `:pending`/in-flight deployments a convergence path.
+  defp resume_stuck_releases do
+    Releases.list_resumable_releases()
+    |> Enum.each(&ReleaseRunner.enqueue/1)
+  end
+
   # 1. Status convergence
-  defp converge(actual_by_id) do
+  defp converge(actual_by_id, leased) do
     Deployments.list_desired_states()
+    |> Enum.reject(&MapSet.member?(leased, &1.id))
     |> Enum.each(fn deployment ->
       converge_one(deployment, Map.get(actual_by_id, deployment.external_id))
+      # Stamp the heartbeat so the UI reflects that this deployment was reconciled.
+      Deployments.mark_reconciled(deployment)
     end)
   end
 
@@ -191,8 +207,9 @@ defmodule Homelab.Services.Reconciler do
   end
 
   # 2. Deploying timeout
-  defp sweep_deploying_timeouts do
+  defp sweep_deploying_timeouts(leased) do
     Deployments.list_desired_states()
+    |> Enum.reject(&MapSet.member?(leased, &1.id))
     |> Enum.filter(&(&1.status == :deploying))
     |> Enum.each(fn deployment ->
       if age_ms(deployment.updated_at) >= deploying_timeout_ms() do
