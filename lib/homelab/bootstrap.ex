@@ -21,6 +21,10 @@ defmodule Homelab.Bootstrap do
   @postgres_image "postgres:17-alpine"
   @postgres_user "homelab"
   @postgres_db "homelab_prod"
+  # Dedicated Postgres instance for Oban, isolated from the app DB.
+  @oban_postgres_container "homelab-iab-oban-postgres"
+  @oban_postgres_volume "homelab-iab-oban-postgres-data"
+  @oban_postgres_db "homelab_oban_prod"
   @secrets_path "/run/secrets"
   @password_file "pg_password"
   @max_wait_attempts 30
@@ -43,7 +47,10 @@ defmodule Homelab.Bootstrap do
            :ok <- ensure_postgres(password),
            :ok <- wait_for_postgres(),
            :ok <- wait_for_tcp_connection(),
-           :ok <- configure_repo(password) do
+           :ok <- configure_repo(password),
+           :ok <- ensure_oban_postgres(password),
+           :ok <- wait_for_oban_postgres(),
+           :ok <- configure_oban_repo(password) do
         Logger.info("Bootstrap: infrastructure ready")
         :ok
       else
@@ -65,6 +72,14 @@ defmodule Homelab.Bootstrap do
     Ecto.Migrator.run(
       Homelab.Repo,
       Ecto.Migrator.migrations_path(Homelab.Repo),
+      :up,
+      all: true,
+      log: :info
+    )
+
+    Ecto.Migrator.run(
+      Homelab.ObanRepo,
+      Ecto.Migrator.migrations_path(Homelab.ObanRepo),
       :up,
       all: true,
       log: :info
@@ -385,6 +400,103 @@ defmodule Homelab.Bootstrap do
     ]
 
     Application.put_env(:homelab, Homelab.Repo, repo_config)
+    :ok
+  end
+
+  # --- Oban's dedicated Postgres instance (mirrors the app Postgres above) ----
+
+  defp ensure_oban_postgres(password) do
+    case Client.get("/containers/#{@oban_postgres_container}/json") do
+      {:ok, %{"State" => %{"Running" => true}}} ->
+        Logger.info("Bootstrap: Oban Postgres already running")
+        :ok
+
+      {:ok, %{"State" => %{"Running" => false}}} ->
+        Logger.info("Bootstrap: starting existing Oban Postgres container")
+
+        case Client.post("/containers/#{@oban_postgres_container}/start") do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, {:oban_postgres_start_failed, reason}}
+        end
+
+      {:error, {:not_found, _}} ->
+        create_oban_postgres(password)
+
+      {:error, reason} ->
+        {:error, {:oban_postgres_check_failed, reason}}
+    end
+  end
+
+  defp create_oban_postgres(password) do
+    Logger.info("Bootstrap: creating Oban Postgres container")
+
+    body = %{
+      "Image" => @postgres_image,
+      "Env" => [
+        "POSTGRES_USER=#{@postgres_user}",
+        "POSTGRES_PASSWORD=#{password}",
+        "POSTGRES_DB=#{@oban_postgres_db}"
+      ],
+      "HostConfig" => %{
+        "NetworkMode" => @network,
+        "Mounts" => [
+          %{
+            "Type" => "volume",
+            "Source" => @oban_postgres_volume,
+            "Target" => "/var/lib/postgresql/data"
+          }
+        ],
+        "RestartPolicy" => %{"Name" => "unless-stopped"}
+      },
+      "Healthcheck" => %{
+        "Test" => ["CMD-SHELL", "pg_isready -U #{@postgres_user} -d #{@oban_postgres_db}"],
+        "Interval" => 2_000_000_000,
+        "Timeout" => 5_000_000_000,
+        "Retries" => 5
+      }
+    }
+
+    with {:ok, %{"Id" => _id}} <-
+           Client.post("/containers/create?name=#{@oban_postgres_container}", body),
+         {:ok, _} <- Client.post("/containers/#{@oban_postgres_container}/start") do
+      :ok
+    else
+      {:error, reason} -> {:error, {:oban_postgres_create_failed, reason}}
+    end
+  end
+
+  defp wait_for_oban_postgres do
+    Logger.info("Bootstrap: waiting for Oban Postgres to accept connections...")
+    do_wait_for_oban_postgres(0)
+  end
+
+  defp do_wait_for_oban_postgres(attempt) when attempt >= @max_wait_attempts do
+    {:error, :oban_postgres_timeout}
+  end
+
+  defp do_wait_for_oban_postgres(attempt) do
+    case Client.get("/containers/#{@oban_postgres_container}/json") do
+      {:ok, %{"State" => %{"Health" => %{"Status" => "healthy"}}}} ->
+        Logger.info("Bootstrap: Oban Postgres is healthy")
+        :ok
+
+      _ ->
+        Process.sleep(@wait_interval_ms)
+        do_wait_for_oban_postgres(attempt + 1)
+    end
+  end
+
+  defp configure_oban_repo(password) do
+    oban_repo_config = [
+      username: @postgres_user,
+      password: password,
+      hostname: @oban_postgres_container,
+      database: @oban_postgres_db,
+      port: 5432,
+      pool_size: 6
+    ]
+
+    Application.put_env(:homelab, Homelab.ObanRepo, oban_repo_config)
     :ok
   end
 

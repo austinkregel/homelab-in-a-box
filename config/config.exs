@@ -8,7 +8,7 @@
 import Config
 
 config :homelab,
-  ecto_repos: [Homelab.Repo],
+  ecto_repos: [Homelab.Repo, Homelab.ObanRepo],
   generators: [timestamp_type: :utc_datetime],
   base_domain: "homelab.local",
   orchestrator: Homelab.Orchestrators.DockerSwarm,
@@ -26,6 +26,36 @@ config :homelab, HomelabWeb.Endpoint,
   ],
   pubsub_server: Homelab.PubSub,
   live_view: [signing_salt: "fyhX1vsF"]
+
+# Configure Oban (durable, ordered deployment releases).
+# Runs against its OWN repo/Postgres instance (Homelab.ObanRepo) to keep job
+# churn off the main DB. Kept deliberately light: one queue, the process-group
+# notifier (no LISTEN/NOTIFY chatter), prune old jobs, and Lifeline to rescue
+# jobs that were executing when a node crashed (crash-resume).
+config :homelab, Oban,
+  repo: Homelab.ObanRepo,
+  notifier: Oban.Notifiers.PG,
+  queues: [releases: 4],
+  plugins: [
+    {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
+    {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(30)}
+  ]
+
+# Maps release-step types to their handler module for the ReleaseRunner saga.
+# Unlisted types fall back to the Noop handler (the saga engine still runs).
+config :homelab, :release_step_handlers, %{
+  # Greenfield deploy steps.
+  provision_credentials: Homelab.Deployments.ReleaseSteps.ProvisionCredentials,
+  dependency_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
+  app_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
+  await_health: Homelab.Deployments.ReleaseSteps.AwaitHealth,
+  publish_ingress: Homelab.Deployments.ReleaseSteps.PublishIngress,
+  # Adoption steps.
+  backup_verify: Homelab.Deployments.ReleaseSteps.BackupVerify,
+  quiesce_old: Homelab.Deployments.ReleaseSteps.QuiesceOld,
+  migrate_volume: Homelab.Deployments.ReleaseSteps.MigrateCopy,
+  resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld
+}
 
 # Configure the mailer
 #

@@ -15,11 +15,16 @@ defmodule Homelab.Application do
     children = [
       HomelabWeb.Telemetry,
       Homelab.Repo,
+      # Oban's repo points at a dedicated Postgres instance; start it before the
+      # MigrationRunner so its job table can be migrated alongside the app DB.
+      Homelab.ObanRepo,
       {DNSCluster, query: Application.get_env(:homelab, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Homelab.PubSub},
       {Task.Supervisor, name: Homelab.Workers.TaskSupervisor, max_children: 10},
       Homelab.Services.ActivityLog,
       Homelab.MigrationRunner,
+      # Oban starts after migrations so its job table exists.
+      {Oban, Application.fetch_env!(:homelab, Oban)},
       %{
         id: Homelab.ServicesSupervisor,
         type: :supervisor,
