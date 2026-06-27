@@ -12,6 +12,7 @@ config :homelab,
   generators: [timestamp_type: :utc_datetime],
   base_domain: "homelab.local",
   orchestrator: Homelab.Orchestrators.DockerSwarm,
+  docker_client: Homelab.Docker.ReqClient,
   identity_broker: Homelab.IdentityBrokers.GenericOidc,
   gateway: Homelab.Gateways.Traefik,
   backup_provider: Homelab.BackupProviders.Restic

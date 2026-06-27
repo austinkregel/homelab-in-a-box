@@ -30,7 +30,12 @@ defmodule Homelab.Services.DockerEventListener do
   def topic, do: @pubsub_topic
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    # Test seam: a `:docker_client` option scopes the Docker client to THIS
+    # process (the façade reads `Process.get(:docker_client)` first), so tests
+    # can drive the stream without mutating global config. No-op in production.
+    if client = Keyword.get(opts, :docker_client), do: Process.put(:docker_client, client)
+
     state = %{
       stream_resp: nil,
       buffer: "",

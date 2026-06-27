@@ -56,6 +56,10 @@ config :homelab,
   public_dns_provider: Homelab.Mocks.DnsProvider,
   internal_dns_provider: Homelab.Mocks.DnsProvider,
   registrar: Homelab.Mocks.RegistrarProvider,
+  # Default to an unreachable-daemon stub so incidental Docker callers behave as
+  # they did with no daemon. Docker-focused tests opt in per process with
+  # `Process.put(:docker_client, Homelab.Mocks.DockerClient)`.
+  docker_client: Homelab.Docker.UnavailableClient,
   start_services: false,
   registries: [Homelab.Registries.DockerHub]
 
