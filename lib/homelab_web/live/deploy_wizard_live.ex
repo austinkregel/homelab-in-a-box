@@ -814,8 +814,11 @@ defmodule HomelabWeb.DeployWizardLive do
           })
         end
 
-      companion_results =
-        Enum.map(socket.assigns.compose_services, fn svc ->
+      # Create the companion deployment ROWS (no domain — companions are internal
+      # dependencies, never ingress-published). The release saga deploys them.
+      companion_deployments =
+        socket.assigns.compose_services
+        |> Enum.map(fn svc ->
           slug = slugify(svc[:name] || "compose-service")
           image = svc[:image] || ""
 
@@ -866,27 +869,35 @@ defmodule HomelabWeb.DeployWizardLive do
               |> Enum.reject(fn %{"value" => v} -> v == "" end)
               |> Map.new(fn %{"key" => k, "value" => v} -> {k, v} end)
 
-            Homelab.Deployments.deploy_now(%{
-              tenant_id: String.to_integer(tenant_id),
-              app_template_id: template.id,
-              domain: domain,
-              env_overrides: svc_env_overrides
-            })
+            case Homelab.Deployments.create_deployment(%{
+                   tenant_id: String.to_integer(tenant_id),
+                   app_template_id: template.id,
+                   domain: nil,
+                   env_overrides: svc_env_overrides
+                 }) do
+              {:ok, deployment} -> deployment
+              _ -> nil
+            end
           end
         end)
+        |> Enum.reject(&is_nil/1)
 
-      all_results = [main_result | companion_results]
+      case main_result do
+        {:ok, app_deployment} ->
+          {:ok, _release} =
+            Homelab.Deployments.deploy_release(app_deployment, companion_deployments)
 
-      success_count =
-        Enum.count(all_results, fn
-          {:ok, _} -> true
-          _ -> false
-        end)
+          {:noreply,
+           socket
+           |> put_flash(
+             :info,
+             "Deployment started — provisioning #{length(companion_deployments) + 1} service(s)."
+           )
+           |> push_navigate(to: ~p"/")}
 
-      {:noreply,
-       socket
-       |> put_flash(:info, "#{success_count} service(s) deployed!")
-       |> push_navigate(to: ~p"/")}
+        _ ->
+          {:noreply, put_flash(socket, :error, "Could not start the deployment.")}
+      end
     end
   end
 
@@ -2482,12 +2493,13 @@ defmodule HomelabWeb.DeployWizardLive do
           >
             Cancel
           </.link>
-          <button
+          <.button
             type="submit"
+            label="Deploy"
             class="px-6 py-2 rounded-lg bg-primary text-primary-content text-sm font-bold hover:bg-primary/90 transition-colors shadow-lg shadow-primary/20 cursor-pointer"
           >
-            <.icon name="hero-rocket-launch-mini" class="size-4 inline mr-1" /> Deploy
-          </button>
+            <.icon name="hero-rocket-launch-mini" class="size-4 inline mr-1" />
+          </.button>
         </div>
       </.form>
     </div>
@@ -2598,12 +2610,13 @@ defmodule HomelabWeb.DeployWizardLive do
               name={"env_overrides[#{env["key"]}]"}
               value={env["value"] || ""}
             />
-            <button
+            <.button
               type="submit"
+              label="Deploy"
               class="w-full px-6 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-bold hover:bg-primary/90 transition-colors shadow-lg shadow-primary/20 cursor-pointer flex items-center justify-center gap-2"
             >
-              <.icon name="hero-rocket-launch-mini" class="size-4" /> Deploy
-            </button>
+              <.icon name="hero-rocket-launch-mini" class="size-4" />
+            </.button>
           </.form>
         </div>
       </div>

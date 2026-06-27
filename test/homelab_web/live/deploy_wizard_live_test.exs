@@ -831,7 +831,15 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       })
 
       flash = assert_redirect(view, "/")
-      assert flash["info"] =~ "service(s) deployed"
+      assert flash["info"] =~ "Deployment started"
+
+      # The compose deploy now runs through the durable release saga: a release is
+      # planned for the app deployment with companion + app container steps.
+      assert [release] = Homelab.Repo.all(Homelab.Deployments.Release)
+      release = Homelab.Repo.preload(release, :steps)
+      step_types = Enum.map(release.steps, & &1.type)
+      assert :app_container in step_types
+      assert :dependency_container in step_types
     end
   end
 

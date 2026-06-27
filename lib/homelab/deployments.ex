@@ -10,6 +10,7 @@ defmodule Homelab.Deployments do
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.SpecBuilder
+  alias Homelab.Deployments.{ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
 
   def list_deployments do
@@ -287,6 +288,44 @@ defmodule Homelab.Deployments do
       do_deploy(deployment)
     end
   end
+
+  @doc """
+  Provisions a deployment (and any companion deployments) durably via the release
+  saga instead of the imperative in-request path: plans the ordered steps and
+  enqueues `ReleaseRunner`. Companions are deployed and awaited healthy before the
+  app, the app is awaited, then ingress is published (when the app has a domain).
+
+  Both `app` and each companion must already exist as `:pending` deployment rows
+  (their `env_overrides` carry any shared credentials). Returns `{:ok, release}`.
+
+  This is the path that fixes multi-stage deploys: a release can only reach
+  `:running` once its `:app_container` step has run, and a failure rolls back the
+  companions so nothing is orphaned.
+  """
+  def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
+      when is_list(companions) do
+    steps =
+      Enum.flat_map(companions, fn companion ->
+        [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
+        ]
+      end) ++
+        [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}}
+        ] ++ ingress_steps(app)
+
+    with {:ok, release} <- Releases.plan_release(app, steps) do
+      {:ok, _job} = ReleaseRunner.enqueue(release)
+      {:ok, release}
+    end
+  end
+
+  defp ingress_steps(%Deployment{domain: domain}) when is_binary(domain) and domain != "",
+    do: [%{type: :publish_ingress, resource_handle: %{}}]
+
+  defp ingress_steps(_app), do: []
 
   defp do_deploy(deployment) do
     ensure_traefik_if_needed(deployment)
