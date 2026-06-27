@@ -1,24 +1,29 @@
 defmodule Homelab.Deployments.Migrate.ContainerControlTest do
   @moduledoc """
-  `ContainerControl` is the live implementation of the `ContainerOps`
-  behaviour. Every public function delegates straight to
-  `Homelab.Docker.Client`, which talks to the Docker Engine API over a Unix
-  socket. The client has no plug/`Req.Test`/Bypass injection seam (it always
-  builds its own request and calls `Req.request/1` with `unix_socket:`), so the
-  request/response branches cannot be exercised against a fake daemon without a
-  live socket.
+  `ContainerControl` is the live implementation of the `ContainerOps` behaviour;
+  every public function delegates to `Homelab.Docker.Client`.
 
-  What we CAN assert without Docker is the contract: that this module declares
-  and fully implements the `ContainerOps` behaviour with the expected callbacks
-  and arities. The branch-level behaviour (304 -> :ok, policy extraction, etc.)
-  is covered by the `:integration`-tagged tests below, which run only when a
-  daemon is reachable and otherwise stay green by tolerating a connection error.
+  The Docker client now has a test seam: `Homelab.Docker.Client` dispatches to the
+  module in `Process.get(:docker_client)` (then the configured default), so a test
+  can point it at `Homelab.Mocks.DockerClient` for *its own process only* and drive
+  every request/response branch against canned JSON — no daemon required. The
+  `:integration`-tagged tests below still exercise a real daemon when present.
   """
 
   use ExUnit.Case, async: true
 
+  import Mox
+
   alias Homelab.Deployments.Migrate.ContainerControl
   alias Homelab.Deployments.Migrate.ContainerOps
+
+  setup :verify_on_exit!
+
+  # Route this process's Docker client to the mock (no global state mutated).
+  setup do
+    Process.put(:docker_client, Homelab.Mocks.DockerClient)
+    :ok
+  end
 
   describe "behaviour contract" do
     test "declares the ContainerOps behaviour" do
@@ -46,6 +51,92 @@ defmodule Homelab.Deployments.Migrate.ContainerControlTest do
                  stop: 2,
                  start: 1
                )
+    end
+  end
+
+  describe "restart_policy/1 (mocked daemon)" do
+    test "extracts the configured policy name" do
+      expect(Homelab.Mocks.DockerClient, :get, fn "/containers/db/json", _opts ->
+        {:ok, %{"HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}}}}
+      end)
+
+      assert {:ok, "always"} = ContainerControl.restart_policy("db")
+    end
+
+    test "defaults to \"no\" when the policy name is null" do
+      expect(Homelab.Mocks.DockerClient, :get, fn _path, _opts ->
+        {:ok, %{"HostConfig" => %{"RestartPolicy" => %{"Name" => nil}}}}
+      end)
+
+      assert {:ok, "no"} = ContainerControl.restart_policy("db")
+    end
+
+    test "defaults to \"no\" when the body has no restart policy" do
+      expect(Homelab.Mocks.DockerClient, :get, fn _path, _opts ->
+        {:ok, %{"HostConfig" => %{}}}
+      end)
+
+      assert {:ok, "no"} = ContainerControl.restart_policy("db")
+    end
+
+    test "propagates a client error" do
+      expect(Homelab.Mocks.DockerClient, :get, fn _path, _opts ->
+        {:error, {:not_found, %{}}}
+      end)
+
+      assert {:error, {:not_found, %{}}} = ContainerControl.restart_policy("gone")
+    end
+  end
+
+  describe "set_restart_policy/2 (mocked daemon)" do
+    test "POSTs the new policy to /update and returns :ok" do
+      expect(Homelab.Mocks.DockerClient, :post, fn "/containers/db/update", body, _opts ->
+        assert body == %{"RestartPolicy" => %{"Name" => "no"}}
+        {:ok, %{}}
+      end)
+
+      assert :ok = ContainerControl.set_restart_policy("db", "no")
+    end
+
+    test "propagates a client error" do
+      expect(Homelab.Mocks.DockerClient, :post, fn _path, _body, _opts ->
+        {:error, {:http_error, 500, %{}}}
+      end)
+
+      assert {:error, {:http_error, 500, %{}}} = ContainerControl.set_restart_policy("db", "no")
+    end
+  end
+
+  describe "stop/2 and start/1 (mocked daemon)" do
+    test "stop sends the SIGTERM grace period via ?t= and returns :ok" do
+      expect(Homelab.Mocks.DockerClient, :post, fn "/containers/db/stop?t=60", body, _opts ->
+        assert is_nil(body)
+        {:ok, %{}}
+      end)
+
+      assert :ok = ContainerControl.stop("db", 60)
+    end
+
+    test "stop treats a 304 (already stopped) as :ok" do
+      expect(Homelab.Mocks.DockerClient, :post, fn _path, _body, _opts -> {:ok, :not_modified} end)
+
+      assert :ok = ContainerControl.stop("db", 1)
+    end
+
+    test "start returns :ok" do
+      expect(Homelab.Mocks.DockerClient, :post, fn "/containers/db/start", _body, _opts ->
+        {:ok, %{}}
+      end)
+
+      assert :ok = ContainerControl.start("db")
+    end
+
+    test "start propagates a client error" do
+      expect(Homelab.Mocks.DockerClient, :post, fn _path, _body, _opts ->
+        {:error, {:connection_error, :nope}}
+      end)
+
+      assert {:error, {:connection_error, :nope}} = ContainerControl.start("db")
     end
   end
 
