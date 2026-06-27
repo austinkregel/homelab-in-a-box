@@ -34,7 +34,10 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
   end
 
   setup context do
-    # Route every step type through the controllable handler.
+    # Route every step type through the controllable handler. RESTORE (not delete)
+    # the original registry on exit, or other tests (e.g. the greenfield release
+    # e2e) lose the real handlers and silently run NoopHandler.
+    original_handlers = Application.fetch_env(:homelab, :release_step_handlers)
     Application.put_env(:homelab, :release_step_handlers, %{default: TestHandler})
 
     Application.put_env(:homelab, :test_release_handler, %{
@@ -43,7 +46,11 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     })
 
     on_exit(fn ->
-      Application.delete_env(:homelab, :release_step_handlers)
+      case original_handlers do
+        {:ok, value} -> Application.put_env(:homelab, :release_step_handlers, value)
+        :error -> Application.delete_env(:homelab, :release_step_handlers)
+      end
+
       Application.delete_env(:homelab, :test_release_handler)
     end)
 
