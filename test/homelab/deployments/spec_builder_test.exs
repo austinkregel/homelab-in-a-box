@@ -292,7 +292,9 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       tenant = build_tenant()
 
       template =
-        build_template(%{ports: [%{"internal" => 8080, "published" => true, "host_port" => 8080}]})
+        build_template(%{
+          ports: [%{"internal" => 8080, "published" => true, "host_port" => 8080}]
+        })
 
       deployment = build_deployment(tenant, template, %{domain: "app.friends.homelab.local"})
 
@@ -304,7 +306,9 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       tenant = build_tenant()
 
       template =
-        build_template(%{ports: [%{"internal" => 9000, "published" => true, "host_port" => 9000}]})
+        build_template(%{
+          ports: [%{"internal" => 9000, "published" => true, "host_port" => 9000}]
+        })
 
       deployment = build_deployment(tenant, template, %{domain: nil})
 
