@@ -707,12 +707,11 @@ defmodule HomelabWeb.DeploymentLive do
                     class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
                 </div>
-                <button
+                <.button
                   type="submit"
+                  label="Save"
                   class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
-                >
-                  Save
-                </button>
+                />
               </.form>
             <% else %>
               <table class="w-full text-sm">
@@ -784,13 +783,12 @@ defmodule HomelabWeb.DeploymentLive do
         >
           <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
             <h3 class="text-sm font-semibold text-base-content">Backups</h3>
-            <button
+            <.button
               type="button"
               phx-click="trigger_backup"
+              label="Back up"
               class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-            >
-              Manual backup
-            </button>
+            />
           </div>
           <div class="p-4">
             <table class="w-full text-sm">

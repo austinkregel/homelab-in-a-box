@@ -80,7 +80,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "backups"})
       assert html =~ "Backups"
-      assert html =~ "Manual backup"
+      assert html =~ "Back up"
     end
 
     test "switch to volumes tab", %{conn: conn, deployment: dep} do

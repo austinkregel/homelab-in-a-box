@@ -82,37 +82,75 @@ defmodule HomelabWeb.CoreComponents do
   @doc """
   Renders a button with navigation support.
 
+  Action buttons can opt into a loading state by passing `label`: the label is
+  conjugated server-side (`Homelab.Inflect`) and, while the button's phx-submit /
+  phx-click round-trip is in flight, a spinner appears and the text transitions
+  through gerund and past tense (Save → Saving → Saved) via the `ButtonLoading`
+  JS hook. Pass `loading={false}` to opt out (e.g. for non-verb or nav buttons).
+
   ## Examples
 
       <.button>Send!</.button>
       <.button phx-click="go" variant="primary">Send!</.button>
       <.button navigate={~p"/"}>Home</.button>
+      <.button label="Save" type="submit" />
+      <.button label="Deploy" phx-click="deploy"><.icon name="hero-rocket-launch" /></.button>
   """
-  attr :rest, :global, include: ~w(href navigate patch method download name value disabled)
+  attr :rest, :global,
+    include: ~w(href navigate patch method download name value disabled type form)
+
   attr :class, :any
   attr :variant, :string, values: ~w(primary)
-  slot :inner_block, required: true
+  attr :label, :string, default: nil, doc: "verb-led label to conjugate for the loading state"
+  attr :loading, :boolean, default: true, doc: "enable the Save → Saving → Saved loading state"
+  attr :id, :string, default: nil
+  slot :inner_block
 
   def button(%{rest: rest} = assigns) do
     variants = %{"primary" => "btn-primary", nil => "btn-primary btn-soft"}
 
     assigns =
-      assign_new(assigns, :class, fn ->
-        ["btn", Map.fetch!(variants, assigns[:variant])]
-      end)
+      assigns
+      |> assign_new(:class, fn -> ["btn", Map.fetch!(variants, assigns[:variant])] end)
+      |> assign(:loading_enabled, is_binary(assigns[:label]) and assigns[:loading])
 
-    if rest[:href] || rest[:navigate] || rest[:patch] do
-      ~H"""
-      <.link class={@class} {@rest}>
-        {render_slot(@inner_block)}
-      </.link>
-      """
-    else
-      ~H"""
-      <button class={@class} {@rest}>
-        {render_slot(@inner_block)}
-      </button>
-      """
+    cond do
+      rest[:href] || rest[:navigate] || rest[:patch] ->
+        ~H"""
+        <.link class={@class} {@rest}>
+          {if @label, do: @label}{render_slot(@inner_block)}
+        </.link>
+        """
+
+      assigns.loading_enabled ->
+        assigns =
+          assigns
+          |> assign(:id, assigns.id || "btn-#{System.unique_integer([:positive])}")
+          |> assign(:gerund, Homelab.Inflect.gerund(assigns.label))
+          |> assign(:past, Homelab.Inflect.past(assigns.label))
+
+        ~H"""
+        <button
+          id={@id}
+          class={@class}
+          phx-hook="ButtonLoading"
+          data-label-root={@label}
+          data-label-gerund={@gerund}
+          data-label-past={@past}
+          {@rest}
+        >
+          {render_slot(@inner_block)}
+          <span data-spinner class="hero-arrow-path hidden size-4 animate-spin" />
+          <span data-label>{@label}</span>
+        </button>
+        """
+
+      true ->
+        ~H"""
+        <button class={@class} {@rest}>
+          {if @label, do: @label}{render_slot(@inner_block)}
+        </button>
+        """
     end
   end
 

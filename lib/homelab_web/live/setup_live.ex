@@ -806,12 +806,11 @@ defmodule HomelabWeb.SetupLive do
         >
           Back
         </button>
-        <button
+        <.button
           type="submit"
+          label="Create Space"
           class="px-5 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 transition-all cursor-pointer"
-        >
-          Create Space
-        </button>
+        />
       </div>
     </.form>
     """

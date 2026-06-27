@@ -613,12 +613,11 @@ defmodule HomelabWeb.CatalogLive do
             />
             <.input field={@custom_form[:tag]} type="text" label="Tag" placeholder="latest" />
             <.input field={@custom_form[:name]} type="text" label="Display name" placeholder="My App" />
-            <button
+            <.button
               type="submit"
+              label="Deploy"
               class="w-full py-2.5 rounded-lg bg-primary text-primary-content font-medium"
-            >
-              Deploy
-            </button>
+            />
           </.form>
         </div>
 
@@ -996,12 +995,11 @@ defmodule HomelabWeb.CatalogLive do
                   >
                     Cancel
                   </button>
-                  <button
+                  <.button
                     type="submit"
+                    label="Deploy"
                     class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
-                  >
-                    Deploy
-                  </button>
+                  />
                 </div>
               </.form>
             </div>

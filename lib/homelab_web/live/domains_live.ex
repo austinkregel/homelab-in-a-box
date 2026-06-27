@@ -848,12 +848,11 @@ defmodule HomelabWeb.DomainsLive do
       >
         Cancel
       </button>
-      <button
+      <.button
         type="submit"
+        label={@submit_label}
         class="px-5 py-2 rounded-xl bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 transition-all cursor-pointer"
-      >
-        {@submit_label}
-      </button>
+      />
     </div>
     """
   end
