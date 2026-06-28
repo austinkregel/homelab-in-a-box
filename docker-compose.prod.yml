@@ -4,8 +4,10 @@
 # isolated from any shared `homelab-postgres` on the host) via the mounted
 # Docker socket when BOOTSTRAP=true — so this file only runs the app itself.
 #
-# Single node:   docker compose -f docker-compose.prod.yml up -d
-# Build image:   ./build_from_scratch.sh prod   (or `docker build -t homelab-in-a-box:latest .`)
+# Single node:   docker compose -f docker-compose.prod.yml up -d   (pulls from GHCR)
+# Update:        docker compose -f docker-compose.prod.yml pull && ... up -d
+# Image:         published to ghcr.io by .github/workflows/release.yml on release.
+#                Pin a version with `HOMELAB_IMAGE_TAG=v1.2.3` (defaults to latest).
 # Secrets/config: copy .env.example -> .env and fill it in (gitignored).
 #
 # Swarm note: `docker stack deploy` ignores `env_file:`, `container_name:` and
@@ -15,7 +17,7 @@
 
 services:
   homelab:
-    image: homelab-in-a-box:latest
+    image: ghcr.io/austinkregel/homelab-in-a-box:${HOMELAB_IMAGE_TAG:-latest}
     container_name: homelab
     restart: unless-stopped
     env_file:
