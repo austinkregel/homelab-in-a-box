@@ -10,7 +10,7 @@ defmodule Homelab.Deployments do
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.SpecBuilder
-  alias Homelab.Deployments.{ReleaseRunner, Releases}
+  alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
 
   def list_deployments do
@@ -121,16 +121,19 @@ defmodule Homelab.Deployments do
   def ensure_external_id(_deployment, _external_id), do: {0, nil}
 
   @doc """
-  True when a deployment carries a public Traefik route (it has a domain). Such
-  deployments are subject to ingress enforcement; router-less / `:service`
-  deployments are internal-only and never publicly reachable.
+  True when a deployment *should* carry a public Traefik route: it's in a reverse-
+  proxy access mode AND has a domain. `:host`/`:service` deployments are never
+  proxied (a host deployment with a stray domain is not routed). Requires
+  `app_template` preloaded.
   """
-  def ingress_published?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+  def ingress_published?(%Deployment{} = deployment) do
+    is_binary(deployment.domain) and deployment.domain != "" and Access.proxy_mode?(deployment)
+  end
 
   @doc """
-  Makes an ingress-published deployment publicly reachable by connecting Traefik
-  to its per-deployment network. No-op for internal-only deployments. This is the
-  *only* action that grants external reachability.
+  Makes a proxy-mode deployment publicly reachable by connecting Traefik to its
+  per-deployment network. No-op unless it's a proxy mode with a domain. This is
+  the *only* action that grants external reachability.
   """
   def publish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
@@ -144,19 +147,15 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
-  Severs an ingress-published deployment's public path by disconnecting Traefik
-  from its per-deployment network. Idempotent; no-op for internal-only deployments.
-  Never touches the workload container's own networks.
+  Severs a deployment's public path by disconnecting Traefik from its
+  per-deployment network. Always safe to call (disconnecting a network Traefik
+  isn't on is a no-op), so it also cleans up a stale route after an access-mode
+  change. Never touches the workload container's own networks.
   """
   def unpublish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
-
-    if ingress_published?(deployment) do
-      network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
-      Homelab.Config.orchestrator().unpublish(network)
-    else
-      :ok
-    end
+    network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
+    Homelab.Config.orchestrator().unpublish(network)
   end
 
   @doc "Lists all ingress-published deployments (any status), preloaded."
