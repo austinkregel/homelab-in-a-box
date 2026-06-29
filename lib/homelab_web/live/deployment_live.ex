@@ -3,7 +3,6 @@ defmodule HomelabWeb.DeploymentLive do
 
   alias Homelab.Deployments
   alias Homelab.Backups
-  alias Homelab.Repo
   alias Homelab.Services.BackupScheduler
 
   @log_poll_interval 3_000
@@ -21,6 +20,10 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:log_timer, nil)
       |> assign(:env_edit_mode, false)
       |> assign(:env_form, nil)
+      |> assign(:settings_edit_mode, false)
+      |> assign(:settings_domain, "")
+      |> assign(:settings_exposure, "public")
+      |> assign(:settings_ports, [])
       |> assign(:resource_stats, nil)
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
@@ -206,17 +209,78 @@ defmodule HomelabWeb.DeploymentLive do
     env_overrides = params["env"] || params || %{}
     env_overrides = Map.reject(env_overrides, fn {_k, v} -> v == "" or v == nil end)
 
-    case Deployments.update_deployment(deployment, %{env_overrides: env_overrides}) do
+    case apply_config(deployment, %{env_overrides: env_overrides}) do
       {:ok, updated} ->
         {:noreply,
          socket
-         |> assign(:deployment, Repo.preload(updated, [:tenant, :app_template]))
+         |> assign(:deployment, updated)
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
-         |> put_flash(:info, "Environment updated.")}
+         |> put_flash(:info, "Environment updated — recreating the container.")}
 
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Failed to update environment.")}
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  # --- Settings (domain / exposure / ports) ---
+
+  def handle_event("start_settings_edit", _params, socket) do
+    deployment = socket.assigns.deployment
+
+    {:noreply,
+     socket
+     |> assign(:settings_edit_mode, true)
+     |> assign(:settings_domain, deployment.domain || "")
+     |> assign(:settings_exposure, effective_exposure_str(deployment))
+     |> assign(:settings_ports, editable_ports(effective_ports_list(deployment)))}
+  end
+
+  def handle_event("cancel_settings_edit", _params, socket) do
+    {:noreply, assign(socket, :settings_edit_mode, false)}
+  end
+
+  # Keep the assigns in sync as the user types so add/remove-port don't drop edits.
+  def handle_event("settings_changed", %{"settings" => settings}, socket) do
+    {:noreply,
+     socket
+     |> assign(:settings_domain, settings["domain"] || "")
+     |> assign(:settings_exposure, settings["exposure_mode"] || socket.assigns.settings_exposure)
+     |> assign(:settings_ports, ports_from_params(settings["ports"]))}
+  end
+
+  def handle_event("settings_add_port", _params, socket) do
+    blank = %{"internal" => "", "external" => "", "published" => false}
+    {:noreply, assign(socket, :settings_ports, socket.assigns.settings_ports ++ [blank])}
+  end
+
+  def handle_event("settings_remove_port", %{"index" => idx}, socket) do
+    ports = List.delete_at(socket.assigns.settings_ports, String.to_integer(idx))
+    {:noreply, assign(socket, :settings_ports, ports)}
+  end
+
+  def handle_event("save_settings", %{"settings" => settings}, socket) do
+    deployment = socket.assigns.deployment
+    domain = blank_to_nil(settings["domain"])
+    exposure = settings["exposure_mode"] || effective_exposure_str(deployment)
+    ports = Homelab.Deployments.ConfigForm.parse_ports(settings["ports"])
+
+    attrs = %{
+      domain: domain,
+      exposure_mode_override: exposure,
+      ports_override: ports
+    }
+
+    case apply_config(deployment, attrs) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign(:settings_edit_mode, false)
+         |> put_flash(:info, "Settings saved — recreating the container.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
     end
   end
 
@@ -346,7 +410,16 @@ defmodule HomelabWeb.DeploymentLive do
         <div class="flex gap-6 border-b border-base-content/10 mb-5">
           <button
             :for={
-              tab <- ["overview", "topology", "traffic", "logs", "environment", "volumes", "backups"]
+              tab <- [
+                "overview",
+                "settings",
+                "topology",
+                "traffic",
+                "logs",
+                "environment",
+                "volumes",
+                "backups"
+              ]
             }
             type="button"
             phx-click="switch_tab"
@@ -656,6 +729,173 @@ defmodule HomelabWeb.DeploymentLive do
           </script>
         </div>
 
+        <%!-- Settings tab (domain / exposure / ports) --%>
+        <div
+          :if={@active_tab == "settings"}
+          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
+        >
+          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+            <h3 class="text-sm font-semibold text-base-content">Network &amp; ports</h3>
+            <button
+              :if={!@settings_edit_mode}
+              type="button"
+              phx-click="start_settings_edit"
+              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+            >
+              Edit
+            </button>
+          </div>
+          <div class="p-4">
+            <%= if @settings_edit_mode do %>
+              <.form
+                for={%{}}
+                id="settings-form"
+                phx-change="settings_changed"
+                phx-submit="save_settings"
+                data-confirm={"Recreate #{@deployment.app_template.name}? The app restarts briefly while the new configuration is applied."}
+                class="space-y-5"
+              >
+                <div class="flex flex-col gap-1">
+                  <label class="text-xs font-medium text-base-content/50">Domain</label>
+                  <input
+                    type="text"
+                    name="settings[domain]"
+                    value={@settings_domain}
+                    placeholder={"#{@deployment.app_template.slug}.yourdomain.com"}
+                    class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                  />
+                  <p class="text-[10px] text-base-content/40">
+                    Set a domain to expose via the reverse proxy. Leave blank for no public route.
+                  </p>
+                </div>
+
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-base-content/50">Exposure</label>
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <label
+                      :for={{value, title, desc} <- exposure_choices()}
+                      class={[
+                        "flex flex-col gap-0.5 rounded-lg border p-2.5 cursor-pointer transition-colors",
+                        if(@settings_exposure == value,
+                          do: "border-primary bg-primary/5",
+                          else: "border-base-content/10 hover:border-base-content/20"
+                        )
+                      ]}
+                    >
+                      <input
+                        type="radio"
+                        name="settings[exposure_mode]"
+                        value={value}
+                        checked={@settings_exposure == value}
+                        class="sr-only"
+                      />
+                      <span class="text-xs font-semibold text-base-content">{title}</span>
+                      <span class="text-[10px] text-base-content/40 leading-snug">{desc}</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                  <div class="flex items-center justify-between">
+                    <label class="text-xs font-medium text-base-content/50">Port forwarding</label>
+                    <button
+                      type="button"
+                      phx-click="settings_add_port"
+                      class="text-xs text-primary hover:text-primary/80"
+                    >
+                      + Add port
+                    </button>
+                  </div>
+                  <p :if={@settings_ports == []} class="text-[11px] text-base-content/30">
+                    No host ports. Add one to forward a container port to the host.
+                  </p>
+                  <div
+                    :for={{port, idx} <- Enum.with_index(@settings_ports)}
+                    class="flex items-center gap-2"
+                  >
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][internal]"}
+                      value={port["internal"]}
+                      placeholder="container"
+                      class="w-24 rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2"
+                    />
+                    <span class="text-base-content/30">→</span>
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][external]"}
+                      value={port["external"]}
+                      placeholder="host"
+                      class="w-24 rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2"
+                    />
+                    <label class="flex items-center gap-1.5 text-xs text-base-content/60">
+                      <input
+                        type="checkbox"
+                        name={"settings[ports][#{idx}][published]"}
+                        value="true"
+                        checked={port["published"]}
+                        class="rounded"
+                      /> publish
+                    </label>
+                    <button
+                      type="button"
+                      phx-click="settings_remove_port"
+                      phx-value-index={idx}
+                      class="text-base-content/30 hover:text-error ml-auto"
+                    >
+                      <.icon name="hero-x-mark" class="size-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div class="flex gap-2 pt-1">
+                  <button
+                    type="button"
+                    phx-click="cancel_settings_edit"
+                    class="px-3 py-1.5 rounded-lg text-sm text-base-content/70 hover:bg-base-200"
+                  >
+                    Cancel
+                  </button>
+                  <.button
+                    type="submit"
+                    label="Save and recreate"
+                    class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
+                  />
+                </div>
+              </.form>
+            <% else %>
+              <dl class="space-y-3 text-sm">
+                <div class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Domain</dt>
+                  <dd class="text-base-content font-mono">{@deployment.domain || "—"}</dd>
+                </div>
+                <div class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Exposure</dt>
+                  <dd class="text-base-content">{effective_exposure_str(@deployment)}</dd>
+                </div>
+                <div class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Ports</dt>
+                  <dd class="text-base-content font-mono text-right">
+                    <%= case effective_ports_list(@deployment) do %>
+                      <% [] -> %>
+                        —
+                      <% ports -> %>
+                        <span :for={p <- ports} class="block">
+                          {p["internal"]}
+                          <%= if p["published"] in [true, "true"] do %>
+                            → {p[
+                              "external"
+                            ] || p["internal"]} (host)
+                          <% end %>
+                        </span>
+                    <% end %>
+                  </dd>
+                </div>
+              </dl>
+            <% end %>
+          </div>
+        </div>
+
         <%!-- Environment tab --%>
         <div
           :if={@active_tab == "environment"}
@@ -828,6 +1068,73 @@ defmodule HomelabWeb.DeploymentLive do
     base = template.default_env || %{}
     overrides = deployment.env_overrides || %{}
     Map.merge(base, overrides)
+  end
+
+  # Persists config attrs then recreates the container so the changes take effect.
+  defp apply_config(deployment, attrs) do
+    with {:ok, updated} <- Deployments.update_deployment(deployment, attrs),
+         {:ok, _} <- Deployments.recreate_deployment(updated) do
+      {:ok, Deployments.get_deployment!(updated.id)}
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, "Could not save the configuration."}
+      {:error, reason} -> {:error, "Saved, but recreate failed: #{inspect(reason)}"}
+    end
+  end
+
+  # Effective per-deployment config (override wins over the template default),
+  # mirroring Homelab.Deployments.SpecBuilder.
+  defp effective_exposure_str(deployment) do
+    case deployment.exposure_mode_override do
+      m when m in [nil, ""] -> to_string(deployment.app_template.exposure_mode)
+      s -> s
+    end
+  end
+
+  defp effective_ports_list(deployment) do
+    case deployment.ports_override do
+      nil -> deployment.app_template.ports || []
+      ports -> ports
+    end
+  end
+
+  # Normalizes stored ports into the string-keyed shape the edit form renders.
+  defp editable_ports(ports) do
+    Enum.map(ports, fn p ->
+      %{
+        "internal" => to_string(p["internal"] || p["container_port"] || ""),
+        "external" => to_string(p["external"] || p["host_port"] || ""),
+        "published" => p["published"] in [true, "true"]
+      }
+    end)
+  end
+
+  # Reads the live form's indexed port params, keeping every row (incl. blanks)
+  # so add/remove don't drop a row mid-edit. Save uses ConfigForm for the final
+  # normalized override.
+  defp ports_from_params(ports) when is_map(ports) do
+    ports
+    |> Enum.sort_by(fn {i, _} -> String.to_integer(i) end)
+    |> Enum.map(fn {_, p} ->
+      %{
+        "internal" => p["internal"] || "",
+        "external" => p["external"] || "",
+        "published" => p["published"] == "true"
+      }
+    end)
+  end
+
+  defp ports_from_params(_), do: []
+
+  defp blank_to_nil(v) when v in [nil, ""], do: nil
+  defp blank_to_nil(v), do: v
+
+  defp exposure_choices do
+    [
+      {"public", "Public", "Anyone via domain"},
+      {"sso_protected", "SSO", "Requires login"},
+      {"private", "Private", "LAN only"},
+      {"service", "Service", "Internal, no host ports"}
+    ]
   end
 
   defp mask_secret(key, val) when is_binary(key) do

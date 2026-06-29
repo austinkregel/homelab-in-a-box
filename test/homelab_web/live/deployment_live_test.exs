@@ -26,6 +26,10 @@ defmodule HomelabWeb.DeploymentLiveTest do
     |> stub(:display_name, fn -> "Docker" end)
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
+    # Config edits (env/settings) recreate the container; tests that assert the
+    # exact recreate calls override these with `expect`.
+    |> stub(:undeploy, fn _id -> :ok end)
+    |> stub(:deploy, fn _spec -> {:ok, "recreated_container"} end)
 
     Homelab.Mocks.Gateway
     |> stub(:driver_id, fn -> "traefik" end)
@@ -1117,6 +1121,70 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
       assert html =~ "Removing"
+    end
+  end
+
+  describe "settings reconfiguration" do
+    test "saving settings persists per-deployment overrides and recreates the container",
+         %{conn: conn, deployment: dep} do
+      # The recreate path: undeploy the old container, deploy a fresh one.
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "domain" => "dashy.example.com",
+          "exposure_mode" => "public",
+          "ports" => %{
+            "0" => %{"internal" => "8080", "external" => "9090", "published" => "true"}
+          }
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.domain == "dashy.example.com"
+      assert updated.exposure_mode_override == "public"
+      assert [%{"internal" => "8080", "published" => true}] = updated.ports_override
+    end
+
+    test "overriding one deployment's config does not affect a sibling on the same template",
+         %{conn: conn, tenant: tenant, template: template, deployment: dep} do
+      sibling =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "sibling_123",
+          domain: nil
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form",
+        settings: %{"domain" => "dashy.example.com", "exposure_mode" => "service"}
+      )
+      |> render_submit()
+
+      assert Homelab.Deployments.get_deployment!(dep.id).exposure_mode_override == "service"
+      # Sibling untouched — its overrides remain nil and it inherits the template.
+      reloaded_sibling = Homelab.Deployments.get_deployment!(sibling.id)
+      assert reloaded_sibling.exposure_mode_override == nil
+      assert reloaded_sibling.domain == nil
     end
   end
 end
