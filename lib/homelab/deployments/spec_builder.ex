@@ -11,6 +11,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   """
 
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.Access
 
   @type service_spec :: %{
           service_name: String.t(),
@@ -33,9 +34,9 @@ defmodule Homelab.Deployments.SpecBuilder do
     tenant = deployment.tenant
 
     with :ok <- validate_required_env(template, deployment.env_overrides) do
-      service_mode? = effective_exposure(deployment) == :service
-      ingress? = is_binary(deployment.domain) and deployment.domain != ""
-      ports = build_ports(deployment, service_mode?, ingress?)
+      # Access model: only :host binds host ports; proxy/:service never do.
+      service_mode? = Access.effective_exposure(deployment) == :service
+      ports = build_ports(deployment)
 
       primary_network = deployment_network(tenant, template)
       bridge_networks = build_bridge_networks(template, tenant)
@@ -244,16 +245,20 @@ defmodule Homelab.Deployments.SpecBuilder do
     "homelab-#{sanitize(tenant_slug)}-#{sanitize(app_slug)}-#{path_slug}"
   end
 
-  # Service-mode containers never publish ports (internal-only).
-  defp build_ports(_deployment, true = _service_mode?, _ingress?), do: []
+  # Host ports are bound ONLY in :host access mode. Proxy modes (public/
+  # sso_protected/private) are reached through Traefik and :service is internal —
+  # neither binds a host port, so there's no silent override and a protected app
+  # can never be reached on the host bypassing its auth.
+  defp build_ports(%Deployment{} = deployment) do
+    if Access.effective_exposure(deployment) == :host do
+      bind_host_ports(deployment)
+    else
+      []
+    end
+  end
 
-  # Ingress-routed deployments are reached through Traefik over the deployment
-  # network, so they must NOT bind a host port — that would both bypass Traefik
-  # and collide with whatever already owns the port (e.g. Traefik's own :8080).
-  defp build_ports(_deployment, _service_mode?, true = _ingress?), do: []
-
-  defp build_ports(deployment, _service_mode?, _ingress?) do
-    effective_ports(deployment)
+  defp bind_host_ports(deployment) do
+    Access.effective_ports(deployment)
     |> Enum.filter(fn port -> port["published"] == true end)
     |> Enum.map(fn port ->
       internal = to_string(port["internal"] || port["container_port"])
@@ -275,7 +280,7 @@ defmodule Homelab.Deployments.SpecBuilder do
       "homelab.tenant" => tenant.slug,
       "homelab.app" => template.slug,
       "homelab.deployment_id" => to_string(deployment.id),
-      "homelab.exposure" => to_string(effective_exposure(deployment))
+      "homelab.exposure" => to_string(Access.effective_exposure(deployment))
     }
   end
 
@@ -290,11 +295,24 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
+  # A Traefik route is emitted only for a proxy access mode WITH a domain. A
+  # :host or :service deployment is never proxied, even if a stray domain is set,
+  # so there are no dead routes.
   defp build_routing_labels(%Deployment{domain: domain} = deployment, network)
        when is_binary(domain) and domain != "" do
+    if Access.proxy_mode?(deployment) do
+      proxy_labels(deployment, domain, network)
+    else
+      %{}
+    end
+  end
+
+  defp build_routing_labels(_deployment, _network), do: %{}
+
+  defp proxy_labels(deployment, domain, network) do
     router = sanitize_domain(domain)
-    port = primary_port(effective_ports(deployment))
-    exposure = to_string(effective_exposure(deployment))
+    port = primary_port(Access.effective_ports(deployment))
+    exposure = to_string(Access.effective_exposure(deployment))
 
     base = %{
       "traefik.enable" => "true",
@@ -308,8 +326,6 @@ defmodule Homelab.Deployments.SpecBuilder do
 
     Map.merge(base, exposure_middleware_labels(router, exposure))
   end
-
-  defp build_routing_labels(_deployment, _network), do: %{}
 
   defp exposure_middleware_labels(router, "sso_protected") do
     %{
@@ -345,18 +361,6 @@ defmodule Homelab.Deployments.SpecBuilder do
       p -> to_string(p["internal"] || p["container_port"] || "80")
     end
   end
-
-  # Effective per-deployment config: an override wins over the (shared) template
-  # default; nil means "inherit". `ports_override == []` means "no ports".
-  defp effective_exposure(%Deployment{exposure_mode_override: o, app_template: t}) do
-    case o do
-      m when m in [nil, ""] -> t.exposure_mode
-      s -> String.to_existing_atom(s)
-    end
-  end
-
-  defp effective_ports(%Deployment{ports_override: nil, app_template: t}), do: t.ports || []
-  defp effective_ports(%Deployment{ports_override: ports}), do: ports
 
   defp sanitize_domain(domain) do
     domain
