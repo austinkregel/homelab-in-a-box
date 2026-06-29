@@ -2,6 +2,7 @@ defmodule HomelabWeb.DeployWizardLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Catalog
+  alias Homelab.Deployments.Access
   alias Homelab.Catalog.CatalogEntry
   alias Homelab.Catalog.MetadataEnricher
   alias Homelab.Catalog.Enrichers.ComposeParser
@@ -49,6 +50,9 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:companion_loading, false)
       |> assign(:domain, "")
       |> assign(:exposure_mode, "public")
+      # Access model: top-level access ("proxy"/"host"/"internal") + proxy auth.
+      |> assign(:access, "proxy")
+      |> assign(:auth, "public")
       |> assign(:tenant_id, nil)
 
     {:ok, socket}
@@ -672,7 +676,7 @@ defmodule HomelabWeb.DeployWizardLive do
       ) do
     socket =
       case key do
-        "exposure" -> assign(socket, :exposure_mode, value)
+        "exposure" -> assign_exposure(socket, value)
         _ -> socket
       end
 
@@ -728,17 +732,45 @@ defmodule HomelabWeb.DeployWizardLive do
   def handle_event("update_network", params, socket) do
     socket =
       socket
-      |> assign(:exposure_mode, params["exposure_mode"] || socket.assigns.exposure_mode)
+      |> assign_exposure(params["exposure_mode"] || socket.assigns.exposure_mode)
 
     {:noreply, socket}
+  end
+
+  # Access model: choose the access mode (proxy/host/internal) and, for proxy,
+  # the auth level. Both derive the canonical `exposure_mode`.
+  def handle_event("update_access", %{"access" => access}, socket) do
+    exposure = Access.exposure_for(access, socket.assigns.auth)
+    {:noreply, socket |> assign(:access, access) |> assign(:exposure_mode, exposure)}
+  end
+
+  def handle_event("update_auth", %{"auth" => auth}, socket) do
+    exposure = Access.exposure_for("proxy", auth)
+
+    {:noreply,
+     socket |> assign(:access, "proxy") |> assign(:auth, auth) |> assign(:exposure_mode, exposure)}
+  end
+
+  # Keep the config-step assigns in sync as the user edits, so navigation and the
+  # Review step reflect the latest ports/volumes/env (no stale-assign bug).
+  def handle_event("config_changed", params, socket) do
+    {:noreply,
+     socket
+     |> assign(:ports, sync_ports(params["ports"], socket.assigns.ports))
+     |> assign(:volumes, sync_volumes(params["volumes"], socket.assigns.volumes))
+     |> assign(:env_vars, sync_env(params["env"], socket.assigns.env_vars))}
   end
 
   # --- Events: Deploy ---
 
   def handle_event("deploy", params, socket) do
     tenant_id = params["tenant_id"] || socket.assigns.tenant_id
-    domain = params["domain"] || socket.assigns.domain
     exposure_mode = params["exposure_mode"] || socket.assigns.exposure_mode
+    # A domain only applies to reverse-proxy access; host/internal ignore it.
+    domain =
+      if Access.access_of(exposure_mode) == "proxy",
+        do: params["domain"] || socket.assigns.domain,
+        else: nil
 
     if tenant_id == nil or tenant_id == "" do
       {:noreply, put_flash(socket, :error, "Please select a space.")}
@@ -1127,6 +1159,8 @@ defmodule HomelabWeb.DeployWizardLive do
               deploy_type={@deploy_type}
               selected_template={@selected_template}
               domain={@domain}
+              access={@access}
+              auth={@auth}
               exposure_mode={@exposure_mode}
               tenant_id={@tenant_id}
               tenants={@tenants}
@@ -1137,6 +1171,7 @@ defmodule HomelabWeb.DeployWizardLive do
               selected_template={@selected_template}
               selected_entry={@selected_entry}
               enriching={@enriching}
+              exposure_mode={@exposure_mode}
               ports={@ports}
               volumes={@volumes}
               env_vars={@env_vars}
@@ -1598,375 +1633,392 @@ defmodule HomelabWeb.DeployWizardLive do
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <%!-- Ports --%>
-        <div class={[
-          "rounded-lg border p-3 transition-colors",
-          if(@enriching in ["inspecting"],
-            do: "bg-base-100/60 border-base-content/5",
-            else: "bg-base-100 border-base-content/5"
-          )
-        ]}>
-          <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
-            <.icon name="hero-signal-mini" class="size-4 text-info" /> Ports
-            <.section_enrichment_badge stage={@enriching} affects="inspecting" />
-          </h3>
-          <%= if @enriching == "inspecting" && @ports == [] do %>
-            <.skeleton_rows count={2} />
-          <% else %>
-            <p class="text-[11px] text-base-content/40 mb-2 leading-snug">
-              Ports route through the reverse proxy by default.
-              Enable "Publish to host" only for direct access (e.g. database clients).
-            </p>
-            <div class="space-y-2">
-              <div
-                :for={{port, idx} <- Enum.with_index(@ports)}
-                class="rounded-md bg-base-200/50 p-2.5"
+      <.form
+        for={to_form(%{})}
+        id="config-form"
+        phx-change="config_changed"
+        phx-submit="config_changed"
+        class="contents"
+      >
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <%!-- Ports --%>
+          <div class={[
+            "rounded-lg border p-3 transition-colors",
+            if(@enriching in ["inspecting"],
+              do: "bg-base-100/60 border-base-content/5",
+              else: "bg-base-100 border-base-content/5"
+            )
+          ]}>
+            <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
+              <.icon name="hero-signal-mini" class="size-4 text-info" /> Ports
+              <.section_enrichment_badge stage={@enriching} affects="inspecting" />
+            </h3>
+            <%= if @enriching == "inspecting" && @ports == [] do %>
+              <.skeleton_rows count={2} />
+            <% else %>
+              <p
+                :if={@exposure_mode == "host"}
+                class="text-[11px] text-base-content/40 mb-2 leading-snug"
               >
-                <div class="flex items-center justify-between mb-1.5">
-                  <span
-                    :if={port["description"] && port["description"] != ""}
-                    class="text-[11px] text-base-content/50"
-                  >
-                    {port["description"]}
-                  </span>
-                  <span
-                    :if={!port["description"] || port["description"] == ""}
-                    class="text-[11px] text-base-content/30 italic"
-                  >
-                    Port {idx + 1}
-                  </span>
-                  <button
-                    type="button"
-                    phx-click="remove_port"
-                    phx-value-index={idx}
-                    class="text-base-content/25 hover:text-error transition-colors cursor-pointer"
-                  >
-                    <.icon name="hero-x-mark-mini" class="size-3.5" />
-                  </button>
-                </div>
-                <div class="flex items-center gap-2">
-                  <div class="flex-1">
-                    <label class="block text-[10px] text-base-content/30 mb-0.5">Container</label>
+                Host-ports access: each listed port binds to the host. Set the host port for each.
+              </p>
+              <p
+                :if={@exposure_mode != "host"}
+                class="text-[11px] text-base-content/40 mb-2 leading-snug"
+              >
+                These are the container's ports. They're reached through the reverse proxy — choose
+                <span class="font-medium">Host ports</span>
+                access on the previous step to bind them to the host.
+              </p>
+              <div class="space-y-2">
+                <div
+                  :for={{port, idx} <- Enum.with_index(@ports)}
+                  class="rounded-md bg-base-200/50 p-2.5"
+                >
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span
+                      :if={port["description"] && port["description"] != ""}
+                      class="text-[11px] text-base-content/50"
+                    >
+                      {port["description"]}
+                    </span>
+                    <span
+                      :if={!port["description"] || port["description"] == ""}
+                      class="text-[11px] text-base-content/30 italic"
+                    >
+                      Port {idx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      phx-click="remove_port"
+                      phx-value-index={idx}
+                      class="text-base-content/25 hover:text-error transition-colors cursor-pointer"
+                    >
+                      <.icon name="hero-x-mark-mini" class="size-3.5" />
+                    </button>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <div class="flex-1">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">Container</label>
+                      <input
+                        type="text"
+                        name={"ports[#{idx}][internal]"}
+                        value={port["internal"] || ""}
+                        placeholder="80"
+                        class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      />
+                    </div>
+                    <div class="w-24">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">Role</label>
+                      <select
+                        name={"ports[#{idx}][role]"}
+                        class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-1.5 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option
+                          :for={
+                            {label, value} <- Homelab.Catalog.Enrichers.PortRoles.available_roles()
+                          }
+                          value={value}
+                          selected={value == (port["role"] || "other")}
+                        >
+                          {label}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                  <%!-- Host binding only appears in Host-ports access; every listed
+                     port binds. Proxy/internal modes keep the value but don't bind. --%>
+                  <div :if={@exposure_mode == "host"} class="flex items-center gap-2 mt-1.5">
+                    <label class="text-[10px] text-base-content/40">Host port</label>
                     <input
                       type="text"
-                      name={"ports[#{idx}][internal]"}
-                      value={port["internal"] || ""}
-                      placeholder="80"
-                      class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      name={"ports[#{idx}][external]"}
+                      value={port["external"] || port["internal"]}
+                      placeholder={port["internal"]}
+                      class="w-20 rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1 px-2 focus:ring-2 focus:ring-primary/50"
                     />
+                    <input type="hidden" name={"ports[#{idx}][published]"} value="true" />
                   </div>
-                  <div class="w-24">
-                    <label class="block text-[10px] text-base-content/30 mb-0.5">Role</label>
-                    <select
-                      name={"ports[#{idx}][role]"}
-                      class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-1.5 focus:ring-2 focus:ring-primary/50"
-                    >
-                      <option
-                        :for={{label, value} <- Homelab.Catalog.Enrichers.PortRoles.available_roles()}
-                        value={value}
-                        selected={value == (port["role"] || "other")}
-                      >
-                        {label}
-                      </option>
-                    </select>
-                  </div>
-                </div>
-                <label class="flex items-center gap-2 mt-1.5 cursor-pointer select-none group">
                   <input
-                    type="checkbox"
-                    name={"ports[#{idx}][published]"}
-                    value="true"
-                    checked={port["published"] == true || port["published"] == "true"}
-                    class="rounded border-base-content/20 text-primary focus:ring-primary/50 size-3.5"
-                  />
-                  <span class="text-[10px] text-base-content/40 group-hover:text-base-content/60 transition-colors">
-                    Publish to host on port
-                  </span>
-                  <input
-                    :if={port["published"] == true || port["published"] == "true"}
-                    type="text"
-                    name={"ports[#{idx}][external]"}
-                    value={port["external"] || port["internal"]}
-                    placeholder={port["internal"]}
-                    class="w-16 rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1 px-2 focus:ring-2 focus:ring-primary/50"
-                  />
-                  <input
-                    :if={!(port["published"] == true || port["published"] == "true")}
+                    :if={@exposure_mode != "host"}
                     type="hidden"
                     name={"ports[#{idx}][external]"}
                     value={port["external"] || port["internal"]}
                   />
-                </label>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add_port"
+                  class="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
+                >
+                  <.icon name="hero-plus-mini" class="size-3.5" /> Add port
+                </button>
               </div>
-              <button
-                type="button"
-                phx-click="add_port"
-                class="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
-              >
-                <.icon name="hero-plus-mini" class="size-3.5" /> Add port
-              </button>
-            </div>
-          <% end %>
+            <% end %>
+          </div>
+
+          <%!-- Volumes --%>
+          <div class={[
+            "rounded-lg border p-3 transition-colors",
+            if(@enriching in ["inspecting"],
+              do: "bg-base-100/60 border-base-content/5",
+              else: "bg-base-100 border-base-content/5"
+            )
+          ]}>
+            <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
+              <.icon name="hero-circle-stack-mini" class="size-4 text-secondary" /> Volumes
+              <.section_enrichment_badge stage={@enriching} affects="inspecting" />
+            </h3>
+            <%= if @enriching == "inspecting" && @volumes == [] do %>
+              <.skeleton_rows count={1} />
+            <% else %>
+              <div class="space-y-2">
+                <div
+                  :for={{vol, idx} <- Enum.with_index(@volumes)}
+                  class="rounded-md bg-base-200/50 p-2.5"
+                >
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span
+                      :if={vol["description"] && vol["description"] != ""}
+                      class="text-[11px] text-base-content/50"
+                    >
+                      {vol["description"]}
+                    </span>
+                    <span
+                      :if={!vol["description"] || vol["description"] == ""}
+                      class="text-[11px] text-base-content/30 italic"
+                    >
+                      Volume {idx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      phx-click="remove_volume"
+                      phx-value-index={idx}
+                      class="text-base-content/25 hover:text-error transition-colors cursor-pointer"
+                    >
+                      <.icon name="hero-x-mark-mini" class="size-3.5" />
+                    </button>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-base-content/30 mb-0.5">
+                      Container path
+                    </label>
+                    <input
+                      type="text"
+                      name={"volumes[#{idx}][container_path]"}
+                      value={vol["path"] || vol["container_path"] || ""}
+                      placeholder="/data"
+                      class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  phx-click="add_volume"
+                  class="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
+                >
+                  <.icon name="hero-plus-mini" class="size-3.5" /> Add volume
+                </button>
+              </div>
+            <% end %>
+          </div>
         </div>
 
-        <%!-- Volumes --%>
+        <%!-- Environment Variables --%>
         <div class={[
-          "rounded-lg border p-3 transition-colors",
-          if(@enriching in ["inspecting"],
+          "rounded-lg border p-3 mt-4 transition-colors",
+          if(@enriching,
             do: "bg-base-100/60 border-base-content/5",
             else: "bg-base-100 border-base-content/5"
           )
         ]}>
-          <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
-            <.icon name="hero-circle-stack-mini" class="size-4 text-secondary" /> Volumes
-            <.section_enrichment_badge stage={@enriching} affects="inspecting" />
-          </h3>
-          <%= if @enriching == "inspecting" && @volumes == [] do %>
-            <.skeleton_rows count={1} />
+          <div class="flex items-center gap-2 mb-2">
+            <h3 class="text-sm font-semibold text-base-content flex items-center gap-2">
+              <.icon name="hero-key-mini" class="size-4 text-warning" /> Environment Variables
+              <.section_enrichment_badge stage={@enriching} affects="scanning" />
+            </h3>
+            <span
+              :if={@enriching && @env_vars != []}
+              class="flex items-center gap-1.5 text-[10px] text-base-content/30 ml-auto"
+            >
+              <.icon name="hero-arrow-path" class="size-3 animate-spin" /> Discovering...
+            </span>
+            <span :if={!@enriching} class="text-[10px] font-normal text-base-content/30 ml-auto">
+              {length(@env_vars)} variables
+            </span>
+          </div>
+
+          <%= if @enriching && @env_vars == [] do %>
+            <.skeleton_rows count={3} />
+            <p class="text-[10px] text-base-content/30 text-center mt-1">Scanning...</p>
           <% else %>
-            <div class="space-y-2">
-              <div
-                :for={{vol, idx} <- Enum.with_index(@volumes)}
-                class="rounded-md bg-base-200/50 p-2.5"
-              >
-                <div class="flex items-center justify-between mb-1.5">
-                  <span
-                    :if={vol["description"] && vol["description"] != ""}
-                    class="text-[11px] text-base-content/50"
-                  >
-                    {vol["description"]}
-                  </span>
-                  <span
-                    :if={!vol["description"] || vol["description"] == ""}
-                    class="text-[11px] text-base-content/30 italic"
-                  >
-                    Volume {idx + 1}
-                  </span>
+            <div :if={@env_vars == [] && !@enriching} class="py-3 text-center">
+              <p class="text-xs text-base-content/30">No environment variables configured yet.</p>
+            </div>
+
+            <div :if={@env_vars != []}>
+              <div class="grid grid-cols-[1fr_2fr_auto] gap-x-2 text-[10px] text-base-content/30 px-2 mb-1">
+                <span>Key</span>
+                <span>Value</span>
+                <span class="w-5"></span>
+              </div>
+              <div class="space-y-1">
+                <div
+                  :for={{env, idx} <- Enum.with_index(@env_vars)}
+                  class="grid grid-cols-[1fr_2fr_auto] gap-x-2 items-center"
+                >
+                  <input
+                    type="text"
+                    name={"env[#{idx}][key]"}
+                    value={env["key"]}
+                    placeholder="VARIABLE_NAME"
+                    class="w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono font-medium text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                  />
+                  <input
+                    type={if(sensitive_key?(env["key"]), do: "password", else: "text")}
+                    name={"env[#{idx}][value]"}
+                    value={env["value"]}
+                    placeholder={if(env["required"], do: "Required", else: "")}
+                    class={[
+                      "w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50",
+                      if(env["required"] && (env["value"] == nil || env["value"] == ""),
+                        do: "ring-1 ring-warning/30",
+                        else: ""
+                      )
+                    ]}
+                  />
                   <button
                     type="button"
-                    phx-click="remove_volume"
+                    phx-click="remove_env_var"
                     phx-value-index={idx}
-                    class="text-base-content/25 hover:text-error transition-colors cursor-pointer"
+                    class="text-base-content/20 hover:text-error transition-colors cursor-pointer w-5 flex items-center justify-center"
                   >
                     <.icon name="hero-x-mark-mini" class="size-3.5" />
                   </button>
                 </div>
-                <div>
-                  <label class="block text-[10px] text-base-content/30 mb-0.5">Container path</label>
-                  <input
-                    type="text"
-                    name={"volumes[#{idx}][container_path]"}
-                    value={vol["path"] || vol["container_path"] || ""}
-                    placeholder="/data"
-                    class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
-                  />
-                </div>
               </div>
-              <button
-                type="button"
-                phx-click="add_volume"
-                class="flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
-              >
-                <.icon name="hero-plus-mini" class="size-3.5" /> Add volume
-              </button>
             </div>
+
+            <button
+              :if={!@enriching}
+              type="button"
+              phx-click="add_env_var"
+              class="flex items-center gap-1 text-[11px] font-medium text-primary hover:text-primary/80 transition-colors mt-2 cursor-pointer"
+            >
+              <.icon name="hero-plus-mini" class="size-3" /> Add variable
+            </button>
           <% end %>
         </div>
-      </div>
 
-      <%!-- Environment Variables --%>
-      <div class={[
-        "rounded-lg border p-3 mt-4 transition-colors",
-        if(@enriching,
-          do: "bg-base-100/60 border-base-content/5",
-          else: "bg-base-100 border-base-content/5"
-        )
-      ]}>
-        <div class="flex items-center gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-base-content flex items-center gap-2">
-            <.icon name="hero-key-mini" class="size-4 text-warning" /> Environment Variables
-            <.section_enrichment_badge stage={@enriching} affects="scanning" />
-          </h3>
-          <span
-            :if={@enriching && @env_vars != []}
-            class="flex items-center gap-1.5 text-[10px] text-base-content/30 ml-auto"
-          >
-            <.icon name="hero-arrow-path" class="size-3 animate-spin" /> Discovering...
-          </span>
-          <span :if={!@enriching} class="text-[10px] font-normal text-base-content/30 ml-auto">
-            {length(@env_vars)} variables
-          </span>
+        <%!-- Database dependency suggestions --%>
+        <div :if={@db_suggestions != [] && !@enriching} class="mt-4 space-y-2">
+          <.db_suggestion_card :for={suggestion <- @db_suggestions} suggestion={suggestion} />
         </div>
 
-        <%= if @enriching && @env_vars == [] do %>
-          <.skeleton_rows count={3} />
-          <p class="text-[10px] text-base-content/30 text-center mt-1">Scanning...</p>
-        <% else %>
-          <div :if={@env_vars == [] && !@enriching} class="py-3 text-center">
-            <p class="text-xs text-base-content/30">No environment variables configured yet.</p>
-          </div>
-
-          <div :if={@env_vars != []}>
-            <div class="grid grid-cols-[1fr_2fr_auto] gap-x-2 text-[10px] text-base-content/30 px-2 mb-1">
-              <span>Key</span>
-              <span>Value</span>
-              <span class="w-5"></span>
-            </div>
-            <div class="space-y-1">
-              <div
-                :for={{env, idx} <- Enum.with_index(@env_vars)}
-                class="grid grid-cols-[1fr_2fr_auto] gap-x-2 items-center"
-              >
-                <input
-                  type="text"
-                  name={"env[#{idx}][key]"}
-                  value={env["key"]}
-                  placeholder="VARIABLE_NAME"
-                  class="w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono font-medium text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
-                />
-                <input
-                  type={if(sensitive_key?(env["key"]), do: "password", else: "text")}
-                  name={"env[#{idx}][value]"}
-                  value={env["value"]}
-                  placeholder={if(env["required"], do: "Required", else: "")}
-                  class={[
-                    "w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50",
-                    if(env["required"] && (env["value"] == nil || env["value"] == ""),
-                      do: "ring-1 ring-warning/30",
-                      else: ""
-                    )
-                  ]}
-                />
-                <button
-                  type="button"
-                  phx-click="remove_env_var"
-                  phx-value-index={idx}
-                  class="text-base-content/20 hover:text-error transition-colors cursor-pointer w-5 flex items-center justify-center"
-                >
-                  <.icon name="hero-x-mark-mini" class="size-3.5" />
-                </button>
+        <%!-- Infrastructure suggestions --%>
+        <div :if={@infra_suggestions != [] && !@enriching} class="mt-4">
+          <div class="rounded-lg border border-info/20 bg-info/5 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <.icon name="hero-light-bulb" class="size-4 text-info" />
+                <h4 class="text-sm font-semibold text-base-content">Smart auto-fill</h4>
+                <span class="text-[10px] font-medium text-info/60 px-1.5 py-0.5 rounded-full bg-info/10">
+                  {length(@infra_suggestions)} detected
+                </span>
               </div>
+              <button
+                :if={length(@infra_suggestions) > 1}
+                type="button"
+                phx-click="apply_all_infra"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-info/10 text-info text-[10px] font-medium hover:bg-info/20 transition-colors cursor-pointer"
+              >
+                <.icon name="hero-bolt-mini" class="size-3" /> Apply all
+              </button>
+            </div>
+            <div class="space-y-1.5">
+              <.infra_suggestion_row :for={suggestion <- @infra_suggestions} suggestion={suggestion} />
             </div>
           </div>
+        </div>
 
-          <button
-            :if={!@enriching}
-            type="button"
-            phx-click="add_env_var"
-            class="flex items-center gap-1 text-[11px] font-medium text-primary hover:text-primary/80 transition-colors mt-2 cursor-pointer"
-          >
-            <.icon name="hero-plus-mini" class="size-3" /> Add variable
-          </button>
-        <% end %>
-      </div>
-
-      <%!-- Database dependency suggestions --%>
-      <div :if={@db_suggestions != [] && !@enriching} class="mt-4 space-y-2">
-        <.db_suggestion_card :for={suggestion <- @db_suggestions} suggestion={suggestion} />
-      </div>
-
-      <%!-- Infrastructure suggestions --%>
-      <div :if={@infra_suggestions != [] && !@enriching} class="mt-4">
-        <div class="rounded-lg border border-info/20 bg-info/5 p-3">
-          <div class="flex items-center justify-between mb-2">
-            <div class="flex items-center gap-2">
-              <.icon name="hero-light-bulb" class="size-4 text-info" />
-              <h4 class="text-sm font-semibold text-base-content">Smart auto-fill</h4>
-              <span class="text-[10px] font-medium text-info/60 px-1.5 py-0.5 rounded-full bg-info/10">
-                {length(@infra_suggestions)} detected
+        <%!-- Add companion service --%>
+        <div :if={!@enriching} class="mt-4">
+          <div class="rounded-lg border border-base-content/5 bg-base-100 p-3">
+            <div class="flex items-center gap-2 mb-2">
+              <.icon name="hero-squares-plus" class="size-4 text-primary" />
+              <h4 class="text-sm font-semibold text-base-content">Add companion service</h4>
+              <span class="text-[10px] text-base-content/30">
+                Search the catalog or enter a custom image
               </span>
             </div>
-            <button
-              :if={length(@infra_suggestions) > 1}
-              type="button"
-              phx-click="apply_all_infra"
-              class="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-info/10 text-info text-[10px] font-medium hover:bg-info/20 transition-colors cursor-pointer"
-            >
-              <.icon name="hero-bolt-mini" class="size-3" /> Apply all
-            </button>
-          </div>
-          <div class="space-y-1.5">
-            <.infra_suggestion_row :for={suggestion <- @infra_suggestions} suggestion={suggestion} />
-          </div>
-        </div>
-      </div>
-
-      <%!-- Add companion service --%>
-      <div :if={!@enriching} class="mt-4">
-        <div class="rounded-lg border border-base-content/5 bg-base-100 p-3">
-          <div class="flex items-center gap-2 mb-2">
-            <.icon name="hero-squares-plus" class="size-4 text-primary" />
-            <h4 class="text-sm font-semibold text-base-content">Add companion service</h4>
-            <span class="text-[10px] text-base-content/30">
-              Search the catalog or enter a custom image
-            </span>
-          </div>
-          <div class="flex gap-2">
-            <div class="flex-1 relative">
-              <input
-                type="text"
-                phx-keyup="companion_search"
-                phx-debounce="300"
-                value={@companion_query}
-                placeholder="Search for redis, postgres, nginx..."
-                class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-2 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
-              />
-              <.icon
-                :if={@companion_loading}
-                name="hero-arrow-path"
-                class="size-3.5 animate-spin text-primary absolute right-2.5 top-2"
-              />
-            </div>
-            <button
-              :if={@companion_query != "" && @companion_results == []}
-              type="button"
-              phx-click="add_companion_custom"
-              phx-value-image={@companion_query}
-              class="px-3 py-2 rounded-md bg-primary text-primary-content text-[11px] font-medium hover:bg-primary/90 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <.icon name="hero-plus-mini" class="size-3 inline" /> Add as image
-            </button>
-          </div>
-          <div
-            :if={@companion_results != []}
-            class="mt-2 space-y-0.5 max-h-48 overflow-y-auto"
-          >
-            <button
-              :for={entry <- @companion_results}
-              type="button"
-              phx-click="add_companion_entry"
-              phx-value-entry={encode_entry(entry)}
-              class="w-full text-left flex items-center gap-2.5 py-1.5 px-2 rounded-md hover:bg-base-200/80 transition-colors cursor-pointer"
-            >
-              <div class="w-6 h-6 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0 overflow-hidden">
-                <img
-                  :if={entry.logo_url}
-                  src={entry.logo_url}
-                  alt=""
-                  class="w-full h-full object-contain"
+            <div class="flex gap-2">
+              <div class="flex-1 relative">
+                <input
+                  type="text"
+                  phx-keyup="companion_search"
+                  phx-debounce="300"
+                  value={@companion_query}
+                  placeholder="Search for redis, postgres, nginx..."
+                  class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-2 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
                 />
-                <.icon :if={!entry.logo_url} name="hero-cube-mini" class="size-3.5 text-primary" />
+                <.icon
+                  :if={@companion_loading}
+                  name="hero-arrow-path"
+                  class="size-3.5 animate-spin text-primary absolute right-2.5 top-2"
+                />
               </div>
-              <div class="flex-1 min-w-0">
-                <span class="text-[11px] font-medium text-base-content">{entry.name}</span>
-                <span class="text-[10px] text-base-content/30 ml-1.5 truncate">{entry.full_ref}</span>
-              </div>
-              <.icon name="hero-plus-mini" class="size-3.5 text-primary flex-shrink-0" />
-            </button>
-          </div>
-          <div
-            :if={@companion_query != "" && !@companion_loading && @companion_results == []}
-            class="mt-2 text-center"
-          >
-            <p class="text-[11px] text-base-content/30">
-              No catalog results. Use "Add as image" to add
-              <code class="font-mono text-[10px] bg-base-200 px-1 rounded">{@companion_query}</code>
-              directly.
-            </p>
+              <button
+                :if={@companion_query != "" && @companion_results == []}
+                type="button"
+                phx-click="add_companion_custom"
+                phx-value-image={@companion_query}
+                class="px-3 py-2 rounded-md bg-primary text-primary-content text-[11px] font-medium hover:bg-primary/90 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <.icon name="hero-plus-mini" class="size-3 inline" /> Add as image
+              </button>
+            </div>
+            <div
+              :if={@companion_results != []}
+              class="mt-2 space-y-0.5 max-h-48 overflow-y-auto"
+            >
+              <button
+                :for={entry <- @companion_results}
+                type="button"
+                phx-click="add_companion_entry"
+                phx-value-entry={encode_entry(entry)}
+                class="w-full text-left flex items-center gap-2.5 py-1.5 px-2 rounded-md hover:bg-base-200/80 transition-colors cursor-pointer"
+              >
+                <div class="w-6 h-6 rounded-md bg-primary/10 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                  <img
+                    :if={entry.logo_url}
+                    src={entry.logo_url}
+                    alt=""
+                    class="w-full h-full object-contain"
+                  />
+                  <.icon :if={!entry.logo_url} name="hero-cube-mini" class="size-3.5 text-primary" />
+                </div>
+                <div class="flex-1 min-w-0">
+                  <span class="text-[11px] font-medium text-base-content">{entry.name}</span>
+                  <span class="text-[10px] text-base-content/30 ml-1.5 truncate">
+                    {entry.full_ref}
+                  </span>
+                </div>
+                <.icon name="hero-plus-mini" class="size-3.5 text-primary flex-shrink-0" />
+              </button>
+            </div>
+            <div
+              :if={@companion_query != "" && !@companion_loading && @companion_results == []}
+              class="mt-2 text-center"
+            >
+              <p class="text-[11px] text-base-content/30">
+                No catalog results. Use "Add as image" to add
+                <code class="font-mono text-[10px] bg-base-200 px-1 rounded">{@companion_query}</code>
+                directly.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      </.form>
 
       <%!-- Next button --%>
       <div class="flex justify-end mt-4">
@@ -2153,8 +2205,8 @@ defmodule HomelabWeb.DeployWizardLive do
           </select>
         </div>
 
-        <%!-- Domain --%>
-        <div class="rounded-lg bg-base-100 border border-base-content/5 p-3">
+        <%!-- Domain (only for reverse-proxy access) --%>
+        <div :if={@access == "proxy"} class="rounded-lg bg-base-100 border border-base-content/5 p-3">
           <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
             <.icon name="hero-globe-alt-mini" class="size-4 text-info" /> Domain
             <span class="text-[10px] font-normal text-base-content/30">optional</span>
@@ -2178,59 +2230,70 @@ defmodule HomelabWeb.DeployWizardLive do
         </div>
       </.form>
 
-      <%!-- Exposure mode --%>
+      <%!-- Access (single coherent choice: proxy XOR host XOR internal) --%>
       <div class="rounded-lg bg-base-100 border border-base-content/5 p-3 mt-4">
         <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
-          <.icon name="hero-shield-check-mini" class="size-4 text-success" /> Access & Exposure
+          <.icon name="hero-shield-check-mini" class="size-4 text-success" /> Access
         </h3>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
-          <.exposure_option
-            mode="public"
-            current={@exposure_mode}
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <.access_option
+            access="proxy"
+            current={@access}
             icon="hero-globe-alt"
-            title="Public"
-            desc="Anyone via domain"
-            color="warning"
+            title="Reverse proxy"
+            desc="Served via Traefik at a domain"
           />
-          <.exposure_option
-            mode="sso_protected"
-            current={@exposure_mode}
-            icon="hero-shield-check"
-            title="SSO"
-            desc="Requires OIDC auth"
-            color="success"
-          />
-          <.exposure_option
-            mode="private"
-            current={@exposure_mode}
-            icon="hero-lock-closed"
-            title="Private"
-            desc="LAN only (RFC 1918)"
-            color="base-content"
-          />
-          <.exposure_option
-            mode="service"
-            current={@exposure_mode}
+          <.access_option
+            access="host"
+            current={@access}
             icon="hero-server-stack"
-            title="Service"
-            desc="Internal only, no host ports"
-            color="info"
+            title="Host ports"
+            desc="Bind container ports to the host"
+          />
+          <.access_option
+            access="internal"
+            current={@access}
+            icon="hero-lock-closed"
+            title="Internal only"
+            desc="No external access"
           />
         </div>
 
+        <div :if={@access == "proxy"} class="mt-3">
+          <label class="text-[11px] font-medium text-base-content/50">Authentication</label>
+          <div class="grid grid-cols-3 gap-2 mt-1.5">
+            <.auth_option auth="public" current={@auth} title="None" desc="Anyone with the domain" />
+            <.auth_option
+              auth="sso_protected"
+              current={@auth}
+              title="SSO"
+              desc="Requires login"
+            />
+            <.auth_option
+              auth="private"
+              current={@auth}
+              title="Private"
+              desc="LAN / IP allowlist"
+            />
+          </div>
+        </div>
+
         <div
-          :if={@exposure_mode == "service"}
+          :if={@access == "host"}
+          class="mt-2.5 rounded-md bg-warning/5 border border-warning/20 py-2 px-3"
+        >
+          <p class="text-[11px] text-base-content/40 leading-relaxed">
+            Container ports bind directly to the host — set which on the next step. Not reverse-proxied.
+          </p>
+        </div>
+
+        <div
+          :if={@access == "internal"}
           class="mt-2.5 rounded-md bg-info/5 border border-info/20 py-2 px-3"
         >
-          <div class="flex items-start gap-2">
-            <.icon
-              name="hero-information-circle-mini"
-              class="size-3.5 text-info/70 mt-0.5 flex-shrink-0"
-            />
-            <p class="text-[11px] text-base-content/40 leading-relaxed">
-              No host ports published. Accessible only through Docker network and Traefik reverse proxy.
-            </p>
-          </div>
+          <p class="text-[11px] text-base-content/40 leading-relaxed">
+            No host ports and no public route. Reachable only on the container network.
+          </p>
         </div>
       </div>
 
@@ -2249,21 +2312,41 @@ defmodule HomelabWeb.DeployWizardLive do
     """
   end
 
-  defp exposure_option(assigns) do
+  defp access_option(assigns) do
     ~H"""
     <button
       type="button"
-      phx-click="update_network"
-      phx-value-exposure_mode={@mode}
+      phx-click="update_access"
+      phx-value-access={@access}
       class={[
         "text-left py-2.5 px-3 rounded-md border-2 transition-all cursor-pointer",
-        if(@current == @mode,
+        if(@current == @access,
           do: "border-primary bg-primary/5",
           else: "border-base-content/5 bg-base-200/30 hover:border-base-content/15"
         )
       ]}
     >
-      <.icon name={@icon} class={["size-4 mb-1", "text-#{@color}"]} />
+      <.icon name={@icon} class="size-4 mb-1 text-primary" />
+      <h4 class="text-xs font-semibold text-base-content">{@title}</h4>
+      <p class="text-[10px] text-base-content/40 mt-0.5 leading-snug">{@desc}</p>
+    </button>
+    """
+  end
+
+  defp auth_option(assigns) do
+    ~H"""
+    <button
+      type="button"
+      phx-click="update_auth"
+      phx-value-auth={@auth}
+      class={[
+        "text-left py-2 px-2.5 rounded-md border-2 transition-all cursor-pointer",
+        if(@current == @auth,
+          do: "border-primary bg-primary/5",
+          else: "border-base-content/5 bg-base-200/30 hover:border-base-content/15"
+        )
+      ]}
+    >
       <h4 class="text-xs font-semibold text-base-content">{@title}</h4>
       <p class="text-[10px] text-base-content/40 mt-0.5 leading-snug">{@desc}</p>
     </button>
@@ -2820,6 +2903,64 @@ defmodule HomelabWeb.DeployWizardLive do
   defp non_blank(""), do: nil
   defp non_blank(nil), do: nil
   defp non_blank(val), do: val
+
+  # Derive access + auth from the canonical exposure_mode (keeps the three in sync
+  # whichever path sets it: the Access buttons, update_network, or topology_change).
+  defp assign_exposure(socket, exposure) when is_binary(exposure) and exposure != "" do
+    socket
+    |> assign(:exposure_mode, exposure)
+    |> assign(:access, Access.access_of(exposure))
+    |> assign(:auth, Access.auth_of(exposure))
+  end
+
+  defp assign_exposure(socket, _), do: socket
+
+  # config_changed sync: merge the indexed form params back into the existing
+  # rows, preserving fields the form doesn't render (descriptions, roles, etc.).
+  defp sync_ports(params, existing) do
+    merge_indexed(existing, params, fn row, p ->
+      row
+      |> put_present(p, "internal")
+      |> put_present(p, "external")
+      |> put_present(p, "role")
+      |> Map.put("published", p["published"] == "true")
+    end)
+  end
+
+  defp sync_volumes(params, existing) do
+    merge_indexed(existing, params, fn row, p ->
+      case p["container_path"] do
+        nil -> row
+        path -> Map.put(row, "container_path", path)
+      end
+    end)
+  end
+
+  defp sync_env(params, existing) do
+    merge_indexed(existing, params, fn row, p ->
+      row |> put_present(p, "key") |> put_present(p, "value")
+    end)
+  end
+
+  defp merge_indexed(existing, params, fun) when is_map(params) and is_list(existing) do
+    existing
+    |> Enum.with_index()
+    |> Enum.map(fn {row, idx} ->
+      case params[to_string(idx)] do
+        nil -> row
+        p -> fun.(row, p)
+      end
+    end)
+  end
+
+  defp merge_indexed(existing, _params, _fun), do: existing
+
+  defp put_present(row, params, key) do
+    case Map.fetch(params, key) do
+      {:ok, value} -> Map.put(row, key, value)
+      :error -> row
+    end
+  end
 
   defp sensitive_key?(nil), do: false
 
