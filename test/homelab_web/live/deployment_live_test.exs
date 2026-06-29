@@ -1125,7 +1125,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
   end
 
   describe "settings reconfiguration" do
-    test "saving settings persists per-deployment overrides and recreates the container",
+    test "saving proxy settings persists domain + auth and drops any host ports",
          %{conn: conn, deployment: dep} do
       # The recreate path: undeploy the old container, deploy a fresh one.
       Homelab.Mocks.Orchestrator
@@ -1140,11 +1140,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
       view
       |> form("#settings-form",
         settings: %{
-          "domain" => "dashy.example.com",
-          "exposure_mode" => "public",
-          "ports" => %{
-            "0" => %{"internal" => "8080", "external" => "9090", "published" => "true"}
-          }
+          "access" => "proxy",
+          "auth" => "public",
+          "domain" => "dashy.example.com"
         }
       )
       |> render_submit()
@@ -1152,7 +1150,40 @@ defmodule HomelabWeb.DeploymentLiveTest do
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.domain == "dashy.example.com"
       assert updated.exposure_mode_override == "public"
-      assert [%{"internal" => "8080", "published" => true}] = updated.ports_override
+      # Proxy access never binds host ports.
+      assert updated.ports_override == []
+    end
+
+    test "switching to Host ports persists the container->host binding and recreates",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      # Switch access to Host (reveals the port editor), then add a row.
+      render_change(view, "settings_changed", %{"settings" => %{"access" => "host"}})
+      render_click(view, "settings_add_port")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "host",
+          "ports" => %{"0" => %{"internal" => "8080", "external" => "9090"}}
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.exposure_mode_override == "host"
+      # Host access drops the public domain; every listed port is a binding.
+      assert updated.domain == nil
+
+      assert [%{"internal" => "8080", "external" => "9090", "published" => true}] =
+               updated.ports_override
     end
 
     test "overriding one deployment's config does not affect a sibling on the same template",
@@ -1175,9 +1206,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "start_settings_edit")
 
       view
-      |> form("#settings-form",
-        settings: %{"domain" => "dashy.example.com", "exposure_mode" => "service"}
-      )
+      |> form("#settings-form", settings: %{"access" => "internal"})
       |> render_submit()
 
       assert Homelab.Deployments.get_deployment!(dep.id).exposure_mode_override == "service"
