@@ -3,6 +3,7 @@ defmodule HomelabWeb.DeploymentLive do
 
   alias Homelab.Deployments
   alias Homelab.Deployments.Access
+  alias Homelab.Deployments.Readiness
   alias Homelab.Backups
   alias Homelab.Services.BackupScheduler
 
@@ -14,6 +15,7 @@ defmodule HomelabWeb.DeploymentLive do
       socket
       |> assign(:page_title, "Deployment")
       |> assign(:deployment, nil)
+      |> assign(:readiness, [])
       |> assign(:active_tab, "overview")
       |> assign(:logs, "")
       |> assign(:logs_loading, false)
@@ -47,6 +49,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:page_title, deployment.app_template.name)
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
+      |> assign_readiness()
 
     socket =
       if connected?(socket) do
@@ -78,7 +81,7 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_info({:deployment_status, deployment_id, _new_status}, socket) do
     if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
       deployment = Deployments.get_deployment!(deployment_id)
-      {:noreply, assign(socket, :deployment, deployment)}
+      {:noreply, socket |> assign(:deployment, deployment) |> assign_readiness()}
     else
       {:noreply, socket}
     end
@@ -216,6 +219,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
+         |> assign_readiness()
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
          |> put_flash(:info, "Environment updated — recreating the container.")}
@@ -293,6 +297,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
+         |> assign_readiness()
          |> assign(:settings_edit_mode, false)
          |> put_flash(:info, "Settings saved — recreating the container.")}
 
@@ -520,6 +525,48 @@ defmodule HomelabWeb.DeploymentLive do
               <p class="text-sm font-semibold text-error">Deployment failed</p>
               <p class="text-sm text-error/80 mt-0.5 font-mono">{@deployment.error_message}</p>
             </div>
+          </div>
+
+          <%!-- Production-readiness checklist: the bridge from iterating to prod --%>
+          <div class="rounded-lg bg-base-100 p-4 border border-base-content/5">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-base-content/70">Production readiness</h3>
+              <span class="text-xs text-base-content/40">
+                {Enum.count(@readiness, &(&1.status == :pass))} / {length(@readiness)} ready
+              </span>
+            </div>
+            <ul class="space-y-2.5">
+              <li
+                :for={check <- Enum.sort_by(@readiness, &(&1.status == :pass))}
+                class="flex items-start gap-3"
+              >
+                <.icon
+                  name={
+                    if(check.status == :pass,
+                      do: "hero-check-circle-mini",
+                      else: "hero-exclamation-circle-mini"
+                    )
+                  }
+                  class={[
+                    "size-4 mt-0.5 flex-shrink-0",
+                    if(check.status == :pass, do: "text-success", else: "text-warning")
+                  ]}
+                />
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-medium text-base-content">{check.title}</p>
+                  <p class="text-xs text-base-content/40">{check.detail}</p>
+                </div>
+                <button
+                  :if={check.status == :gap}
+                  type="button"
+                  phx-click="switch_tab"
+                  phx-value-tab={check.fix_tab}
+                  class="text-xs font-medium text-primary hover:text-primary/80 flex-shrink-0"
+                >
+                  Fix →
+                </button>
+              </li>
+            </ul>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1103,6 +1150,10 @@ defmodule HomelabWeb.DeploymentLive do
       </div>
     </Layouts.app>
     """
+  end
+
+  defp assign_readiness(socket) do
+    assign(socket, :readiness, Readiness.checks(socket.assigns.deployment))
   end
 
   defp merged_env(deployment) do
