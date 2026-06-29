@@ -229,7 +229,9 @@ defmodule Homelab.Services.Reconciler do
   defp enforce_ingress_invariant do
     Deployments.list_ingress_deployments()
     |> Enum.each(fn deployment ->
-      if deployment.status == :running do
+      # Traefik is connected iff the deployment is a proxy mode with a domain AND
+      # running. Anything else with a (possibly stale) domain is disconnected.
+      if Deployments.ingress_published?(deployment) and deployment.status == :running do
         Deployments.publish_deployment(deployment)
       else
         Deployments.unpublish_deployment(deployment)
