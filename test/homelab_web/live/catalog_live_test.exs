@@ -396,13 +396,12 @@ defmodule HomelabWeb.CatalogLiveTest do
       assert html =~ "Domain"
     end
 
-    test "modal shows exposure mode selector", %{view: view} do
+    test "modal shows access selector", %{view: view} do
       html = render(view)
-      assert html =~ "Exposure Mode"
-      assert html =~ "Public"
-      assert html =~ "SSO Protected"
-      assert html =~ "Private"
-      assert html =~ "Service"
+      assert html =~ "Access"
+      assert html =~ "Reverse proxy"
+      assert html =~ "Host ports"
+      assert html =~ "Internal only"
     end
   end
 
@@ -1436,10 +1435,11 @@ defmodule HomelabWeb.CatalogLiveTest do
 
       html = render(view)
 
-      assert html =~ "Public"
-      assert html =~ "SSO Protected"
-      assert html =~ "Private (LAN only)"
-      assert html =~ "Service (proxy-only, no host ports)"
+      assert html =~ "Reverse proxy — no auth"
+      assert html =~ "Reverse proxy — SSO"
+      assert html =~ "Reverse proxy — private (LAN)"
+      assert html =~ "Host ports (bind to host)"
+      assert html =~ "Internal only (no external access)"
     end
 
     test "shows deploy modal header with template name", %{conn: conn} do
