@@ -566,12 +566,28 @@ defmodule Homelab.DeploymentsTest do
       assert :ok = Deployments.unpublish_deployment(deployment)
     end
 
-    test "internal-only (no domain) deployment never touches ingress" do
+    test "a no-domain deployment is never published; unpublish is a safe disconnect" do
       deployment = insert(:deployment, domain: nil)
 
-      # No publish/unpublish expectations set: a call would fail verify_on_exit!.
+      # publish: no domain → no orchestrator call.
       assert :ok = Deployments.publish_deployment(deployment)
+
+      # unpublish: always disconnects (idempotent), so it DOES call the orchestrator.
+      Homelab.Mocks.Orchestrator |> expect(:unpublish, fn _net -> :ok end)
       assert :ok = Deployments.unpublish_deployment(deployment)
+    end
+
+    test "a :host deployment with a domain is not proxy-published" do
+      tenant = insert(:tenant, slug: "acme")
+      template = insert(:app_template, slug: "game", exposure_mode: :host)
+
+      deployment =
+        insert(:deployment, tenant: tenant, app_template: template, domain: "game.acme.test")
+
+      refute Deployments.ingress_published?(deployment)
+
+      # publish is a no-op for a host deployment even though it has a domain.
+      assert :ok = Deployments.publish_deployment(deployment)
     end
   end
 end
