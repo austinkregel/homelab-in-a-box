@@ -2962,27 +2962,7 @@ defmodule HomelabWeb.DeployWizardLive do
     end)
   end
 
-  defp parse_port_params(nil), do: []
-
-  defp parse_port_params(ports_map) when is_map(ports_map) do
-    alias Homelab.Catalog.Enrichers.PortRoles
-
-    ports_map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, port} ->
-      role = port["role"]
-      role = if role in [nil, "", "other"], do: PortRoles.infer(port["internal"]), else: role
-
-      %{
-        "internal" => port["internal"],
-        "external" => port["external"],
-        "description" => port["description"] || "",
-        "optional" => port["optional"] == "true",
-        "role" => role,
-        "published" => port["published"] == "true"
-      }
-    end)
-  end
+  defp parse_port_params(ports), do: Homelab.Deployments.ConfigForm.parse_ports(ports)
 
   defp parse_volume_params(nil), do: []
 

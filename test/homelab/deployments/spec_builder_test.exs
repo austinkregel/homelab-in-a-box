@@ -328,4 +328,80 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.labels["traefik.docker.network"] == "homelab_friends_nextcloud_net"
     end
   end
+
+  describe "per-deployment config overrides" do
+    test "ports_override wins over the template ports" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :private,
+          ports: [
+            %{"internal" => "1000", "external" => "1000", "published" => true, "role" => "web"}
+          ]
+        })
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: nil,
+          ports_override: [
+            %{"internal" => "8080", "external" => "9090", "published" => true, "role" => "web"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == [%{internal: "8080", external: "9090", role: "web"}]
+    end
+
+    test "nil ports_override falls back to the template ports" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :private,
+          ports: [
+            %{"internal" => "1000", "external" => "1000", "published" => true, "role" => "web"}
+          ]
+        })
+
+      deployment = build_deployment(tenant, template, %{domain: nil, ports_override: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == [%{internal: "1000", external: "1000", role: "web"}]
+    end
+
+    test "exposure_mode_override :service publishes no host ports and marks service mode" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :private})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: nil,
+          exposure_mode_override: "service",
+          ports_override: [%{"internal" => "8080", "published" => true}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == []
+      assert spec.service_mode == true
+    end
+
+    test "exposure_mode_override changes routing labels without touching the template" do
+      tenant = build_tenant()
+      # Template default is SSO-protected; the deployment overrides to public.
+      template = build_template(%{exposure_mode: :sso_protected})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "app.friends.test",
+          exposure_mode_override: "public"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["homelab.exposure"] == "public"
+      refute Enum.any?(Map.keys(spec.labels), &String.contains?(&1, "forwardauth"))
+      # The shared template is untouched.
+      assert template.exposure_mode == :sso_protected
+    end
+  end
 end

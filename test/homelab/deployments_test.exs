@@ -453,6 +453,20 @@ defmodule Homelab.DeploymentsTest do
     end
   end
 
+  describe "recreate_deployment/1" do
+    test "undeploys the old container and deploys a fresh one from the current config" do
+      deployment = insert(:deployment, status: :running, external_id: "old-123")
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "old-123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "new-456"} end)
+
+      assert {:ok, recreated} = Deployments.recreate_deployment(deployment)
+      assert recreated.external_id == "new-456"
+      assert recreated.status == :deploying
+    end
+  end
+
   describe "start_deployment/1 spec build failure" do
     test "sets status to failed when spec build fails" do
       template = insert(:app_template, required_env: ["NEEDED_VAR"])

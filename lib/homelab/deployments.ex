@@ -273,6 +273,20 @@ defmodule Homelab.Deployments do
     Repo.delete(deployment)
   end
 
+  @doc """
+  Recreates a deployment's container so config changes (domain, ports, exposure,
+  env) take effect. Docker bakes those into the container at create time, so
+  there is no in-place update — we undeploy the old container and deploy a fresh
+  one from the (now-updated) row via `SpecBuilder.build/1`. Pass the deployment
+  AFTER persisting any config changes. Safe when stopped/failed (no old container
+  to remove).
+  """
+  def recreate_deployment(%Deployment{} = deployment) do
+    with {:ok, stopped} <- stop_deployment(deployment) do
+      start_deployment(stopped)
+    end
+  end
+
   def change_deployment(%Deployment{} = deployment, attrs \\ %{}) do
     Deployment.changeset(deployment, attrs)
   end
