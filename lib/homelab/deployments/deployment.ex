@@ -5,7 +5,7 @@ defmodule Homelab.Deployments.Deployment do
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
   # Same set as AppTemplate.exposure_mode; stored as a string override here so a
   # single deployment can diverge from the (shared) template default.
-  @exposure_modes ~w(private sso_protected public service)
+  @exposure_modes ~w(private sso_protected public service host)
 
   schema "deployments" do
     field :status, Ecto.Enum, values: @statuses, default: :pending
