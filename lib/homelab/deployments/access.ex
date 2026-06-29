@@ -1,0 +1,87 @@
+defmodule Homelab.Deployments.Access do
+  @moduledoc """
+  Single source of truth for a deployment's **access model** — how it's reached.
+
+  One choice per deployment, stored in `exposure_mode` (with the per-deployment
+  `exposure_mode_override` winning):
+
+    * **Reverse proxy** — reached via Traefik at a `domain`, with an auth level:
+      `:public` (none), `:sso_protected` (SSO), `:private` (IP allowlist). Never
+      binds a host port.
+    * **Host ports** (`:host`) — binds the published container ports to the host.
+      Never proxied.
+    * **Internal only** (`:service`) — no external access.
+
+  Proxy XOR host: a deployment is reached exactly one way, so there are no silent
+  overrides (a domain can't suppress a host port) and a protected app can't be
+  reached on the host bypassing its auth.
+  """
+
+  alias Homelab.Deployments.Deployment
+
+  @proxy_modes [:public, :sso_protected, :private]
+
+  # UI metadata: top-level access choices and the proxy auth sub-choices.
+  @access_choices [
+    {"proxy", "Reverse proxy", "Served via Traefik at a domain"},
+    {"host", "Host ports", "Bind container ports to the host"},
+    {"internal", "Internal only", "No external access"}
+  ]
+  @auth_choices [
+    {"public", "None", "Anyone with the domain"},
+    {"sso_protected", "SSO", "Requires login"},
+    {"private", "Private", "LAN / IP allowlist"}
+  ]
+
+  @doc "The effective exposure atom (override wins over the template default)."
+  def effective_exposure(%Deployment{exposure_mode_override: override, app_template: template}) do
+    case override do
+      m when m in [nil, ""] -> template.exposure_mode
+      s -> String.to_existing_atom(s)
+    end
+  end
+
+  @doc "Effective ports (override wins; nil = inherit the template)."
+  def effective_ports(%Deployment{ports_override: nil, app_template: template}),
+    do: template.ports || []
+
+  def effective_ports(%Deployment{ports_override: ports}), do: ports
+
+  def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
+  def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
+  def internal_mode?(%Deployment{} = d), do: effective_exposure(d) == :service
+
+  def proxy_modes, do: @proxy_modes
+  def access_choices, do: @access_choices
+  def auth_choices, do: @auth_choices
+
+  @doc "Top-level access key (\"proxy\" | \"host\" | \"internal\") for an exposure value."
+  def access_of(exposure) do
+    case to_atom(exposure) do
+      :host -> "host"
+      :service -> "internal"
+      _ -> "proxy"
+    end
+  end
+
+  @doc "Auth key for a proxy exposure value (\"public\" by default)."
+  def auth_of(exposure) do
+    case to_string(exposure) do
+      a when a in ~w(public sso_protected private) -> a
+      _ -> "public"
+    end
+  end
+
+  @doc """
+  Maps a UI `(access, auth)` pair to the stored `exposure_mode` string.
+  Auth only applies to proxy access.
+  """
+  def exposure_for("host", _auth), do: "host"
+  def exposure_for("internal", _auth), do: "service"
+  def exposure_for("proxy", auth) when auth in ~w(public sso_protected private), do: auth
+  def exposure_for("proxy", _auth), do: "public"
+
+  defp to_atom(v) when is_atom(v), do: v
+  defp to_atom(v) when is_binary(v) and v != "", do: String.to_existing_atom(v)
+  defp to_atom(_), do: nil
+end
