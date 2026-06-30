@@ -108,6 +108,17 @@ defmodule Homelab.Deployments.ReadinessTest do
 
       assert check(d, :resilience).status == :gap
     end
+
+    test "a per-deployment override closes the gate when the template lacks both" do
+      d =
+        insert(:deployment,
+          app_template: build(:app_template, health_check: %{}, resource_limits: %{}),
+          resource_limits_override: %{"memory_mb" => 512, "cpu_shares" => 1024},
+          health_check_override: %{"path" => "/health"}
+        )
+
+      assert check(d, :resilience).status == :pass
+    end
   end
 
   describe "ready?/1 and gaps/1" do
