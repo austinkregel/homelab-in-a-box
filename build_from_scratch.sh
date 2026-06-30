@@ -32,15 +32,15 @@ fi
 NETWORK="homelab-internal"
 
 echo "==> Tearing down existing homelab infrastructure..."
-docker stop homelab homelab-iab-postgres 2>/dev/null || true
-docker rm homelab homelab-iab-postgres 2>/dev/null || true
+docker stop homelab homelab-iab-postgres homelab-iab-oban-postgres 2>/dev/null || true
+docker rm homelab homelab-iab-postgres homelab-iab-oban-postgres 2>/dev/null || true
 
 # Clean up managed and system containers before removing the network
 docker ps -a --filter "label=homelab.managed=true" -q | xargs -r docker rm -f 2>/dev/null || true
 docker ps -a --filter "label=homelab.system=true" -q | xargs -r docker rm -f 2>/dev/null || true
 
 echo "==> Removing volumes..."
-docker volume rm homelab-iab-postgres-data homelab-iab-secrets 2>/dev/null || true
+docker volume rm homelab-iab-postgres-data homelab-iab-oban-postgres-data homelab-iab-secrets 2>/dev/null || true
 docker volume ls --filter "name=homelab-" -q | xargs -r docker volume rm 2>/dev/null || true
 
 echo "==> Removing network..."

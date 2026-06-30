@@ -26,6 +26,10 @@ defmodule HomelabWeb.DeploymentLiveTest do
     |> stub(:display_name, fn -> "Docker" end)
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
+    # Config edits (env/settings) recreate the container; tests that assert the
+    # exact recreate calls override these with `expect`.
+    |> stub(:undeploy, fn _id -> :ok end)
+    |> stub(:deploy, fn _spec -> {:ok, "recreated_container"} end)
 
     Homelab.Mocks.Gateway
     |> stub(:driver_id, fn -> "traefik" end)
@@ -80,7 +84,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "backups"})
       assert html =~ "Backups"
-      assert html =~ "Manual backup"
+      assert html =~ "Back up"
     end
 
     test "switch to volumes tab", %{conn: conn, deployment: dep} do
@@ -1117,6 +1121,174 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
       assert html =~ "Removing"
+    end
+  end
+
+  describe "production-readiness checklist" do
+    test "overview shows the checklist with a Fix link for each gap", %{
+      conn: conn,
+      deployment: dep
+    } do
+      # Factory deployment: proxy + domain + healthcheck + limits, but no backups,
+      # so the backups gate is the one open gap.
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      assert html =~ "Production readiness"
+      assert html =~ "Backups"
+      assert html =~ ~s(phx-value-tab="backups")
+    end
+
+    test "clicking Fix on a gap switches to that tab", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      view
+      |> element(~s(button[phx-value-tab="backups"]), "Fix")
+      |> render_click()
+
+      assert render(view) =~ "Back up"
+    end
+
+    test "a fully-configured deployment reports all gates ready", %{conn: conn, tenant: tenant} do
+      template =
+        insert(:app_template,
+          exposure_mode: :sso_protected,
+          health_check: %{"path" => "/health"},
+          resource_limits: %{"memory_mb" => 256, "cpu_shares" => 512}
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "container_ready",
+          domain: "ready.example.com"
+        )
+
+      insert(:backup_job, deployment: dep, status: :completed)
+
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
+      assert html =~ "4 / 4 ready"
+    end
+  end
+
+  describe "settings reconfiguration" do
+    test "saving proxy settings persists domain + auth and drops any host ports",
+         %{conn: conn, deployment: dep} do
+      # The recreate path: undeploy the old container, deploy a fresh one.
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "proxy",
+          "auth" => "public",
+          "domain" => "dashy.example.com"
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.domain == "dashy.example.com"
+      assert updated.exposure_mode_override == "public"
+      # Proxy access never binds host ports.
+      assert updated.ports_override == []
+    end
+
+    test "switching to Host ports persists the container->host binding and recreates",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      # Switch access to Host (reveals the port editor), then add a row.
+      render_change(view, "settings_changed", %{"settings" => %{"access" => "host"}})
+      render_click(view, "settings_add_port")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "host",
+          "ports" => %{"0" => %{"internal" => "8080", "external" => "9090"}}
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.exposure_mode_override == "host"
+      # Host access drops the public domain; every listed port is a binding.
+      assert updated.domain == nil
+
+      assert [%{"internal" => "8080", "external" => "9090", "published" => true}] =
+               updated.ports_override
+    end
+
+    test "saving resilience limits + health path persists per-deployment overrides",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "proxy",
+          "auth" => "sso_protected",
+          "memory_mb" => "1024",
+          "cpu_shares" => "2048",
+          "health_path" => "/healthz"
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.resource_limits_override == %{"memory_mb" => 1024, "cpu_shares" => 2048}
+      assert updated.health_check_override["path"] == "/healthz"
+    end
+
+    test "overriding one deployment's config does not affect a sibling on the same template",
+         %{conn: conn, tenant: tenant, template: template, deployment: dep} do
+      sibling =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "sibling_123",
+          domain: nil
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form", settings: %{"access" => "internal"})
+      |> render_submit()
+
+      assert Homelab.Deployments.get_deployment!(dep.id).exposure_mode_override == "service"
+      # Sibling untouched — its overrides remain nil and it inherits the template.
+      reloaded_sibling = Homelab.Deployments.get_deployment!(sibling.id)
+      assert reloaded_sibling.exposure_mode_override == nil
+      assert reloaded_sibling.domain == nil
     end
   end
 end

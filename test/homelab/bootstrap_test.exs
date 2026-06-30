@@ -1,13 +1,32 @@
 defmodule Homelab.BootstrapTest do
   use Homelab.DataCase, async: false
 
+  import Mox
+
   alias Homelab.Bootstrap
+
+  setup :verify_on_exit!
+
+  # Route this process's Docker client to the mock (no global state mutated).
+  setup do
+    Process.put(:docker_client, Homelab.Mocks.DockerClient)
+    :ok
+  end
 
   describe "ensure_infrastructure/0" do
     test "is a no-op when bootstrap is disabled" do
       Application.put_env(:homelab, :bootstrap, false)
       on_exit(fn -> Application.delete_env(:homelab, :bootstrap) end)
 
+      assert :ok = Bootstrap.ensure_infrastructure()
+    end
+
+    test "does not touch the Docker client when bootstrap is disabled (mocked daemon)" do
+      Application.put_env(:homelab, :bootstrap, false)
+      on_exit(fn -> Application.delete_env(:homelab, :bootstrap) end)
+
+      # No `expect`/`stub` on the mock: verify_on_exit! confirms the gate
+      # short-circuits before any Docker provisioning request is issued.
       assert :ok = Bootstrap.ensure_infrastructure()
     end
   end

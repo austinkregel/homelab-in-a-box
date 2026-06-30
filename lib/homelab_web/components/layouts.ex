@@ -51,8 +51,8 @@ defmodule HomelabWeb.Layouts do
             <.sidebar_link
               path={~p"/catalog"}
               icon="hero-rectangle-stack"
-              label="App Catalog"
-              active={@page_title == "App Catalog"}
+              label="Workbench"
+              active={@page_title == "Workbench"}
             />
             <.sidebar_link
               path={~p"/deploy/new"}

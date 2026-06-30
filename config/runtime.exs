@@ -37,6 +37,21 @@ if config_env() == :prod do
       url: database_url,
       pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
       socket_options: maybe_ipv6
+
+    # Oban uses its OWN database (separate instance recommended) to keep its job
+    # churn off the main app DB. Supply OBAN_DATABASE_URL when not bootstrapping.
+    oban_database_url =
+      System.get_env("OBAN_DATABASE_URL") ||
+        raise """
+        environment variable OBAN_DATABASE_URL is missing.
+        Oban runs on a dedicated database to isolate its load from the app DB.
+        For example: ecto://USER:PASS@HOST/homelab_oban
+        """
+
+    config :homelab, Homelab.ObanRepo,
+      url: oban_database_url,
+      pool_size: String.to_integer(System.get_env("OBAN_POOL_SIZE") || "6"),
+      socket_options: maybe_ipv6
   end
 
   # Secrets are persisted to a durable directory (mount the `homelab-iab-secrets`

@@ -2,8 +2,9 @@ defmodule HomelabWeb.DeploymentLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.Access
+  alias Homelab.Deployments.Readiness
   alias Homelab.Backups
-  alias Homelab.Repo
   alias Homelab.Services.BackupScheduler
 
   @log_poll_interval 3_000
@@ -14,6 +15,7 @@ defmodule HomelabWeb.DeploymentLive do
       socket
       |> assign(:page_title, "Deployment")
       |> assign(:deployment, nil)
+      |> assign(:readiness, [])
       |> assign(:active_tab, "overview")
       |> assign(:logs, "")
       |> assign(:logs_loading, false)
@@ -21,6 +23,14 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:log_timer, nil)
       |> assign(:env_edit_mode, false)
       |> assign(:env_form, nil)
+      |> assign(:settings_edit_mode, false)
+      |> assign(:settings_domain, "")
+      |> assign(:settings_access, "proxy")
+      |> assign(:settings_auth, "public")
+      |> assign(:settings_ports, [])
+      |> assign(:settings_memory_mb, "")
+      |> assign(:settings_cpu_shares, "")
+      |> assign(:settings_health_path, "")
       |> assign(:resource_stats, nil)
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
@@ -42,6 +52,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:page_title, deployment.app_template.name)
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
+      |> assign_readiness()
 
     socket =
       if connected?(socket) do
@@ -73,7 +84,7 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_info({:deployment_status, deployment_id, _new_status}, socket) do
     if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
       deployment = Deployments.get_deployment!(deployment_id)
-      {:noreply, assign(socket, :deployment, deployment)}
+      {:noreply, socket |> assign(:deployment, deployment) |> assign_readiness()}
     else
       {:noreply, socket}
     end
@@ -206,17 +217,108 @@ defmodule HomelabWeb.DeploymentLive do
     env_overrides = params["env"] || params || %{}
     env_overrides = Map.reject(env_overrides, fn {_k, v} -> v == "" or v == nil end)
 
-    case Deployments.update_deployment(deployment, %{env_overrides: env_overrides}) do
+    case apply_config(deployment, %{env_overrides: env_overrides}) do
       {:ok, updated} ->
         {:noreply,
          socket
-         |> assign(:deployment, Repo.preload(updated, [:tenant, :app_template]))
+         |> assign(:deployment, updated)
+         |> assign_readiness()
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
-         |> put_flash(:info, "Environment updated.")}
+         |> put_flash(:info, "Environment updated — recreating the container.")}
 
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Failed to update environment.")}
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  # --- Settings (domain / exposure / ports) ---
+
+  def handle_event("start_settings_edit", _params, socket) do
+    deployment = socket.assigns.deployment
+    exposure = Access.effective_exposure(deployment)
+    limits = Access.effective_resource_limits(deployment)
+    health = Access.effective_health_check(deployment)
+
+    {:noreply,
+     socket
+     |> assign(:settings_edit_mode, true)
+     |> assign(:settings_domain, deployment.domain || "")
+     |> assign(:settings_access, Access.access_of(exposure))
+     |> assign(:settings_auth, Access.auth_of(exposure))
+     |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
+     |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
+     |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
+     |> assign(:settings_health_path, health["path"] || "")}
+  end
+
+  def handle_event("cancel_settings_edit", _params, socket) do
+    {:noreply, assign(socket, :settings_edit_mode, false)}
+  end
+
+  # Keep the assigns in sync as the user types so add/remove-port don't drop edits.
+  def handle_event("settings_changed", %{"settings" => settings}, socket) do
+    {:noreply,
+     socket
+     |> assign(:settings_domain, settings["domain"] || socket.assigns.settings_domain)
+     |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
+     |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
+     |> assign(:settings_ports, ports_from_params(settings["ports"]))
+     |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
+     |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
+     |> assign(
+       :settings_health_path,
+       settings["health_path"] || socket.assigns.settings_health_path
+     )}
+  end
+
+  def handle_event("settings_add_port", _params, socket) do
+    blank = %{"internal" => "", "external" => ""}
+    {:noreply, assign(socket, :settings_ports, socket.assigns.settings_ports ++ [blank])}
+  end
+
+  def handle_event("settings_remove_port", %{"index" => idx}, socket) do
+    ports = List.delete_at(socket.assigns.settings_ports, String.to_integer(idx))
+    {:noreply, assign(socket, :settings_ports, ports)}
+  end
+
+  def handle_event("save_settings", %{"settings" => settings}, socket) do
+    deployment = socket.assigns.deployment
+    access = settings["access"] || socket.assigns.settings_access
+    auth = settings["auth"] || socket.assigns.settings_auth
+
+    exposure = Access.exposure_for(access, auth)
+    # Domain only matters for proxy access; in Host mode every listed port binds.
+    domain = if access == "proxy", do: blank_to_nil(settings["domain"]), else: nil
+
+    ports =
+      if access == "host" do
+        settings["ports"]
+        |> Homelab.Deployments.ConfigForm.parse_ports()
+        |> Enum.map(&Map.put(&1, "published", true))
+      else
+        []
+      end
+
+    attrs = %{
+      domain: domain,
+      exposure_mode_override: exposure,
+      ports_override: ports,
+      resource_limits_override: limits_override(settings),
+      health_check_override: health_override(deployment, settings)
+    }
+
+    case apply_config(deployment, attrs) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign_readiness()
+         |> assign(:settings_edit_mode, false)
+         |> put_flash(:info, "Settings saved — recreating the container.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
     end
   end
 
@@ -346,7 +448,16 @@ defmodule HomelabWeb.DeploymentLive do
         <div class="flex gap-6 border-b border-base-content/10 mb-5">
           <button
             :for={
-              tab <- ["overview", "topology", "traffic", "logs", "environment", "volumes", "backups"]
+              tab <- [
+                "overview",
+                "settings",
+                "topology",
+                "traffic",
+                "logs",
+                "environment",
+                "volumes",
+                "backups"
+              ]
             }
             type="button"
             phx-click="switch_tab"
@@ -430,6 +541,48 @@ defmodule HomelabWeb.DeploymentLive do
               <p class="text-sm font-semibold text-error">Deployment failed</p>
               <p class="text-sm text-error/80 mt-0.5 font-mono">{@deployment.error_message}</p>
             </div>
+          </div>
+
+          <%!-- Production-readiness checklist: the bridge from iterating to prod --%>
+          <div class="rounded-lg bg-base-100 p-4 border border-base-content/5">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-base-content/70">Production readiness</h3>
+              <span class="text-xs text-base-content/40">
+                {Enum.count(@readiness, &(&1.status == :pass))} / {length(@readiness)} ready
+              </span>
+            </div>
+            <ul class="space-y-2.5">
+              <li
+                :for={check <- Enum.sort_by(@readiness, &(&1.status == :pass))}
+                class="flex items-start gap-3"
+              >
+                <.icon
+                  name={
+                    if(check.status == :pass,
+                      do: "hero-check-circle-mini",
+                      else: "hero-exclamation-circle-mini"
+                    )
+                  }
+                  class={[
+                    "size-4 mt-0.5 flex-shrink-0",
+                    if(check.status == :pass, do: "text-success", else: "text-warning")
+                  ]}
+                />
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-medium text-base-content">{check.title}</p>
+                  <p class="text-xs text-base-content/40">{check.detail}</p>
+                </div>
+                <button
+                  :if={check.status == :gap}
+                  type="button"
+                  phx-click="switch_tab"
+                  phx-value-tab={check.fix_tab}
+                  class="text-xs font-medium text-primary hover:text-primary/80 flex-shrink-0"
+                >
+                  Fix →
+                </button>
+              </li>
+            </ul>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -656,6 +809,240 @@ defmodule HomelabWeb.DeploymentLive do
           </script>
         </div>
 
+        <%!-- Settings tab (domain / exposure / ports) --%>
+        <div
+          :if={@active_tab == "settings"}
+          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
+        >
+          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+            <h3 class="text-sm font-semibold text-base-content">Network &amp; ports</h3>
+            <button
+              :if={!@settings_edit_mode}
+              type="button"
+              phx-click="start_settings_edit"
+              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+            >
+              Edit
+            </button>
+          </div>
+          <div class="p-4">
+            <%= if @settings_edit_mode do %>
+              <.form
+                for={%{}}
+                id="settings-form"
+                phx-change="settings_changed"
+                phx-submit="save_settings"
+                class="space-y-5"
+              >
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-base-content/50">Access</label>
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <label
+                      :for={{value, title, desc} <- Access.access_choices()}
+                      class={[
+                        "flex flex-col gap-0.5 rounded-lg border p-2.5 cursor-pointer transition-colors",
+                        if(@settings_access == value,
+                          do: "border-primary bg-primary/5",
+                          else: "border-base-content/10 hover:border-base-content/20"
+                        )
+                      ]}
+                    >
+                      <input
+                        type="radio"
+                        name="settings[access]"
+                        value={value}
+                        checked={@settings_access == value}
+                        class="sr-only"
+                      />
+                      <span class="text-xs font-semibold text-base-content">{title}</span>
+                      <span class="text-[10px] text-base-content/40 leading-snug">{desc}</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div :if={@settings_access == "proxy"} class="space-y-4 rounded-lg bg-base-200/40 p-3">
+                  <div class="flex flex-col gap-1.5">
+                    <label class="text-xs font-medium text-base-content/50">Authentication</label>
+                    <div class="grid grid-cols-3 gap-2">
+                      <label
+                        :for={{value, title, desc} <- Access.auth_choices()}
+                        class={[
+                          "flex flex-col gap-0.5 rounded-lg border p-2 cursor-pointer transition-colors",
+                          if(@settings_auth == value,
+                            do: "border-primary bg-primary/5",
+                            else: "border-base-content/10 hover:border-base-content/20"
+                          )
+                        ]}
+                      >
+                        <input
+                          type="radio"
+                          name="settings[auth]"
+                          value={value}
+                          checked={@settings_auth == value}
+                          class="sr-only"
+                        />
+                        <span class="text-xs font-semibold text-base-content">{title}</span>
+                        <span class="text-[10px] text-base-content/40 leading-snug">{desc}</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-xs font-medium text-base-content/50">Domain</label>
+                    <input
+                      type="text"
+                      name="settings[domain]"
+                      value={@settings_domain}
+                      placeholder={"#{@deployment.app_template.slug}.yourdomain.com"}
+                      class="w-full rounded-lg bg-base-100 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    />
+                    <p class="text-[10px] text-base-content/40">
+                      Add a domain to go live; until then the app isn't reachable externally.
+                    </p>
+                  </div>
+                </div>
+
+                <div :if={@settings_access == "host"} class="space-y-2 rounded-lg bg-base-200/40 p-3">
+                  <div class="flex items-center justify-between">
+                    <label class="text-xs font-medium text-base-content/50">
+                      Container → host ports
+                    </label>
+                    <button
+                      type="button"
+                      phx-click="settings_add_port"
+                      class="text-xs text-primary hover:text-primary/80"
+                    >
+                      + Add port
+                    </button>
+                  </div>
+                  <p :if={@settings_ports == []} class="text-[11px] text-base-content/30">
+                    No ports yet — add a container→host mapping.
+                  </p>
+                  <div
+                    :for={{port, idx} <- Enum.with_index(@settings_ports)}
+                    class="flex items-center gap-2"
+                  >
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][internal]"}
+                      value={port["internal"]}
+                      placeholder="container"
+                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    />
+                    <span class="text-base-content/30">→</span>
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][external]"}
+                      value={port["external"]}
+                      placeholder="host"
+                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    />
+                    <button
+                      type="button"
+                      phx-click="settings_remove_port"
+                      phx-value-index={idx}
+                      class="text-base-content/30 hover:text-error ml-auto"
+                    >
+                      <.icon name="hero-x-mark" class="size-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <p
+                  :if={@settings_access == "internal"}
+                  class="text-[11px] text-base-content/40 rounded-lg bg-base-200/40 p-3"
+                >
+                  Internal only — reachable on the container network, with no host port or public route.
+                </p>
+
+                <%!-- Resilience: resource limits + healthcheck (closes the readiness gate) --%>
+                <div class="space-y-3 border-t border-base-content/5 pt-4">
+                  <label class="text-xs font-medium text-base-content/50">Resilience</label>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">Memory (MB)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        name="settings[memory_mb]"
+                        value={@settings_memory_mb}
+                        placeholder="256"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      />
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">CPU shares</label>
+                      <input
+                        type="number"
+                        min="1"
+                        name="settings[cpu_shares]"
+                        value={@settings_cpu_shares}
+                        placeholder="512"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      />
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[10px] text-base-content/40">Health check path</label>
+                    <input
+                      type="text"
+                      name="settings[health_path]"
+                      value={@settings_health_path}
+                      placeholder="/health"
+                      class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                    />
+                    <p class="text-[10px] text-base-content/40">
+                      An HTTP path probed for readiness. Set memory, CPU, and a path to clear the resilience gate.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="flex gap-2 pt-1">
+                  <button
+                    type="button"
+                    phx-click="cancel_settings_edit"
+                    class="px-3 py-1.5 rounded-lg text-sm text-base-content/70 hover:bg-base-200"
+                  >
+                    Cancel
+                  </button>
+                  <.button
+                    type="submit"
+                    label="Save and recreate"
+                    data-confirm={"Recreate #{@deployment.app_template.name}? The app restarts briefly while the new configuration is applied."}
+                    class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
+                  />
+                </div>
+              </.form>
+            <% else %>
+              <% access = Access.access_of(Access.effective_exposure(@deployment)) %>
+              <dl class="space-y-3 text-sm">
+                <div class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Access</dt>
+                  <dd class="text-base-content">{settings_access_label(@deployment)}</dd>
+                </div>
+                <div :if={access == "proxy"} class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Domain</dt>
+                  <dd class="text-base-content font-mono">
+                    {@deployment.domain || "— (add to go live)"}
+                  </dd>
+                </div>
+                <div :if={access == "host"} class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Host ports</dt>
+                  <dd class="text-base-content font-mono text-right">
+                    <%= case Access.effective_ports(@deployment) do %>
+                      <% [] -> %>
+                        —
+                      <% ports -> %>
+                        <span :for={p <- ports} class="block">
+                          {p["internal"]} → {p["external"] || p["internal"]}
+                        </span>
+                    <% end %>
+                  </dd>
+                </div>
+              </dl>
+            <% end %>
+          </div>
+        </div>
+
         <%!-- Environment tab --%>
         <div
           :if={@active_tab == "environment"}
@@ -707,12 +1094,11 @@ defmodule HomelabWeb.DeploymentLive do
                     class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
                 </div>
-                <button
+                <.button
                   type="submit"
+                  label="Save"
                   class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
-                >
-                  Save
-                </button>
+                />
               </.form>
             <% else %>
               <table class="w-full text-sm">
@@ -784,13 +1170,12 @@ defmodule HomelabWeb.DeploymentLive do
         >
           <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
             <h3 class="text-sm font-semibold text-base-content">Backups</h3>
-            <button
+            <.button
               type="button"
               phx-click="trigger_backup"
+              label="Back up"
               class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-            >
-              Manual backup
-            </button>
+            />
           </div>
           <div class="p-4">
             <table class="w-full text-sm">
@@ -825,12 +1210,98 @@ defmodule HomelabWeb.DeploymentLive do
     """
   end
 
+  defp assign_readiness(socket) do
+    assign(socket, :readiness, Readiness.checks(socket.assigns.deployment))
+  end
+
   defp merged_env(deployment) do
     template = deployment.app_template
     base = template.default_env || %{}
     overrides = deployment.env_overrides || %{}
     Map.merge(base, overrides)
   end
+
+  # Persists config attrs then recreates the container so the changes take effect.
+  defp apply_config(deployment, attrs) do
+    with {:ok, updated} <- Deployments.update_deployment(deployment, attrs),
+         {:ok, _} <- Deployments.recreate_deployment(updated) do
+      {:ok, Deployments.get_deployment!(updated.id)}
+    else
+      {:error, %Ecto.Changeset{}} -> {:error, "Could not save the configuration."}
+      {:error, reason} -> {:error, "Saved, but recreate failed: #{inspect(reason)}"}
+    end
+  end
+
+  # Normalizes stored ports into the container->host rows the Host editor renders.
+  defp editable_ports(ports) do
+    Enum.map(ports, fn p ->
+      %{
+        "internal" => to_string(p["internal"] || p["container_port"] || ""),
+        "external" => to_string(p["external"] || p["host_port"] || "")
+      }
+    end)
+  end
+
+  # Reads the live form's indexed port params, keeping every row (incl. blanks)
+  # so add/remove don't drop a row mid-edit. Save uses ConfigForm for the final
+  # normalized override.
+  defp ports_from_params(ports) when is_map(ports) do
+    ports
+    |> Enum.sort_by(fn {i, _} -> String.to_integer(i) end)
+    |> Enum.map(fn {_, p} ->
+      %{"internal" => p["internal"] || "", "external" => p["external"] || ""}
+    end)
+  end
+
+  defp ports_from_params(_), do: []
+
+  defp blank_to_nil(v) when v in [nil, ""], do: nil
+  defp blank_to_nil(v), do: v
+
+  # Build the resource-limits override from the form. Only the fields the user
+  # filled are set; an all-blank section means "inherit the template" (nil).
+  defp limits_override(settings) do
+    limits =
+      %{
+        "memory_mb" => parse_pos_int(settings["memory_mb"]),
+        "cpu_shares" => parse_pos_int(settings["cpu_shares"])
+      }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+
+    if limits == %{}, do: nil, else: limits
+  end
+
+  # Build the healthcheck override. A blank path inherits the template; a path
+  # merges onto the effective check so existing intervals/timeouts are kept.
+  defp health_override(deployment, settings) do
+    case blank_to_nil(settings["health_path"]) do
+      nil -> nil
+      path -> Map.put(Access.effective_health_check(deployment), "path", path)
+    end
+  end
+
+  defp parse_pos_int(value) do
+    case value |> to_string() |> Integer.parse() do
+      {n, _} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  # Human-readable summary of a deployment's access for the read-only view.
+  defp settings_access_label(deployment) do
+    exposure = Access.effective_exposure(deployment)
+
+    case Access.access_of(exposure) do
+      "proxy" -> "Reverse proxy (#{auth_label(Access.auth_of(exposure))})"
+      "host" -> "Host ports"
+      "internal" -> "Internal only"
+    end
+  end
+
+  defp auth_label("sso_protected"), do: "SSO"
+  defp auth_label("private"), do: "private"
+  defp auth_label(_), do: "no auth"
 
   defp mask_secret(key, val) when is_binary(key) do
     if String.contains?(String.upcase(key), "PASSWORD") or

@@ -453,6 +453,20 @@ defmodule Homelab.DeploymentsTest do
     end
   end
 
+  describe "recreate_deployment/1" do
+    test "undeploys the old container and deploys a fresh one from the current config" do
+      deployment = insert(:deployment, status: :running, external_id: "old-123")
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "old-123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "new-456"} end)
+
+      assert {:ok, recreated} = Deployments.recreate_deployment(deployment)
+      assert recreated.external_id == "new-456"
+      assert recreated.status == :deploying
+    end
+  end
+
   describe "start_deployment/1 spec build failure" do
     test "sets status to failed when spec build fails" do
       template = insert(:app_template, required_env: ["NEEDED_VAR"])
@@ -552,12 +566,28 @@ defmodule Homelab.DeploymentsTest do
       assert :ok = Deployments.unpublish_deployment(deployment)
     end
 
-    test "internal-only (no domain) deployment never touches ingress" do
+    test "a no-domain deployment is never published; unpublish is a safe disconnect" do
       deployment = insert(:deployment, domain: nil)
 
-      # No publish/unpublish expectations set: a call would fail verify_on_exit!.
+      # publish: no domain → no orchestrator call.
       assert :ok = Deployments.publish_deployment(deployment)
+
+      # unpublish: always disconnects (idempotent), so it DOES call the orchestrator.
+      Homelab.Mocks.Orchestrator |> expect(:unpublish, fn _net -> :ok end)
       assert :ok = Deployments.unpublish_deployment(deployment)
+    end
+
+    test "a :host deployment with a domain is not proxy-published" do
+      tenant = insert(:tenant, slug: "acme")
+      template = insert(:app_template, slug: "game", exposure_mode: :host)
+
+      deployment =
+        insert(:deployment, tenant: tenant, app_template: template, domain: "game.acme.test")
+
+      refute Deployments.ingress_published?(deployment)
+
+      # publish is a no-op for a host deployment even though it has a domain.
+      assert :ok = Deployments.publish_deployment(deployment)
     end
   end
 end

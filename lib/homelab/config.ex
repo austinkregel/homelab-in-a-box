@@ -64,9 +64,10 @@ defmodule Homelab.Config do
     Homelab.Registries.ECR
   ]
 
-  @application_catalogs [
-    Homelab.Catalogs.Curated
-  ]
+  # The workbench starts bare — no catalog wall. Sources are opt-in via config
+  # (`config :homelab, :application_catalogs, [...]`); the curated provider
+  # stays in the tree to re-enable.
+  @application_catalogs []
 
   def registries, do: available_drivers(:registries, @registries)
   def application_catalogs, do: available_drivers(:application_catalogs, @application_catalogs)

@@ -91,6 +91,10 @@ defmodule Homelab.ConfigTest do
       catalogs = Config.application_catalogs()
       assert is_list(catalogs)
     end
+
+    test "defaults to empty — the workbench starts bare" do
+      assert Config.application_catalogs() == []
+    end
   end
 
   describe "available_registry_ids/0" do

@@ -14,7 +14,7 @@ defmodule HomelabWeb.CatalogLive do
 
     socket =
       socket
-      |> assign(:page_title, "App Catalog")
+      |> assign(:page_title, "Workbench")
       |> assign(:tab, "curated")
       |> assign(:search_query, "")
       |> assign(:search_results, [])
@@ -264,9 +264,18 @@ defmodule HomelabWeb.CatalogLive do
       |> Enum.reject(fn {_k, v} -> v == "" end)
       |> Map.new()
 
-    ports = parse_port_params(params["ports"])
-    volumes = parse_volume_params(params["volumes"])
     exposure_mode = params["exposure_mode"] || "public"
+    volumes = parse_volume_params(params["volumes"])
+
+    # Access model: only :host binds host ports — mark every listed port published
+    # in that mode; proxy/internal never bind, so publish stays off.
+    ports =
+      params["ports"]
+      |> parse_port_params()
+      |> Enum.map(&Map.put(&1, "published", exposure_mode == "host"))
+
+    # A domain only applies to reverse-proxy access.
+    domain = if exposure_mode in ~w(public sso_protected private), do: params["domain"], else: nil
 
     template_updates = %{}
 
@@ -292,7 +301,7 @@ defmodule HomelabWeb.CatalogLive do
     attrs = %{
       tenant_id: String.to_integer(tenant_id),
       app_template_id: template.id,
-      domain: params["domain"],
+      domain: domain,
       env_overrides: env_overrides
     }
 
@@ -323,28 +332,14 @@ defmodule HomelabWeb.CatalogLive do
     >
       <div>
         <div class="mb-5">
-          <h1 class="text-2xl font-bold text-base-content">App Catalog</h1>
+          <h1 class="text-2xl font-bold text-base-content">Workbench</h1>
           <p class="mt-1 text-sm text-base-content/50">
-            Browse curated apps, search registries, or deploy a custom image.
+            Search any registry, deploy a custom image, then iterate toward production-ready.
           </p>
         </div>
 
-        <%!-- Tabs --%>
+        <%!-- Tabs: search-forward, with curated sources (off by default) last --%>
         <div class="flex gap-6 border-b border-base-content/10 mb-5">
-          <button
-            type="button"
-            phx-click="switch_tab"
-            phx-value-tab="curated"
-            class={[
-              "pb-2.5 text-sm font-medium -mb-px",
-              if(@tab == "curated",
-                do: "border-b-2 border-primary text-base-content",
-                else: "text-base-content/50 hover:text-base-content/70"
-              )
-            ]}
-          >
-            Curated
-          </button>
           <button
             type="button"
             phx-click="switch_tab"
@@ -373,17 +368,61 @@ defmodule HomelabWeb.CatalogLive do
           >
             Custom
           </button>
+          <button
+            type="button"
+            phx-click="switch_tab"
+            phx-value-tab="curated"
+            class={[
+              "pb-2.5 text-sm font-medium -mb-px",
+              if(@tab == "curated",
+                do: "border-b-2 border-primary text-base-content",
+                else: "text-base-content/50 hover:text-base-content/70"
+              )
+            ]}
+          >
+            Curated
+          </button>
         </div>
 
         <%!-- Curated tab --%>
         <div :if={@tab == "curated"} class="space-y-5">
-          <div :if={@curated_entries == [] && connected?(@socket)} class="py-12 text-center">
+          <div :if={@curated_entries == [] && @catalogs == []} class="py-12 text-center space-y-2">
+            <p class="text-base-content/50">No catalog sources configured.</p>
+            <p class="text-xs text-base-content/40">
+              Use
+              <button
+                type="button"
+                phx-click="switch_tab"
+                phx-value-tab="search"
+                class="text-primary hover:underline"
+              >
+                Search
+              </button>
+              or
+              <button
+                type="button"
+                phx-click="switch_tab"
+                phx-value-tab="custom"
+                class="text-primary hover:underline"
+              >
+                Custom
+              </button>
+              to add an app.
+            </p>
+          </div>
+          <div
+            :if={@curated_entries == [] && @catalogs != [] && connected?(@socket)}
+            class="py-12 text-center"
+          >
             <div class="inline-flex items-center gap-2 text-base-content/50">
               <.icon name="hero-arrow-path" class="size-5 animate-spin" />
               <span>Loading curated catalog...</span>
             </div>
           </div>
-          <div :if={@curated_entries == [] && !connected?(@socket)} class="py-12 text-center">
+          <div
+            :if={@curated_entries == [] && @catalogs != [] && !connected?(@socket)}
+            class="py-12 text-center"
+          >
             <p class="text-base-content/50">Connect to load the catalog.</p>
           </div>
           <div :if={@curated_entries != []}>
@@ -613,12 +652,11 @@ defmodule HomelabWeb.CatalogLive do
             />
             <.input field={@custom_form[:tag]} type="text" label="Tag" placeholder="latest" />
             <.input field={@custom_form[:name]} type="text" label="Display name" placeholder="My App" />
-            <button
+            <.button
               type="submit"
+              label="Deploy"
               class="w-full py-2.5 rounded-lg bg-primary text-primary-content font-medium"
-            >
-              Deploy
-            </button>
+            />
           </.form>
         </div>
 
@@ -774,7 +812,7 @@ defmodule HomelabWeb.CatalogLive do
                       class="text-[11px] text-info/70 mt-2 flex items-center gap-1"
                     >
                       <.icon name="hero-globe-alt-mini" class="size-3" />
-                      When a domain is set, this port is routed through the reverse proxy and won't be published on the host.
+                      In reverse-proxy access this port is reached through Traefik; it binds to the host only with "Host ports" access.
                     </p>
                   </div>
                   <button
@@ -889,17 +927,22 @@ defmodule HomelabWeb.CatalogLive do
 
                 <div>
                   <label class="block text-sm font-medium text-base-content/70 mb-1.5">
-                    Exposure Mode <span class="font-normal text-base-content/30 ml-1">optional</span>
+                    Access <span class="font-normal text-base-content/30 ml-1">how it's reached</span>
                   </label>
                   <select
                     name="exposure_mode"
                     class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
                   >
-                    <option value="public" selected>Public</option>
-                    <option value="sso_protected">SSO Protected</option>
-                    <option value="private">Private (LAN only)</option>
-                    <option value="service">Service (proxy-only, no host ports)</option>
+                    <option value="public" selected>Reverse proxy — no auth</option>
+                    <option value="sso_protected">Reverse proxy — SSO</option>
+                    <option value="private">Reverse proxy — private (LAN)</option>
+                    <option value="host">Host ports (bind to host)</option>
+                    <option value="service">Internal only (no external access)</option>
                   </select>
+                  <p class="text-[11px] text-base-content/30 mt-1.5">
+                    Reverse proxy serves via Traefik at the domain above. Host ports bind the
+                    container's ports to the host instead. The two are mutually exclusive.
+                  </p>
                 </div>
 
                 <%!-- Required env vars --%>
@@ -996,12 +1039,11 @@ defmodule HomelabWeb.CatalogLive do
                   >
                     Cancel
                   </button>
-                  <button
+                  <.button
                     type="submit"
+                    label="Deploy"
                     class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
-                  >
-                    Deploy
-                  </button>
+                  />
                 </div>
               </.form>
             </div>
@@ -1443,18 +1485,21 @@ defmodule HomelabWeb.CatalogLive do
   defp exposure_classes(:sso_protected), do: "bg-success/10 text-success"
   defp exposure_classes(:public), do: "bg-warning/10 text-warning"
   defp exposure_classes(:service), do: "bg-info/10 text-info"
+  defp exposure_classes(:host), do: "bg-secondary/10 text-secondary"
   defp exposure_classes(_), do: "bg-base-200 text-base-content/40"
 
   defp exposure_icon(:private), do: "hero-lock-closed-mini"
   defp exposure_icon(:sso_protected), do: "hero-shield-check-mini"
   defp exposure_icon(:public), do: "hero-globe-alt-mini"
   defp exposure_icon(:service), do: "hero-server-stack-mini"
+  defp exposure_icon(:host), do: "hero-server-stack-mini"
   defp exposure_icon(_), do: "hero-question-mark-circle-mini"
 
   defp format_exposure(:sso_protected), do: "SSO"
   defp format_exposure(:private), do: "Private"
   defp format_exposure(:public), do: "Public"
-  defp format_exposure(:service), do: "Service"
+  defp format_exposure(:service), do: "Internal"
+  defp format_exposure(:host), do: "Host ports"
   defp format_exposure(mode), do: to_string(mode)
 
   defp app_icon("nextcloud"), do: "hero-cloud"

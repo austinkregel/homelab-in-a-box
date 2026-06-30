@@ -1,10 +1,12 @@
 defmodule Homelab.Services.ReconcilerTest do
   use Homelab.DataCase, async: false
+  use Oban.Testing, repo: Homelab.ObanRepo
 
   import Mox
   import Homelab.Factory
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.{ReleaseRunner, Releases}
   alias Homelab.Notifications.Notification
   alias Homelab.Repo
   alias Homelab.Services.Reconciler
@@ -157,6 +159,54 @@ defmodule Homelab.Services.ReconcilerTest do
       updated = Deployments.get_deployment!(dep.id)
       assert updated.status == :failed
       assert updated.error_message =~ "timed out"
+    end
+  end
+
+  describe "release lease awareness and heartbeat" do
+    test "stamps last_reconciled_at on each reconciled deployment" do
+      record_orchestrator_io(self())
+      dep = insert(:deployment, status: :running, external_id: "c1")
+      assert is_nil(dep.last_reconciled_at)
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, [svc("c1", %{state: :running, health: :healthy})]} end)
+
+      start_and_sync!()
+
+      assert Deployments.get_deployment!(dep.id).last_reconciled_at
+    end
+
+    test "does not time out a deployment owned by a live-lease release" do
+      Application.put_env(:homelab, :reconciler, deploying_timeout_ms: 0)
+      record_orchestrator_io(self())
+      template = insert(:app_template, health_check: %{"path" => "/health"})
+
+      dep =
+        insert(:deployment, app_template: template, status: :deploying, external_id: "c1")
+
+      {:ok, release} = Releases.plan_release(dep, [%{type: :app_container}])
+      {:ok, _} = Releases.acquire_lease(release, "release-owner", 120)
+
+      # Present but not ready: without the lease the timeout sweep would fail it.
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, [svc("c1", %{state: :running, health: :starting})]} end)
+
+      start_and_sync!()
+
+      assert Deployments.get_deployment!(dep.id).status == :deploying
+    end
+
+    test "re-enqueues a release whose lease has expired" do
+      record_orchestrator_io(self())
+      dep = insert(:deployment, status: :pending)
+      {:ok, release} = Releases.plan_release(dep, [%{type: :app_container}])
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, []} end)
+
+      start_and_sync!()
+
+      assert_enqueued(worker: ReleaseRunner, args: %{"release_id" => release.id})
     end
   end
 

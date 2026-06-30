@@ -27,9 +27,9 @@ defmodule HomelabWeb.CatalogLiveTest do
   end
 
   describe "mount" do
-    test "renders catalog page with curated tab active", %{conn: conn} do
+    test "renders workbench page with the tabs", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
       assert html =~ "Curated"
       assert html =~ "Search"
       assert html =~ "Custom"
@@ -43,7 +43,12 @@ defmodule HomelabWeb.CatalogLiveTest do
     test "assigns initial empty state for search and curated", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
       refute html =~ "No results found"
-      assert html =~ "Browse curated apps"
+      assert html =~ "Search any registry"
+    end
+
+    test "with no catalog sources, the curated tab prompts to search/add", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/catalog")
+      assert html =~ "No catalog sources configured"
     end
   end
 
@@ -396,13 +401,12 @@ defmodule HomelabWeb.CatalogLiveTest do
       assert html =~ "Domain"
     end
 
-    test "modal shows exposure mode selector", %{view: view} do
+    test "modal shows access selector", %{view: view} do
       html = render(view)
-      assert html =~ "Exposure Mode"
-      assert html =~ "Public"
-      assert html =~ "SSO Protected"
-      assert html =~ "Private"
-      assert html =~ "Service"
+      assert html =~ "Access"
+      assert html =~ "Reverse proxy"
+      assert html =~ "Host ports"
+      assert html =~ "Internal only"
     end
   end
 
@@ -751,7 +755,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       _ = :sys.get_state(view.pid)
       html = render(view)
       refute has_element?(view, "#deploy-modal")
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
     end
   end
 
@@ -812,7 +816,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       {:ok, view, _html} = live(conn, ~p"/catalog")
       render_click(view, "close_deploy", %{})
       html = render(view)
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
     end
   end
 
@@ -1436,10 +1440,11 @@ defmodule HomelabWeb.CatalogLiveTest do
 
       html = render(view)
 
-      assert html =~ "Public"
-      assert html =~ "SSO Protected"
-      assert html =~ "Private (LAN only)"
-      assert html =~ "Service (proxy-only, no host ports)"
+      assert html =~ "Reverse proxy — no auth"
+      assert html =~ "Reverse proxy — SSO"
+      assert html =~ "Reverse proxy — private (LAN)"
+      assert html =~ "Host ports (bind to host)"
+      assert html =~ "Internal only (no external access)"
     end
 
     test "shows deploy modal header with template name", %{conn: conn} do

@@ -387,12 +387,11 @@ defmodule HomelabWeb.SettingsLive do
             placeholder="lab.example.com"
           />
         </div>
-        <button
+        <.button
           type="submit"
+          label="Save"
           class="px-5 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 transition-all cursor-pointer"
-        >
-          Save
-        </button>
+        />
       </.form>
     </div>
     """
@@ -865,12 +864,11 @@ defmodule HomelabWeb.SettingsLive do
         </div>
 
         <div class="pt-2">
-          <button
+          <.button
             type="submit"
+            label="Save DNS Settings"
             class="px-5 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 transition-all cursor-pointer"
-          >
-            Save DNS Settings
-          </button>
+          />
         </div>
       </.form>
     </div>
@@ -902,12 +900,11 @@ defmodule HomelabWeb.SettingsLive do
               />
             </div>
             <div class="flex gap-3">
-              <button
+              <.button
                 type="submit"
+                label="Save"
                 class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium cursor-pointer"
-              >
-                Save
-              </button>
+              />
               <button
                 type="button"
                 class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
@@ -956,12 +953,11 @@ defmodule HomelabWeb.SettingsLive do
               />
             </div>
             <div class="flex gap-3">
-              <button
+              <.button
                 type="submit"
+                label="Save"
                 class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium cursor-pointer"
-              >
-                Save
-              </button>
+              />
               <button
                 type="button"
                 class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
@@ -992,12 +988,11 @@ defmodule HomelabWeb.SettingsLive do
               />
             </div>
             <div class="flex gap-3">
-              <button
+              <.button
                 type="submit"
+                label="Save"
                 class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium cursor-pointer"
-              >
-                Save
-              </button>
+              />
               <button
                 type="button"
                 class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"

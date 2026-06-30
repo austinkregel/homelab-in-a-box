@@ -292,7 +292,9 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       tenant = build_tenant()
 
       template =
-        build_template(%{ports: [%{"internal" => 8080, "published" => true, "host_port" => 8080}]})
+        build_template(%{
+          ports: [%{"internal" => 8080, "published" => true, "host_port" => 8080}]
+        })
 
       deployment = build_deployment(tenant, template, %{domain: "app.friends.homelab.local"})
 
@@ -300,11 +302,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.ports == []
     end
 
-    test "a non-ingress deployment keeps its explicitly published host ports" do
+    test "a :host deployment keeps its explicitly published host ports" do
       tenant = build_tenant()
 
       template =
-        build_template(%{ports: [%{"internal" => 9000, "published" => true, "host_port" => 9000}]})
+        build_template(%{
+          exposure_mode: :host,
+          ports: [%{"internal" => 9000, "published" => true, "host_port" => 9000}]
+        })
 
       deployment = build_deployment(tenant, template, %{domain: nil})
 
@@ -322,6 +327,169 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.labels["traefik.enable"] == "true"
       assert spec.labels["traefik.docker.network"] == "homelab_friends_nextcloud_net"
+    end
+  end
+
+  describe "per-deployment config overrides" do
+    test "ports_override wins over the template ports" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :host,
+          ports: [
+            %{"internal" => "1000", "external" => "1000", "published" => true, "role" => "web"}
+          ]
+        })
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: nil,
+          ports_override: [
+            %{"internal" => "8080", "external" => "9090", "published" => true, "role" => "web"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == [%{internal: "8080", external: "9090", role: "web"}]
+    end
+
+    test "nil ports_override falls back to the template ports" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :host,
+          ports: [
+            %{"internal" => "1000", "external" => "1000", "published" => true, "role" => "web"}
+          ]
+        })
+
+      deployment = build_deployment(tenant, template, %{domain: nil, ports_override: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == [%{internal: "1000", external: "1000", role: "web"}]
+    end
+
+    test "exposure_mode_override :service publishes no host ports and marks service mode" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :private})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: nil,
+          exposure_mode_override: "service",
+          ports_override: [%{"internal" => "8080", "published" => true}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == []
+      assert spec.service_mode == true
+    end
+
+    test "exposure_mode_override changes routing labels without touching the template" do
+      tenant = build_tenant()
+      # Template default is SSO-protected; the deployment overrides to public.
+      template = build_template(%{exposure_mode: :sso_protected})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "app.friends.test",
+          exposure_mode_override: "public"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["homelab.exposure"] == "public"
+      refute Enum.any?(Map.keys(spec.labels), &String.contains?(&1, "forwardauth"))
+      # The shared template is untouched.
+      assert template.exposure_mode == :sso_protected
+    end
+
+    test "resource_limits_override wins over the template limits" do
+      tenant = build_tenant()
+      template = build_template(%{resource_limits: %{"memory_mb" => 256, "cpu_shares" => 512}})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          resource_limits_override: %{"memory_mb" => 1024, "cpu_shares" => 2048}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.memory_limit == 1024 * 1_048_576
+      assert spec.cpu_limit == 2048 * 1_000_000
+    end
+
+    test "health_check_override adds a healthcheck the template lacks" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          health_check: %{},
+          ports: [%{"internal" => "8080", "published" => true}]
+        })
+
+      deployment =
+        build_deployment(tenant, template, %{health_check_override: %{"path" => "/healthz"}})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert is_list(spec.health_check["Test"])
+    end
+  end
+
+  describe "access model coherence (proxy XOR host)" do
+    defp host_ports do
+      [%{"internal" => "8080", "external" => "8080", "published" => true, "role" => "web"}]
+    end
+
+    for mode <- [:public, :sso_protected, :private] do
+      test "proxy mode #{mode} never binds host ports, even with published ports + a domain" do
+        tenant = build_tenant()
+        template = build_template(%{exposure_mode: unquote(mode), ports: host_ports()})
+        deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+        assert spec.ports == []
+      end
+    end
+
+    test ":host binds published ports and is never given a Traefik route" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :host, ports: host_ports()})
+      # Even a stray domain must not produce routing labels for a host deployment.
+      deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == [%{internal: "8080", external: "8080", role: "web"}]
+      refute spec.labels["traefik.enable"]
+    end
+
+    test "routing labels are emitted only for a proxy mode with a domain" do
+      tenant = build_tenant()
+
+      # proxy + domain → route
+      proxied =
+        build_deployment(tenant, build_template(%{exposure_mode: :public}), %{
+          domain: "a.friends.test"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(proxied)
+      assert spec.labels["traefik.enable"] == "true"
+
+      # proxy + no domain → no route (not live yet)
+      pending =
+        build_deployment(tenant, build_template(%{exposure_mode: :public}), %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(pending)
+      refute spec.labels["traefik.enable"]
+
+      # :service + domain → no route (dead route avoided)
+      service =
+        build_deployment(tenant, build_template(%{exposure_mode: :service}), %{
+          domain: "b.friends.test"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(service)
+      refute spec.labels["traefik.enable"]
     end
   end
 end

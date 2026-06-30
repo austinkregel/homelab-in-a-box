@@ -102,7 +102,9 @@ defmodule Homelab.Catalogs.Curated do
         "role" => p["role"] || "other",
         "description" => p["description"] || "",
         "optional" => p["optional"] || false,
-        "published" => true
+        # Don't force a host-port binding. Catalog apps default to reverse-proxy
+        # access; host ports are opt-in via the :host access mode.
+        "published" => p["published"] || false
       }
     end)
   end

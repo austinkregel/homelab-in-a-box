@@ -11,6 +11,17 @@ config :homelab, Homelab.Repo,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
 
+# Oban runs on a dedicated Postgres instance (see docker-compose.yml: oban-postgres).
+config :homelab, Homelab.ObanRepo,
+  username: "homelab",
+  password: "homelab",
+  hostname: "localhost",
+  port: 5434,
+  database: "homelab_oban_dev",
+  stacktrace: true,
+  show_sensitive_data_on_connection_error: true,
+  pool_size: 10
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #

@@ -10,10 +10,24 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Dedicated Postgres for Oban, isolated from the app DB so its high-churn job
+  # table can't degrade app query latency. Maps to Homelab.ObanRepo (port 5434).
+  oban-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: homelab
+      POSTGRES_PASSWORD: homelab
+      POSTGRES_DB: homelab_oban_dev
+    ports:
+      - "5434:5432"
+    volumes:
+      - oban_pgdata:/var/lib/postgresql/data
+
   # Mount the Docker socket so the app can manage containers in dev
-  # Usage: docker compose up postgres
+  # Usage: docker compose up postgres oban-postgres
   #        mix phx.server
   # The socket is accessed directly from the host in dev mode.
 
 volumes:
   pgdata:
+  oban_pgdata:

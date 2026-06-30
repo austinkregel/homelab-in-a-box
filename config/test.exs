@@ -14,6 +14,23 @@ config :homelab, Homelab.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+# In test, the Oban repo shares the test Postgres server (separate database) and
+# uses the SQL sandbox. Oban itself runs in manual testing mode (no queues,
+# plugins, or notifier) so jobs only run when a test drains them.
+config :homelab, Homelab.ObanRepo,
+  username: "homelab",
+  password: "homelab",
+  hostname: System.get_env("DB_HOST", "localhost"),
+  port: String.to_integer(System.get_env("DB_PORT", "5433")),
+  database: "homelab_oban_test#{System.get_env("MIX_TEST_PARTITION")}",
+  pool: Ecto.Adapters.SQL.Sandbox,
+  # Oban runs in manual testing mode and barely touches its repo, so keep this
+  # pool small — both test repos share one Postgres server and a large pool here
+  # would exhaust max_connections.
+  pool_size: 2
+
+config :homelab, Oban, testing: :manual
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :homelab, HomelabWeb.Endpoint,
@@ -39,6 +56,10 @@ config :homelab,
   public_dns_provider: Homelab.Mocks.DnsProvider,
   internal_dns_provider: Homelab.Mocks.DnsProvider,
   registrar: Homelab.Mocks.RegistrarProvider,
+  # Default to an unreachable-daemon stub so incidental Docker callers behave as
+  # they did with no daemon. Docker-focused tests opt in per process with
+  # `Process.put(:docker_client, Homelab.Mocks.DockerClient)`.
+  docker_client: Homelab.Docker.UnavailableClient,
   start_services: false,
   registries: [Homelab.Registries.DockerHub]
 

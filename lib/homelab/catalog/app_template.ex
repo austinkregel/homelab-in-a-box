@@ -9,8 +9,11 @@ defmodule Homelab.Catalog.AppTemplate do
     field :version, :string
     field :image, :string
 
+    # Access model: :public / :sso_protected / :private are reverse-proxy modes
+    # (auth = none / SSO / IP-allowlist), :host binds host ports, :service is
+    # internal-only. Proxy modes never bind host ports; :host never gets a route.
     field :exposure_mode, Ecto.Enum,
-      values: [:private, :sso_protected, :public, :service],
+      values: [:private, :sso_protected, :public, :service, :host],
       default: :sso_protected
 
     field :auth_integration, :boolean, default: true

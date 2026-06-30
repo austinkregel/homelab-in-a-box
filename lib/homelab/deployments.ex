@@ -10,6 +10,7 @@ defmodule Homelab.Deployments do
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.SpecBuilder
+  alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
 
   def list_deployments do
@@ -120,16 +121,19 @@ defmodule Homelab.Deployments do
   def ensure_external_id(_deployment, _external_id), do: {0, nil}
 
   @doc """
-  True when a deployment carries a public Traefik route (it has a domain). Such
-  deployments are subject to ingress enforcement; router-less / `:service`
-  deployments are internal-only and never publicly reachable.
+  True when a deployment *should* carry a public Traefik route: it's in a reverse-
+  proxy access mode AND has a domain. `:host`/`:service` deployments are never
+  proxied (a host deployment with a stray domain is not routed). Requires
+  `app_template` preloaded.
   """
-  def ingress_published?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+  def ingress_published?(%Deployment{} = deployment) do
+    is_binary(deployment.domain) and deployment.domain != "" and Access.proxy_mode?(deployment)
+  end
 
   @doc """
-  Makes an ingress-published deployment publicly reachable by connecting Traefik
-  to its per-deployment network. No-op for internal-only deployments. This is the
-  *only* action that grants external reachability.
+  Makes a proxy-mode deployment publicly reachable by connecting Traefik to its
+  per-deployment network. No-op unless it's a proxy mode with a domain. This is
+  the *only* action that grants external reachability.
   """
   def publish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
@@ -143,19 +147,15 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
-  Severs an ingress-published deployment's public path by disconnecting Traefik
-  from its per-deployment network. Idempotent; no-op for internal-only deployments.
-  Never touches the workload container's own networks.
+  Severs a deployment's public path by disconnecting Traefik from its
+  per-deployment network. Always safe to call (disconnecting a network Traefik
+  isn't on is a no-op), so it also cleans up a stale route after an access-mode
+  change. Never touches the workload container's own networks.
   """
   def unpublish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
-
-    if ingress_published?(deployment) do
-      network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
-      Homelab.Config.orchestrator().unpublish(network)
-    else
-      :ok
-    end
+    network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
+    Homelab.Config.orchestrator().unpublish(network)
   end
 
   @doc "Lists all ingress-published deployments (any status), preloaded."
@@ -272,6 +272,20 @@ defmodule Homelab.Deployments do
     Repo.delete(deployment)
   end
 
+  @doc """
+  Recreates a deployment's container so config changes (domain, ports, exposure,
+  env) take effect. Docker bakes those into the container at create time, so
+  there is no in-place update — we undeploy the old container and deploy a fresh
+  one from the (now-updated) row via `SpecBuilder.build/1`. Pass the deployment
+  AFTER persisting any config changes. Safe when stopped/failed (no old container
+  to remove).
+  """
+  def recreate_deployment(%Deployment{} = deployment) do
+    with {:ok, stopped} <- stop_deployment(deployment) do
+      start_deployment(stopped)
+    end
+  end
+
   def change_deployment(%Deployment{} = deployment, attrs \\ %{}) do
     Deployment.changeset(deployment, attrs)
   end
@@ -287,6 +301,44 @@ defmodule Homelab.Deployments do
       do_deploy(deployment)
     end
   end
+
+  @doc """
+  Provisions a deployment (and any companion deployments) durably via the release
+  saga instead of the imperative in-request path: plans the ordered steps and
+  enqueues `ReleaseRunner`. Companions are deployed and awaited healthy before the
+  app, the app is awaited, then ingress is published (when the app has a domain).
+
+  Both `app` and each companion must already exist as `:pending` deployment rows
+  (their `env_overrides` carry any shared credentials). Returns `{:ok, release}`.
+
+  This is the path that fixes multi-stage deploys: a release can only reach
+  `:running` once its `:app_container` step has run, and a failure rolls back the
+  companions so nothing is orphaned.
+  """
+  def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
+      when is_list(companions) do
+    steps =
+      Enum.flat_map(companions, fn companion ->
+        [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
+        ]
+      end) ++
+        [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}}
+        ] ++ ingress_steps(app)
+
+    with {:ok, release} <- Releases.plan_release(app, steps) do
+      {:ok, _job} = ReleaseRunner.enqueue(release)
+      {:ok, release}
+    end
+  end
+
+  defp ingress_steps(%Deployment{domain: domain}) when is_binary(domain) and domain != "",
+    do: [%{type: :publish_ingress, resource_handle: %{}}]
+
+  defp ingress_steps(_app), do: []
 
   defp do_deploy(deployment) do
     ensure_traefik_if_needed(deployment)

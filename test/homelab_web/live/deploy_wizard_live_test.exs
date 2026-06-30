@@ -436,26 +436,73 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert html =~ "myapp.example.com"
     end
 
-    test "update_network with exposure_mode sets exposure", %{conn: conn, template: template} do
+    test "choosing a proxy auth level sets the exposure mode", %{conn: conn, template: template} do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
 
       view
-      |> element("[phx-click=update_network][phx-value-exposure_mode=private]")
+      |> element("[phx-click=update_auth][phx-value-auth=private]")
       |> render_click()
 
       html = render(view)
       assert html =~ "Private"
     end
 
-    test "service exposure mode shows info banner", %{conn: conn, template: template} do
+    test "Host ports access reveals the host-binding step and hides the domain", %{
+      conn: conn,
+      template: template
+    } do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
 
       view
-      |> element("[phx-click=update_network][phx-value-exposure_mode=service]")
+      |> element("[phx-click=update_access][phx-value-access=host]")
       |> render_click()
 
       html = render(view)
-      assert html =~ "No host ports published"
+      assert html =~ "bind directly to the host"
+      # Domain card is proxy-only, so it disappears in Host mode.
+      refute html =~ "network[domain]"
+    end
+
+    test "Internal access shows the internal-only banner", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
+
+      view
+      |> element("[phx-click=update_access][phx-value-access=internal]")
+      |> render_click()
+
+      html = render(view)
+      assert html =~ "No host ports and no public route"
+    end
+  end
+
+  describe "config step sync (no stale-assign bug)" do
+    test "host-port edits persist to the assigns and the review step", %{conn: conn} do
+      template =
+        insert(:app_template,
+          name: "PortApp",
+          slug: "portapp",
+          image: "portapp:latest",
+          default_env: %{},
+          required_env: [],
+          ports: [%{"internal" => "8080", "role" => "web", "published" => false}],
+          volumes: []
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      # Choose Host access (reveals the host-port input), then edit the binding.
+      render_click(view, "update_access", %{"access" => "host"})
+
+      render_change(view, "config_changed", %{
+        "ports" => %{"0" => %{"internal" => "8080", "external" => "9090", "published" => "true"}}
+      })
+
+      # The edit is reflected immediately (previously it was dropped — stale assign).
+      assert render(view) =~ "9090"
+
+      # ...and carries through to the Review step's rebuilt hidden inputs.
+      render_click(view, "go_step", %{"step" => "review"})
+      assert render(view) =~ "9090"
     end
   end
 
@@ -831,7 +878,15 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       })
 
       flash = assert_redirect(view, "/")
-      assert flash["info"] =~ "service(s) deployed"
+      assert flash["info"] =~ "Deployment started"
+
+      # The compose deploy now runs through the durable release saga: a release is
+      # planned for the app deployment with companion + app container steps.
+      assert [release] = Homelab.Repo.all(Homelab.Deployments.Release)
+      release = Homelab.Repo.preload(release, :steps)
+      step_types = Enum.map(release.steps, & &1.type)
+      assert :app_container in step_types
+      assert :dependency_container in step_types
     end
   end
 

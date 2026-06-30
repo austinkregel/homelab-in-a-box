@@ -156,32 +156,6 @@ defmodule Homelab.Settings do
 
   defp decode_value(%SystemSetting{value: value}), do: value
 
-  defp encrypt(plaintext) do
-    secret = encryption_key()
-    iv = :crypto.strong_rand_bytes(16)
-
-    {ciphertext, tag} =
-      :crypto.crypto_one_time_aead(:aes_256_gcm, secret, iv, plaintext, "", true)
-
-    Base.encode64(iv <> tag <> ciphertext)
-  end
-
-  defp decrypt(encoded) do
-    secret = encryption_key()
-    decoded = Base.decode64!(encoded)
-    <<iv::binary-16, tag::binary-16, ciphertext::binary>> = decoded
-    :crypto.crypto_one_time_aead(:aes_256_gcm, secret, iv, ciphertext, "", tag, false)
-  end
-
-  defp encryption_key do
-    base =
-      Application.get_env(:homelab, HomelabWeb.Endpoint)[:secret_key_base] ||
-        raise """
-        secret_key_base is not configured, so stored secrets cannot be \
-        encrypted or decrypted. Set SECRET_KEY_BASE (production) or ensure the \
-        endpoint config provides :secret_key_base.\
-        """
-
-    :crypto.hash(:sha256, base)
-  end
+  defp encrypt(plaintext), do: Homelab.Crypto.encrypt(plaintext)
+  defp decrypt(encoded), do: Homelab.Crypto.decrypt(encoded)
 end

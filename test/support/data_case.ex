@@ -37,7 +37,14 @@ defmodule Homelab.DataCase do
   """
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Homelab.Repo, shared: not tags[:async])
-    on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+    # Oban runs on its own repo; own its sandbox too so code that enqueues jobs
+    # (e.g. ReleaseRunner.enqueue/1) is testable.
+    oban_pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Homelab.ObanRepo, shared: not tags[:async])
+
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.stop_owner(pid)
+      Ecto.Adapters.SQL.Sandbox.stop_owner(oban_pid)
+    end)
   end
 
   @doc """
