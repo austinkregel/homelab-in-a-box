@@ -27,9 +27,9 @@ defmodule HomelabWeb.CatalogLiveTest do
   end
 
   describe "mount" do
-    test "renders catalog page with curated tab active", %{conn: conn} do
+    test "renders workbench page with the tabs", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
       assert html =~ "Curated"
       assert html =~ "Search"
       assert html =~ "Custom"
@@ -43,7 +43,12 @@ defmodule HomelabWeb.CatalogLiveTest do
     test "assigns initial empty state for search and curated", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
       refute html =~ "No results found"
-      assert html =~ "Browse curated apps"
+      assert html =~ "Search any registry"
+    end
+
+    test "with no catalog sources, the curated tab prompts to search/add", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/catalog")
+      assert html =~ "No catalog sources configured"
     end
   end
 
@@ -750,7 +755,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       _ = :sys.get_state(view.pid)
       html = render(view)
       refute has_element?(view, "#deploy-modal")
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
     end
   end
 
@@ -811,7 +816,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       {:ok, view, _html} = live(conn, ~p"/catalog")
       render_click(view, "close_deploy", %{})
       html = render(view)
-      assert html =~ "App Catalog"
+      assert html =~ "Workbench"
     end
   end
 
