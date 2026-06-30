@@ -54,12 +54,16 @@ defmodule Homelab.Deployments.SpecBuilder do
         bridge_networks: bridge_networks,
         labels: Map.merge(base_labels, routing_labels),
         replicas: 1,
-        memory_limit: memory_limit_bytes(template),
-        cpu_limit: cpu_limit_nanocpus(template),
+        memory_limit: memory_limit_bytes(Access.effective_resource_limits(deployment)),
+        cpu_limit: cpu_limit_nanocpus(Access.effective_resource_limits(deployment)),
         tenant_id: to_string(tenant.id),
         deployment_id: to_string(deployment.id),
         service_mode: service_mode?,
-        health_check: build_health_check(template)
+        health_check:
+          build_health_check(
+            Access.effective_health_check(deployment),
+            Access.effective_ports(deployment)
+          )
       }
 
       {:ok, spec}
@@ -77,14 +81,14 @@ defmodule Homelab.Deployments.SpecBuilder do
   def declares_healthcheck?(_), do: false
 
   @doc """
-  Builds a Docker `Healthcheck` payload from a template's declared healthcheck,
-  or `nil` when none is declared. HTTP `path` checks become a `wget`/`curl`
-  probe against the template's primary port; `test`/`command` checks pass through.
+  Builds a Docker `Healthcheck` payload from a declared healthcheck map, or `nil`
+  when none is declared. HTTP `path` checks become a `wget`/`curl` probe against
+  the primary port; `test`/`command` checks pass through.
   """
-  def build_health_check(template) do
-    hc = template.health_check || %{}
+  def build_health_check(health_check, ports) do
+    hc = health_check || %{}
 
-    case health_test(hc, primary_port(template.ports || [])) do
+    case health_test(hc, primary_port(ports || [])) do
       nil ->
         nil
 
@@ -369,13 +373,13 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> String.replace(~r/[^a-z0-9-]/, "")
   end
 
-  defp memory_limit_bytes(template) do
-    mb = get_in(template.resource_limits || %{}, ["memory_mb"]) || 256
+  defp memory_limit_bytes(limits) do
+    mb = get_in(limits || %{}, ["memory_mb"]) || 256
     mb * 1_048_576
   end
 
-  defp cpu_limit_nanocpus(template) do
-    shares = get_in(template.resource_limits || %{}, ["cpu_shares"]) || 512
+  defp cpu_limit_nanocpus(limits) do
+    shares = get_in(limits || %{}, ["cpu_shares"]) || 512
     shares * 1_000_000
   end
 end
