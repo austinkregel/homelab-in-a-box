@@ -14,7 +14,7 @@ defmodule HomelabWeb.CatalogLive do
 
     socket =
       socket
-      |> assign(:page_title, "App Catalog")
+      |> assign(:page_title, "Workbench")
       |> assign(:tab, "curated")
       |> assign(:search_query, "")
       |> assign(:search_results, [])
@@ -332,28 +332,14 @@ defmodule HomelabWeb.CatalogLive do
     >
       <div>
         <div class="mb-5">
-          <h1 class="text-2xl font-bold text-base-content">App Catalog</h1>
+          <h1 class="text-2xl font-bold text-base-content">Workbench</h1>
           <p class="mt-1 text-sm text-base-content/50">
-            Browse curated apps, search registries, or deploy a custom image.
+            Search any registry, deploy a custom image, then iterate toward production-ready.
           </p>
         </div>
 
-        <%!-- Tabs --%>
+        <%!-- Tabs: search-forward, with curated sources (off by default) last --%>
         <div class="flex gap-6 border-b border-base-content/10 mb-5">
-          <button
-            type="button"
-            phx-click="switch_tab"
-            phx-value-tab="curated"
-            class={[
-              "pb-2.5 text-sm font-medium -mb-px",
-              if(@tab == "curated",
-                do: "border-b-2 border-primary text-base-content",
-                else: "text-base-content/50 hover:text-base-content/70"
-              )
-            ]}
-          >
-            Curated
-          </button>
           <button
             type="button"
             phx-click="switch_tab"
@@ -382,17 +368,61 @@ defmodule HomelabWeb.CatalogLive do
           >
             Custom
           </button>
+          <button
+            type="button"
+            phx-click="switch_tab"
+            phx-value-tab="curated"
+            class={[
+              "pb-2.5 text-sm font-medium -mb-px",
+              if(@tab == "curated",
+                do: "border-b-2 border-primary text-base-content",
+                else: "text-base-content/50 hover:text-base-content/70"
+              )
+            ]}
+          >
+            Curated
+          </button>
         </div>
 
         <%!-- Curated tab --%>
         <div :if={@tab == "curated"} class="space-y-5">
-          <div :if={@curated_entries == [] && connected?(@socket)} class="py-12 text-center">
+          <div :if={@curated_entries == [] && @catalogs == []} class="py-12 text-center space-y-2">
+            <p class="text-base-content/50">No catalog sources configured.</p>
+            <p class="text-xs text-base-content/40">
+              Use
+              <button
+                type="button"
+                phx-click="switch_tab"
+                phx-value-tab="search"
+                class="text-primary hover:underline"
+              >
+                Search
+              </button>
+              or
+              <button
+                type="button"
+                phx-click="switch_tab"
+                phx-value-tab="custom"
+                class="text-primary hover:underline"
+              >
+                Custom
+              </button>
+              to add an app.
+            </p>
+          </div>
+          <div
+            :if={@curated_entries == [] && @catalogs != [] && connected?(@socket)}
+            class="py-12 text-center"
+          >
             <div class="inline-flex items-center gap-2 text-base-content/50">
               <.icon name="hero-arrow-path" class="size-5 animate-spin" />
               <span>Loading curated catalog...</span>
             </div>
           </div>
-          <div :if={@curated_entries == [] && !connected?(@socket)} class="py-12 text-center">
+          <div
+            :if={@curated_entries == [] && @catalogs != [] && !connected?(@socket)}
+            class="py-12 text-center"
+          >
             <p class="text-base-content/50">Connect to load the catalog.</p>
           </div>
           <div :if={@curated_entries != []}>
