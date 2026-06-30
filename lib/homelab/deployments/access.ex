@@ -47,6 +47,18 @@ defmodule Homelab.Deployments.Access do
 
   def effective_ports(%Deployment{ports_override: ports}), do: ports
 
+  @doc "Effective resource limits map (override wins; nil = inherit the template)."
+  def effective_resource_limits(%Deployment{resource_limits_override: nil, app_template: t}),
+    do: t.resource_limits || %{}
+
+  def effective_resource_limits(%Deployment{resource_limits_override: limits}), do: limits
+
+  @doc "Effective healthcheck map (override wins; nil = inherit the template)."
+  def effective_health_check(%Deployment{health_check_override: nil, app_template: t}),
+    do: t.health_check || %{}
+
+  def effective_health_check(%Deployment{health_check_override: hc}), do: hc
+
   def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
   def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
   def internal_mode?(%Deployment{} = d), do: effective_exposure(d) == :service
