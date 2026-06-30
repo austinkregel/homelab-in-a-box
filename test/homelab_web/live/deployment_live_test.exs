@@ -1234,6 +1234,33 @@ defmodule HomelabWeb.DeploymentLiveTest do
                updated.ports_override
     end
 
+    test "saving resilience limits + health path persists per-deployment overrides",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "proxy",
+          "auth" => "sso_protected",
+          "memory_mb" => "1024",
+          "cpu_shares" => "2048",
+          "health_path" => "/healthz"
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert updated.resource_limits_override == %{"memory_mb" => 1024, "cpu_shares" => 2048}
+      assert updated.health_check_override["path"] == "/healthz"
+    end
+
     test "overriding one deployment's config does not affect a sibling on the same template",
          %{conn: conn, tenant: tenant, template: template, deployment: dep} do
       sibling =
