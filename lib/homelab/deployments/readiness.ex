@@ -83,9 +83,8 @@ defmodule Homelab.Deployments.Readiness do
   end
 
   defp resilience_check(deployment) do
-    template = deployment.app_template
-    health? = SpecBuilder.declares_healthcheck?(template)
-    limits = template.resource_limits || %{}
+    health? = SpecBuilder.declares_healthcheck?(Access.effective_health_check(deployment))
+    limits = Access.effective_resource_limits(deployment)
     limited? = is_number(limits["memory_mb"]) and is_number(limits["cpu_shares"])
 
     detail =
