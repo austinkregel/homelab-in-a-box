@@ -28,6 +28,9 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_access, "proxy")
       |> assign(:settings_auth, "public")
       |> assign(:settings_ports, [])
+      |> assign(:settings_memory_mb, "")
+      |> assign(:settings_cpu_shares, "")
+      |> assign(:settings_health_path, "")
       |> assign(:resource_stats, nil)
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
@@ -234,6 +237,8 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("start_settings_edit", _params, socket) do
     deployment = socket.assigns.deployment
     exposure = Access.effective_exposure(deployment)
+    limits = Access.effective_resource_limits(deployment)
+    health = Access.effective_health_check(deployment)
 
     {:noreply,
      socket
@@ -241,7 +246,10 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_domain, deployment.domain || "")
      |> assign(:settings_access, Access.access_of(exposure))
      |> assign(:settings_auth, Access.auth_of(exposure))
-     |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))}
+     |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
+     |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
+     |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
+     |> assign(:settings_health_path, health["path"] || "")}
   end
 
   def handle_event("cancel_settings_edit", _params, socket) do
@@ -255,7 +263,13 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_domain, settings["domain"] || socket.assigns.settings_domain)
      |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
      |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
-     |> assign(:settings_ports, ports_from_params(settings["ports"]))}
+     |> assign(:settings_ports, ports_from_params(settings["ports"]))
+     |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
+     |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
+     |> assign(
+       :settings_health_path,
+       settings["health_path"] || socket.assigns.settings_health_path
+     )}
   end
 
   def handle_event("settings_add_port", _params, socket) do
@@ -289,7 +303,9 @@ defmodule HomelabWeb.DeploymentLive do
     attrs = %{
       domain: domain,
       exposure_mode_override: exposure,
-      ports_override: ports
+      ports_override: ports,
+      resource_limits_override: limits_override(settings),
+      health_check_override: health_override(deployment, settings)
     }
 
     case apply_config(deployment, attrs) do
@@ -938,6 +954,48 @@ defmodule HomelabWeb.DeploymentLive do
                   Internal only — reachable on the container network, with no host port or public route.
                 </p>
 
+                <%!-- Resilience: resource limits + healthcheck (closes the readiness gate) --%>
+                <div class="space-y-3 border-t border-base-content/5 pt-4">
+                  <label class="text-xs font-medium text-base-content/50">Resilience</label>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">Memory (MB)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        name="settings[memory_mb]"
+                        value={@settings_memory_mb}
+                        placeholder="256"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      />
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">CPU shares</label>
+                      <input
+                        type="number"
+                        min="1"
+                        name="settings[cpu_shares]"
+                        value={@settings_cpu_shares}
+                        placeholder="512"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      />
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[10px] text-base-content/40">Health check path</label>
+                    <input
+                      type="text"
+                      name="settings[health_path]"
+                      value={@settings_health_path}
+                      placeholder="/health"
+                      class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                    />
+                    <p class="text-[10px] text-base-content/40">
+                      An HTTP path probed for readiness. Set memory, CPU, and a path to clear the resilience gate.
+                    </p>
+                  </div>
+                </div>
+
                 <div class="flex gap-2 pt-1">
                   <button
                     type="button"
@@ -1199,6 +1257,36 @@ defmodule HomelabWeb.DeploymentLive do
 
   defp blank_to_nil(v) when v in [nil, ""], do: nil
   defp blank_to_nil(v), do: v
+
+  # Build the resource-limits override from the form. Only the fields the user
+  # filled are set; an all-blank section means "inherit the template" (nil).
+  defp limits_override(settings) do
+    limits =
+      %{
+        "memory_mb" => parse_pos_int(settings["memory_mb"]),
+        "cpu_shares" => parse_pos_int(settings["cpu_shares"])
+      }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
+
+    if limits == %{}, do: nil, else: limits
+  end
+
+  # Build the healthcheck override. A blank path inherits the template; a path
+  # merges onto the effective check so existing intervals/timeouts are kept.
+  defp health_override(deployment, settings) do
+    case blank_to_nil(settings["health_path"]) do
+      nil -> nil
+      path -> Map.put(Access.effective_health_check(deployment), "path", path)
+    end
+  end
+
+  defp parse_pos_int(value) do
+    case value |> to_string() |> Integer.parse() do
+      {n, _} when n > 0 -> n
+      _ -> nil
+    end
+  end
 
   # Human-readable summary of a deployment's access for the read-only view.
   defp settings_access_label(deployment) do
