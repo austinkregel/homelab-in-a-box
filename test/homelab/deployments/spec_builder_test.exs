@@ -404,6 +404,36 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       # The shared template is untouched.
       assert template.exposure_mode == :sso_protected
     end
+
+    test "resource_limits_override wins over the template limits" do
+      tenant = build_tenant()
+      template = build_template(%{resource_limits: %{"memory_mb" => 256, "cpu_shares" => 512}})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          resource_limits_override: %{"memory_mb" => 1024, "cpu_shares" => 2048}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.memory_limit == 1024 * 1_048_576
+      assert spec.cpu_limit == 2048 * 1_000_000
+    end
+
+    test "health_check_override adds a healthcheck the template lacks" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          health_check: %{},
+          ports: [%{"internal" => "8080", "published" => true}]
+        })
+
+      deployment =
+        build_deployment(tenant, template, %{health_check_override: %{"path" => "/healthz"}})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert is_list(spec.health_check["Test"])
+    end
   end
 
   describe "access model coherence (proxy XOR host)" do
