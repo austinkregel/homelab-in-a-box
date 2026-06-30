@@ -27,7 +27,7 @@ defmodule Homelab.Services.Reconciler do
 
   alias Homelab.Accounts
   alias Homelab.Deployments
-  alias Homelab.Deployments.{ReleaseRunner, Releases, SpecBuilder}
+  alias Homelab.Deployments.{Access, ReleaseRunner, Releases, SpecBuilder}
   alias Homelab.Notifications
   alias Homelab.Services.ActivityLog
 
@@ -324,7 +324,7 @@ defmodule Homelab.Services.Reconciler do
   # --- Readiness ---
 
   defp ready?(deployment, service) do
-    if SpecBuilder.declares_healthcheck?(deployment.app_template) do
+    if SpecBuilder.declares_healthcheck?(Access.effective_health_check(deployment)) do
       case Map.get(service, :health, :none) do
         :healthy -> true
         h when h in [:starting, :unhealthy] -> false

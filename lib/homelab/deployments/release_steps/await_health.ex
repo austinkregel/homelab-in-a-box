@@ -16,6 +16,7 @@ defmodule Homelab.Deployments.ReleaseSteps.AwaitHealth do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.Access
   alias Homelab.Deployments.SpecBuilder
 
   @impl true
@@ -27,7 +28,7 @@ defmodule Homelab.Deployments.ReleaseSteps.AwaitHealth do
 
   defp poll(deployment_id, deadline) do
     deployment = Deployments.get_deployment!(deployment_id)
-    declares_hc? = SpecBuilder.declares_healthcheck?(deployment.app_template)
+    declares_hc? = SpecBuilder.declares_healthcheck?(Access.effective_health_check(deployment))
 
     cond do
       ready?(deployment, declares_hc?) ->
