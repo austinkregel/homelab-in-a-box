@@ -15,6 +15,8 @@ defmodule Homelab.Deployments.Deployment do
     # Per-deployment overrides (nil = inherit the app_template default).
     field :ports_override, {:array, :map}
     field :exposure_mode_override, :string
+    field :resource_limits_override, :map
+    field :health_check_override, :map
     field :computed_spec, :map
     field :last_reconciled_at, :utc_datetime
     field :error_message, :string
@@ -31,7 +33,8 @@ defmodule Homelab.Deployments.Deployment do
 
   @required_fields ~w(tenant_id app_template_id)a
   @optional_fields ~w(status external_id domain env_overrides ports_override
-                      exposure_mode_override computed_spec last_reconciled_at
+                      exposure_mode_override resource_limits_override
+                      health_check_override computed_spec last_reconciled_at
                       error_message)a
 
   def changeset(deployment, attrs) do
