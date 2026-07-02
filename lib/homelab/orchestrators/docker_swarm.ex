@@ -10,6 +10,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   @behaviour Homelab.Behaviours.Orchestrator
 
   alias Homelab.Docker.Client
+  alias Homelab.Docker.RegistryAuth
 
   @routing_network "homelab-internal"
 
@@ -27,7 +28,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     with :ok <- pull_image(spec.image) do
       body = build_service_create_payload(spec)
 
-      case Client.post("/services/create", body) do
+      case Client.post("/services/create", body, registry_auth_opts(spec.image)) do
         {:ok, %{"ID" => id}} -> {:ok, id}
         {:ok, body} when is_map(body) -> {:ok, body["ID"] || body["id"]}
         {:error, {:conflict, _}} -> {:error, :already_exists}
@@ -36,11 +37,32 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     end
   end
 
+  # For private (self-hosted registry) images, attach X-Registry-Auth so Swarm
+  # distributes the credentials to worker nodes (the `--with-registry-auth`
+  # equivalent). Public images get no header.
+  defp registry_auth_opts(image) do
+    case RegistryAuth.for_ref(image) do
+      nil -> []
+      header -> [headers: [header]]
+    end
+  end
+
+  # Images built in the Workbench live only in the local image store and have no
+  # registry to pull from, so skip the pull for the local-build namespace.
+  defp pull_image("homelab-built/" <> _ = image) do
+    require Logger
+    Logger.info("[DockerSwarm] Using locally-built image #{image} (skipping pull)")
+    :ok
+  end
+
   defp pull_image(image) do
     require Logger
     Logger.info("[DockerSwarm] Pulling image #{image}...")
 
-    case Client.post_stream("/images/create?fromImage=#{URI.encode(image)}") do
+    case Client.post_stream(
+           "/images/create?fromImage=#{URI.encode(image)}",
+           registry_auth_opts(image)
+         ) do
       :ok ->
         Logger.info("[DockerSwarm] Image #{image} pulled successfully")
         :ok
@@ -76,7 +98,11 @@ defmodule Homelab.Orchestrators.DockerSwarm do
          version <- get_in(existing, ["Version", "Index"]) do
       body = build_service_update_payload(spec)
 
-      case Client.post("/services/#{service_id}/update?version=#{version}", body) do
+      case Client.post(
+             "/services/#{service_id}/update?version=#{version}",
+             body,
+             registry_auth_opts(spec.image)
+           ) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end
