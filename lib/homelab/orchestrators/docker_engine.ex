@@ -255,7 +255,15 @@ defmodule Homelab.Orchestrators.DockerEngine do
     payload
     |> maybe_put_exposed_ports(exposed_ports)
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
+    |> maybe_put_user(Map.get(spec, :user))
   end
+
+  # Preserve an adopted container's uid:gid. Omitted for greenfield deploys so the
+  # image's default user applies.
+  defp maybe_put_user(payload, user) when is_binary(user) and user != "",
+    do: Map.put(payload, "User", user)
+
+  defp maybe_put_user(payload, _user), do: payload
 
   defp maybe_put_exposed_ports(payload, exposed_ports) when map_size(exposed_ports) > 0 do
     Map.put(payload, "ExposedPorts", exposed_ports)
