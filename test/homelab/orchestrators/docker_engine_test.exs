@@ -106,6 +106,30 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       assert_received {:post, "/containers/container-abc123/start", _}
     end
 
+    test "skips the registry pull for locally-built images" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn path, _opts ->
+        send(test_pid, {:post_stream, path})
+        :ok
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") -> {:ok, %{"Id" => "built-cid"}}
+          true -> {:ok, %{}}
+        end
+      end)
+
+      spec = base_spec(%{image: "homelab-built/my-app:latest"})
+      assert {:ok, "built-cid"} = DockerEngine.deploy(spec)
+
+      # No image pull should have been attempted for the local-build namespace.
+      refute_received {:post_stream, _}
+    end
+
     test "builds mounts, ports, exposed ports and healthcheck into the payload" do
       test_pid = self()
 
