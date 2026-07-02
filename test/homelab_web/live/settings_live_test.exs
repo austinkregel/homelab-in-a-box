@@ -115,6 +115,55 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "self-hosted registry section" do
+    test "renders the registry section with operator instructions", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "registry"})
+
+      assert html =~ "Self-hosted registry"
+      assert html =~ "docker login registry."
+      assert html =~ "registry-mirrors"
+    end
+
+    test "save_self_hosted_registry persists credentials and options", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "registry"})
+
+      html =
+        view
+        |> form("#self-hosted-registry-form", %{
+          "registry" => %{
+            "username" => "bob",
+            "password" => "s3cret",
+            "host_ip" => "203.0.113.9",
+            "mirror_enabled" => "true"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "Registry settings saved"
+      assert Homelab.Settings.get("registry_username") == "bob"
+      assert Homelab.Settings.get("registry_mirror_enabled") == "true"
+    end
+
+    test "enable_registry without credentials shows a validation flash", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "registry"})
+
+      html = render_click(view, "enable_registry", %{})
+      assert html =~ "Set a username and password"
+      assert Homelab.Settings.get("registry_enabled") == "false"
+    end
+
+    test "disable_registry stops the registry", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "registry"})
+
+      html = render_click(view, "disable_registry", %{})
+      assert html =~ "Registry stopped"
+    end
+  end
+
   describe "save_registry" do
     test "saves GHCR registry settings", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
