@@ -64,6 +64,50 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       refute Enum.any?(cmd, &String.contains?(&1, "httpchallenge"))
       assert "CF_DNS_API_TOKEN=cf-token-xyz" in body["Env"]
     end
+
+    test "force-recreates a running Traefik whose command lacks the DNS-01 flags" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/homelab-traefik/json", _opts ->
+          # Running, but with the OLD HTTP-01 command (drift).
+          {:ok,
+           %{
+             "State" => %{"Running" => true},
+             "Config" => %{
+               "Cmd" => ["--certificatesresolvers.letsencrypt.acme.httpchallenge=true"],
+               "Env" => []
+             }
+           }}
+
+        _path, _opts ->
+          {:error, {:not_found, %{}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :delete, fn path, _opts ->
+        send(test_pid, {:deleted, path})
+        {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          path == "/containers/create?name=homelab-traefik" ->
+            send(test_pid, :recreated)
+            {:ok, %{"Id" => "traefik-id"}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      Infrastructure.ensure_traefik()
+
+      assert_received {:deleted, "/containers/homelab-traefik?force=true"}
+      assert_received :recreated
+    end
   end
 
   describe "Htpasswd.generate/2" do
@@ -101,6 +145,121 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       on_exit(fn -> restore_app_env(:registry_credentials, prev) end)
 
       assert {:error, :missing_credentials} = Registry.ensure_registry()
+    end
+
+    test "creates the RW registry with auth env, wildcard Traefik labels, and htpasswd upload" do
+      with_registry_config(fn ->
+        test_pid = self()
+        line = "bob:$2y$05$abcdefghijklmnopqrstuv"
+        framed = <<1, 0, 0, 0, byte_size(line)::32>> <> line
+
+        # Network exists; traefik already on the network; htpasswd logs framed.
+        stub(Homelab.Mocks.DockerClient, :get, fn
+          "/networks/" <> _, _opts ->
+            {:ok, %{}}
+
+          "/containers/homelab-traefik/json", _opts ->
+            {:ok,
+             %{"Id" => "tid", "NetworkSettings" => %{"Networks" => %{"homelab-internal" => %{}}}}}
+
+          path, _opts ->
+            if path =~ "/logs?stdout=true", do: {:ok, framed}, else: {:ok, %{}}
+        end)
+
+        stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+        stub(Homelab.Mocks.DockerClient, :delete, fn _path, _opts -> {:ok, %{}} end)
+
+        stub(Homelab.Mocks.DockerClient, :upload_archive, fn _c, path, _tar ->
+          send(test_pid, {:archive, path})
+          :ok
+        end)
+
+        stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+          cond do
+            path == "/containers/create?name=homelab-registry" ->
+              send(test_pid, {:registry_body, body})
+              {:ok, %{"Id" => "reg"}}
+
+            path == "/containers/create" ->
+              {:ok, %{"Id" => "htp"}}
+
+            String.ends_with?(path, "/wait") ->
+              {:ok, %{"StatusCode" => 0}}
+
+            true ->
+              {:ok, %{}}
+          end
+        end)
+
+        assert {:ok, :started} = Registry.ensure_registry()
+
+        assert_received {:registry_body, body}
+        assert body["Image"] == "registry:2"
+        assert "REGISTRY_AUTH=htpasswd" in body["Env"]
+        labels = body["Labels"]
+        assert labels["homelab.system.role"] == "registry"
+        assert labels["traefik.http.routers.registry.rule"] == "Host(`registry.example.com`)"
+        assert labels["traefik.http.routers.registry.tls.domains[0].sans"] == "*.example.com"
+        sources = Enum.map(body["HostConfig"]["Mounts"], & &1["Source"])
+        assert "homelab-registry-data" in sources
+        assert "homelab-registry-auth" in sources
+
+        assert_received {:archive, "/auth"}
+      end)
+    end
+
+    test "creates the pull-through mirror as a proxy to docker.io" do
+      with_registry_config(fn ->
+        test_pid = self()
+
+        stub(Homelab.Mocks.DockerClient, :get, fn
+          "/containers/homelab-traefik/json", _opts ->
+            {:ok,
+             %{"Id" => "tid", "NetworkSettings" => %{"Networks" => %{"homelab-internal" => %{}}}}}
+
+          _path, _opts ->
+            {:ok, %{}}
+        end)
+
+        stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+        stub(Homelab.Mocks.DockerClient, :delete, fn _path, _opts -> {:ok, %{}} end)
+
+        stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+          cond do
+            path == "/containers/create?name=homelab-registry-proxy" ->
+              send(test_pid, {:proxy_body, body})
+              {:ok, %{"Id" => "proxy"}}
+
+            true ->
+              {:ok, %{}}
+          end
+        end)
+
+        assert {:ok, :started} = Registry.ensure_registry_proxy()
+
+        assert_received {:proxy_body, body}
+        assert "REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io" in body["Env"]
+        labels = body["Labels"]
+        assert labels["homelab.system.role"] == "registry-mirror"
+
+        assert labels["traefik.http.routers.registryproxy.rule"] ==
+                 "Host(`proxy-registry.example.com`)"
+      end)
+    end
+  end
+
+  # Runs `fun` with base_domain=example.com and registry credentials set, restoring after.
+  defp with_registry_config(fun) do
+    prev_domain = Application.get_env(:homelab, :base_domain)
+    prev_creds = Application.get_env(:homelab, :registry_credentials)
+    Application.put_env(:homelab, :base_domain, "example.com")
+    Application.put_env(:homelab, :registry_credentials, {"bob", "s3cret"})
+
+    try do
+      fun.()
+    after
+      restore_app_env(:base_domain, prev_domain)
+      restore_app_env(:registry_credentials, prev_creds)
     end
   end
 
