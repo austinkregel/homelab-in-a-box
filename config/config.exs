@@ -58,6 +58,11 @@ config :homelab, :release_step_handlers, %{
   resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld
 }
 
+# Real migrations copy through a throwaway helper container so uid:gid is
+# preserved and the containerized plane can reach both paths. Tests override
+# this with the in-process LocalCopyEngine (see config/test.exs).
+config :homelab, :migrate_copy_engine, Homelab.Deployments.Migrate.ContainerCopyEngine
+
 # Configure the mailer
 #
 # By default it uses the "Local" adapter which stores the emails
