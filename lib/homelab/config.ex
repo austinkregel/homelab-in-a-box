@@ -83,6 +83,7 @@ defmodule Homelab.Config do
 
   def registry_for_image(full_ref) do
     cond do
+      String.starts_with?(full_ref, registry_ref_prefix() <> "/") -> "self_hosted"
       String.starts_with?(full_ref, "ghcr.io/") -> "ghcr"
       String.starts_with?(full_ref, "public.ecr.aws/") -> "ecr"
       String.starts_with?(full_ref, "lscr.io/") -> "dockerhub"
@@ -98,6 +99,14 @@ defmodule Homelab.Config do
   def image_pullable?(full_ref) do
     registry_id = registry_for_image(full_ref)
 
+    if registry_id == "self_hosted" do
+      registry_configured?()
+    else
+      pullable_external?(registry_id)
+    end
+  end
+
+  defp pullable_external?(registry_id) do
     case Enum.find(registries(), fn mod ->
            function_exported?(mod, :driver_id, 0) and mod.driver_id() == registry_id
          end) do
@@ -134,6 +143,54 @@ defmodule Homelab.Config do
 
   def base_domain do
     Application.get_env(:homelab, :base_domain, "homelab.local")
+  end
+
+  # -- Self-hosted registry --
+
+  @doc """
+  The hostname prefix for images stored in the self-hosted registry, e.g.
+  `"registry.example.com"`. Deploy specs reference images under this prefix.
+  """
+  def registry_ref_prefix, do: "registry.#{base_domain()}"
+
+  @doc "The hostname of the pull-through Docker Hub mirror."
+  def registry_mirror_host, do: "proxy-registry.#{base_domain()}"
+
+  @doc """
+  Whether the self-hosted registry is enabled and has push/pull credentials.
+
+  An `:registry_enabled` application-env override takes precedence (test seam).
+  """
+  def registry_configured? do
+    enabled? =
+      case Application.get_env(:homelab, :registry_enabled) do
+        nil -> Homelab.Settings.get("registry_enabled") == "true"
+        override -> override == true or override == "true"
+      end
+
+    enabled? and match?({u, p} when is_binary(u) and is_binary(p), registry_credentials())
+  end
+
+  @doc """
+  The registry push/pull credentials as `{username, password}`, or `nil` when
+  either is unset. An `:registry_credentials` application-env override takes
+  precedence (test seam).
+  """
+  def registry_credentials do
+    case Application.get_env(:homelab, :registry_credentials) do
+      {u, p} when is_binary(u) and is_binary(p) ->
+        {u, p}
+
+      _ ->
+        username = Homelab.Settings.get("registry_username")
+        password = Homelab.Settings.get("registry_password")
+
+        if is_binary(username) and username != "" and is_binary(password) and password != "" do
+          {username, password}
+        else
+          nil
+        end
+    end
   end
 
   def tenant_setting(tenant, key, default \\ nil) do

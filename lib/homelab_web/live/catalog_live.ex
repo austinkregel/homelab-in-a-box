@@ -3,6 +3,8 @@ defmodule HomelabWeb.CatalogLive do
 
   alias Homelab.Catalog
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Catalog.ImageBuilder
+  alias Homelab.Catalog.MetadataEnricher
 
   alias Homelab.Tenants
 
@@ -15,7 +17,7 @@ defmodule HomelabWeb.CatalogLive do
     socket =
       socket
       |> assign(:page_title, "Workbench")
-      |> assign(:tab, "curated")
+      |> assign(:tab, "build")
       |> assign(:search_query, "")
       |> assign(:search_results, [])
       |> assign(:selected_registry, nil)
@@ -30,6 +32,13 @@ defmodule HomelabWeb.CatalogLive do
       |> assign(:curated_entries, [])
       |> assign(:show_all_registries, false)
       |> assign(:tenants, tenants)
+      |> assign(:build_files, [%{name: "Dockerfile", content: "FROM alpine:latest\n"}])
+      |> assign(:build_active, 0)
+      |> assign(:build_name, "")
+      |> assign(:build_tag, "latest")
+      |> assign(:building, false)
+      |> assign(:build_log, [])
+      |> assign(:build_error, nil)
 
     socket =
       if connected?(socket) do
@@ -84,6 +93,65 @@ defmodule HomelabWeb.CatalogLive do
     else
       {:noreply, assign(socket, :enriching, false)}
     end
+  end
+
+  # Enrichment reports its stage as it goes; the modal shows a single spinner
+  # while `enriching` is truthy, so we just keep it running.
+  def handle_info({:enrichment_progress, _stage}, socket) do
+    {:noreply, socket}
+  end
+
+  def handle_info({:build_log, event}, socket) do
+    case build_log_line(event) do
+      nil -> {:noreply, socket}
+      line -> {:noreply, assign(socket, :build_log, socket.assigns.build_log ++ [line])}
+    end
+  end
+
+  def handle_info({:build_result, {:ok, image_tag}}, socket) do
+    name = socket.assigns.build_name
+    slug = "built-#{slugify(name)}-#{System.unique_integer([:positive]) |> rem(10000)}"
+
+    template_attrs = %{
+      slug: slug,
+      name: name,
+      version: socket.assigns.build_tag,
+      image: image_tag,
+      description: "Built in Workbench",
+      source: "built",
+      source_id: image_tag,
+      required_env: [],
+      default_env: %{},
+      ports: [],
+      volumes: []
+    }
+
+    case Catalog.create_app_template(template_attrs) do
+      {:ok, template} ->
+        deploy_form = to_form(%{"tenant_id" => "", "domain" => "", "env_overrides" => %{}})
+
+        {:noreply,
+         socket
+         |> assign(:building, false)
+         |> assign(:selected_template, template)
+         |> assign(:deploy_form, deploy_form)
+         |> assign(:deploy_ports, template.ports || [])
+         |> assign(:deploy_volumes, template.volumes || [])
+         |> put_flash(:info, "Image built. Configure and deploy it.")}
+
+      {:error, changeset} ->
+        {:noreply,
+         socket
+         |> assign(:building, false)
+         |> assign(:build_error, "Failed to register image: #{inspect(changeset.errors)}")}
+    end
+  end
+
+  def handle_info({:build_result, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:building, false)
+     |> assign(:build_error, build_error_message(reason))}
   end
 
   def handle_info({:do_search, query, selected_registry}, socket) do
@@ -149,11 +217,27 @@ defmodule HomelabWeb.CatalogLive do
   def handle_event("select_entry", %{"entry" => entry_json}, socket) do
     entry = parse_entry(entry_json)
     template = get_or_create_template_from_entry(entry)
+    deploy_form = build_deploy_form(template)
 
-    {:noreply,
-     push_navigate(socket,
-       to: ~p"/deploy/new?step=network&type=container&template_id=#{template.id}"
-     )}
+    socket =
+      socket
+      |> assign(:selected_entry, entry)
+      |> assign(:selected_template, template)
+      |> assign(:deploy_form, deploy_form)
+      |> assign(:deploy_ports, template.ports || [])
+      |> assign(:deploy_volumes, template.volumes || [])
+
+    # Enrich the entry in the background (inspect the image, scan the repo) and
+    # fold the results into the open modal via {:enrichment_complete, ...}.
+    socket =
+      if connected?(socket) do
+        start_enrichment(entry)
+        assign(socket, :enriching, true)
+      else
+        assign(socket, :enriching, false)
+      end
+
+    {:noreply, socket}
   end
 
   def handle_event("deploy_custom", %{"image" => image, "tag" => tag, "name" => name}, socket) do
@@ -192,6 +276,77 @@ defmodule HomelabWeb.CatalogLive do
         {:error, changeset} ->
           {:noreply, put_flash(socket, :error, "Failed to create: #{inspect(changeset.errors)}")}
       end
+    end
+  end
+
+  def handle_event("select_build_file", %{"index" => idx}, socket) do
+    {:noreply, assign(socket, :build_active, String.to_integer(idx))}
+  end
+
+  def handle_event("add_build_file", _params, socket) do
+    files = socket.assigns.build_files
+    new_files = files ++ [%{name: "file#{length(files)}", content: ""}]
+    {:noreply, assign(socket, build_files: new_files, build_active: length(new_files) - 1)}
+  end
+
+  def handle_event("remove_build_file", %{"index" => idx}, socket) do
+    idx = String.to_integer(idx)
+    file = Enum.at(socket.assigns.build_files, idx)
+
+    if file && file.name == "Dockerfile" do
+      {:noreply, put_flash(socket, :error, "The Dockerfile is required and can't be removed.")}
+    else
+      files = List.delete_at(socket.assigns.build_files, idx)
+      active = min(socket.assigns.build_active, max(length(files) - 1, 0))
+      {:noreply, assign(socket, build_files: files, build_active: active)}
+    end
+  end
+
+  def handle_event("update_build_file", params, socket) do
+    idx = socket.assigns.build_active
+    name = Map.get(params, "name", "")
+    content = Map.get(params, "content", "")
+
+    files =
+      List.update_at(socket.assigns.build_files, idx, fn file ->
+        # The Dockerfile name is fixed; other files can be renamed freely.
+        new_name = if file.name == "Dockerfile", do: "Dockerfile", else: name
+        %{file | name: new_name, content: content}
+      end)
+
+    {:noreply, assign(socket, :build_files, files)}
+  end
+
+  def handle_event("build_image", %{"name" => name, "tag" => tag}, socket) do
+    files = socket.assigns.build_files
+    dockerfile = Enum.find(files, &(&1.name == "Dockerfile"))
+
+    cond do
+      String.trim(name) == "" ->
+        {:noreply, put_flash(socket, :error, "A name is required to build.")}
+
+      dockerfile == nil or String.trim(dockerfile.content) == "" ->
+        {:noreply, put_flash(socket, :error, "The Dockerfile can't be empty.")}
+
+      true ->
+        tag = if String.trim(tag) == "", do: "latest", else: String.trim(tag)
+        image_tag = "homelab-built/#{slugify(name)}:#{tag}"
+        lv = self()
+
+        Task.start(fn ->
+          result =
+            ImageBuilder.build(files, [tag: image_tag], fn ev -> send(lv, {:build_log, ev}) end)
+
+          send(lv, {:build_result, result})
+        end)
+
+        {:noreply,
+         socket
+         |> assign(:building, true)
+         |> assign(:build_name, name)
+         |> assign(:build_tag, tag)
+         |> assign(:build_log, [])
+         |> assign(:build_error, nil)}
     end
   end
 
@@ -367,6 +522,20 @@ defmodule HomelabWeb.CatalogLive do
             ]}
           >
             Custom
+          </button>
+          <button
+            type="button"
+            phx-click="switch_tab"
+            phx-value-tab="build"
+            class={[
+              "pb-2.5 text-sm font-medium -mb-px",
+              if(@tab == "build",
+                do: "border-b-2 border-primary text-base-content",
+                else: "text-base-content/50 hover:text-base-content/70"
+              )
+            ]}
+          >
+            Build
           </button>
           <button
             type="button"
@@ -658,6 +827,114 @@ defmodule HomelabWeb.CatalogLive do
               class="w-full py-2.5 rounded-lg bg-primary text-primary-content font-medium"
             />
           </.form>
+        </div>
+
+        <%!-- Build tab --%>
+        <div :if={@tab == "build"} class="space-y-4">
+          <p class="text-sm text-base-content/50">
+            Author a Dockerfile and any supporting files, then build the image locally.
+            On success you'll configure ports, volumes, and env, then deploy.
+          </p>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <%!-- Editor --%>
+            <div class="rounded-lg bg-base-100 border border-base-content/5 p-3 space-y-3">
+              <div class="flex items-center gap-1.5 flex-wrap border-b border-base-content/10 pb-2">
+                <button
+                  :for={{file, idx} <- Enum.with_index(@build_files)}
+                  type="button"
+                  phx-click="select_build_file"
+                  phx-value-index={idx}
+                  class={[
+                    "text-xs font-medium rounded-md px-2.5 py-1 transition-colors inline-flex items-center gap-1.5",
+                    if(@build_active == idx,
+                      do: "bg-primary/10 text-primary",
+                      else: "text-base-content/50 hover:text-base-content/70"
+                    )
+                  ]}
+                >
+                  {file.name}
+                  <span
+                    :if={file.name != "Dockerfile"}
+                    phx-click="remove_build_file"
+                    phx-value-index={idx}
+                    class="text-base-content/30 hover:text-error"
+                  >
+                    <.icon name="hero-x-mark-mini" class="size-3.5" />
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  phx-click="add_build_file"
+                  class="text-xs font-medium text-base-content/50 hover:text-primary rounded-md px-2 py-1"
+                >
+                  + add file
+                </button>
+              </div>
+
+              <% active = Enum.at(@build_files, @build_active) %>
+              <form :if={active} phx-change="update_build_file" class="space-y-2">
+                <input
+                  type="text"
+                  name="name"
+                  value={active.name}
+                  disabled={active.name == "Dockerfile"}
+                  placeholder="filename"
+                  class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
+                />
+                <textarea
+                  name="content"
+                  rows="16"
+                  spellcheck="false"
+                  phx-debounce="300"
+                  class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                >{active.content}</textarea>
+              </form>
+            </div>
+
+            <%!-- Build controls + log --%>
+            <div class="space-y-3">
+              <form
+                phx-submit="build_image"
+                class="rounded-lg bg-base-100 border border-base-content/5 p-3 space-y-3"
+              >
+                <div class="flex gap-2">
+                  <input
+                    type="text"
+                    name="name"
+                    value={@build_name}
+                    placeholder="Image name"
+                    class="flex-1 rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
+                  />
+                  <input
+                    type="text"
+                    name="tag"
+                    value={@build_tag}
+                    placeholder="latest"
+                    class="w-28 rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={@building}
+                  class="w-full py-2.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-60 inline-flex items-center justify-center gap-2"
+                >
+                  <.icon :if={@building} name="hero-arrow-path" class="size-4 animate-spin" />
+                  {if(@building, do: "Building...", else: "Build image")}
+                </button>
+              </form>
+
+              <div
+                :if={@building || @build_log != [] || @build_error}
+                class="rounded-lg bg-base-300 border border-base-content/5 p-3"
+              >
+                <pre class="text-[11px] font-mono text-base-content/70 whitespace-pre-wrap max-h-80 overflow-y-auto leading-relaxed">{Enum.join(@build_log, "\n")}</pre>
+                <p :if={@build_error} class="mt-2 text-xs text-error font-medium">
+                  {@build_error}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <%!-- Deploy Modal --%>
@@ -1170,6 +1447,20 @@ defmodule HomelabWeb.CatalogLive do
     |> Jason.encode!()
   end
 
+  # Kicks off background enrichment for a selected entry, folding the result back
+  # into the open deploy modal. Falls back to the original entry if enrichment
+  # fails so the spinner never gets stuck.
+  defp start_enrichment(entry) do
+    pid = self()
+
+    Task.start(fn ->
+      case MetadataEnricher.enrich(entry, progress: pid) do
+        {:ok, enriched} -> send(pid, {:enrichment_complete, enriched})
+        _ -> send(pid, {:enrichment_complete, entry})
+      end
+    end)
+  end
+
   defp parse_entry(json) do
     data = Jason.decode!(json)
 
@@ -1378,6 +1669,27 @@ defmodule HomelabWeb.CatalogLive do
       }
     end)
   end
+
+  # Extracts the human-readable text from a Docker build event, or nil to skip.
+  defp build_log_line(%{"stream" => text}) when is_binary(text) do
+    case String.trim_trailing(text, "\n") do
+      "" -> nil
+      line -> line
+    end
+  end
+
+  defp build_log_line(%{"error" => text}) when is_binary(text), do: "ERROR: #{text}"
+  defp build_log_line(%{"status" => text}) when is_binary(text), do: text
+  defp build_log_line(_), do: nil
+
+  defp build_error_message({:build_failed, msg}), do: msg
+
+  defp build_error_message({:context_failed, reason}),
+    do: "Build context error: #{inspect(reason)}"
+
+  defp build_error_message(:missing_dockerfile), do: "A Dockerfile is required."
+  defp build_error_message(:unnamed_file), do: "Every file must have a name."
+  defp build_error_message(reason), do: "Build failed: #{inspect(reason)}"
 
   defp slugify(name) do
     name

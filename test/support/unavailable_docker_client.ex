@@ -30,4 +30,13 @@ defmodule Homelab.Docker.UnavailableClient do
 
   @impl true
   def stream_events(_filters \\ %{}, _opts \\ []), do: @err
+
+  @impl true
+  def build(_query, _context, _on_event), do: @err
+
+  @impl true
+  def push(_image, _opts \\ []), do: @err
+
+  @impl true
+  def upload_archive(_container, _path, _tar), do: @err
 end

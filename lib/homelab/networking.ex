@@ -276,6 +276,43 @@ defmodule Homelab.Networking do
   end
 
   @doc """
+  Ensures an A record for a system-level FQDN (not tied to a deployment), e.g.
+  the self-hosted registry hostnames. Reuses the same zone/record upsert +
+  provider push as deployment records, with a nil `deployment_id`.
+  """
+  def ensure_system_dns_record(fqdn, ip_config \\ %{}) when is_binary(fqdn) do
+    zone_name = extract_zone_name(fqdn)
+
+    case get_or_create_zone(zone_name) do
+      {:ok, zone} ->
+        record_name = extract_record_name(fqdn, zone_name)
+
+        results =
+          [
+            {Map.get(ip_config, :public_ip), :public},
+            {Map.get(ip_config, :internal_ip), :internal}
+          ]
+          |> Enum.filter(fn {ip, _scope} -> is_binary(ip) and ip != "" end)
+          |> Enum.map(fn {ip, scope} ->
+            upsert_dns_record(zone, %{
+              name: record_name,
+              type: "A",
+              value: ip,
+              scope: scope,
+              managed: true,
+              deployment_id: nil,
+              dns_zone_id: zone.id
+            })
+          end)
+
+        {:ok, results}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Removes all managed DNS records for a deployment and pushes
   deletions to the configured providers.
   """

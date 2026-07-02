@@ -595,6 +595,32 @@ defmodule Homelab.NetworkingTest do
     end
   end
 
+  describe "ensure_system_dns_record/2" do
+    test "creates a public A record not tied to any deployment" do
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      assert {:ok, results} =
+               Networking.ensure_system_dns_record("registry.example.com", %{
+                 public_ip: "203.0.113.5"
+               })
+
+      assert length(results) == 1
+
+      assert {:ok, zone} = Networking.get_dns_zone_by_name("example.com")
+      [record] = Networking.list_dns_records_for_zone(zone.id)
+      assert record.name == "registry"
+      assert record.type == "A"
+      assert record.value == "203.0.113.5"
+      assert record.scope == :public
+      assert record.deployment_id == nil
+    end
+
+    test "creates nothing when no IP is supplied" do
+      assert {:ok, []} = Networking.ensure_system_dns_record("registry.example.com", %{})
+    end
+  end
+
   describe "cleanup_deployment_dns_records/1" do
     test "deletes managed records for a deployment" do
       deployment = insert(:deployment)

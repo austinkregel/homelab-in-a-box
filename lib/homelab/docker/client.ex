@@ -40,6 +40,25 @@ defmodule Homelab.Docker.Client do
   def post_stream(path, opts \\ []), do: impl().post_stream(path, opts)
 
   @doc """
+  Builds an image from a tar build `context`, forwarding each decoded build
+  event to `on_event`. See `Homelab.Behaviours.DockerClient.build/3`.
+  """
+  def build(query, context, on_event), do: impl().build(query, context, on_event)
+
+  @doc """
+  Pushes a local image reference to its registry. `opts` carries the
+  `X-Registry-Auth` header and an optional `:on_event` callback for push progress.
+  See `Homelab.Behaviours.DockerClient.push/2`.
+  """
+  def push(image, opts \\ []), do: impl().push(image, opts)
+
+  @doc """
+  Uploads a raw tar into a container filesystem at `path`.
+  See `Homelab.Behaviours.DockerClient.upload_archive/3`.
+  """
+  def upload_archive(container, path, tar), do: impl().upload_archive(container, path, tar)
+
+  @doc """
   Opens a long-lived streaming GET connection to `/events`. See
   `Homelab.Docker.ReqClient.stream_events/2`.
   """

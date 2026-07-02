@@ -43,8 +43,8 @@ defmodule Homelab.Infrastructure do
         "--entryPoints.websecure.address=:443",
         "--entryPoints.web.http.redirections.entryPoint.to=websecure",
         "--entryPoints.web.http.redirections.entryPoint.scheme=https",
-        "--certificatesresolvers.letsencrypt.acme.httpchallenge=true",
-        "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
+        # ACME challenge flags (DNS-01 + provider) are injected at provision time
+        # by `ensure_traefik/0` from the operator-supplied DNS API token.
         "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json",
         "--metrics.prometheus=true",
         "--metrics.prometheus.addRoutersLabels=true",
@@ -72,6 +72,15 @@ defmodule Homelab.Infrastructure do
     }
   }
 
+  @doc "The shared internal Docker network all system services sit on."
+  def internal_network, do: @network
+
+  @doc "The label marking a container as a homelab system service."
+  def system_label, do: @system_label
+
+  @doc "Idempotently ensures the shared internal network exists."
+  def ensure_internal_network, do: ensure_network(@network)
+
   def list_system_services do
     case Client.get(
            "/containers/json?all=true&filters=#{URI.encode_www_form(Jason.encode!(%{"label" => ["#{@system_label}=true"]}))}"
@@ -98,21 +107,94 @@ defmodule Homelab.Infrastructure do
   or `{:ok, :started}` on success.
   """
   def ensure_traefik do
-    template = Map.fetch!(@system_templates, "traefik")
-
-    acme_email =
-      Homelab.Settings.get("acme_email") ||
-        Homelab.Settings.get("base_domain", "admin@homelab.local")
-
-    acme_cmd = "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}"
-    template = Map.update!(template, :command, &(&1 ++ [acme_cmd]))
-
-    with :ok <- ensure_network(@network),
+    with {:ok, template} <- build_traefik_template(),
+         :ok <- ensure_network(@network),
          result when result in [{:ok, :already_running}, {:ok, :started}] <-
-           provision_template("homelab-traefik", template) do
+           ensure_traefik_current(template) do
       sync_traefik_networks()
       result
     end
+  end
+
+  @dns_token_env "TRAEFIK_DNS_API_TOKEN"
+  @dns_provider "cloudflare"
+
+  # Builds the Traefik template with a wildcard DNS-01 ACME resolver. The DNS
+  # provider API token is supplied by the operator via the #{@dns_token_env}
+  # environment variable and injected as container env — never HTTP-01, and
+  # never provisioned without a token.
+  defp build_traefik_template do
+    case System.get_env(@dns_token_env) do
+      token when is_binary(token) and token != "" ->
+        acme_email =
+          Homelab.Settings.get("acme_email") ||
+            Homelab.Settings.get("base_domain", "admin@homelab.local")
+
+        acme_cmd = [
+          "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
+          "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
+          "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
+          "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53"
+        ]
+
+        template =
+          @system_templates
+          |> Map.fetch!("traefik")
+          |> Map.update!(:command, &(&1 ++ acme_cmd))
+          |> Map.put(:env, ["CF_DNS_API_TOKEN=#{token}"])
+
+        {:ok, template}
+
+      _ ->
+        Logger.error(
+          "Infrastructure: #{@dns_token_env} is not set — cannot provision Traefik with wildcard DNS-01 TLS"
+        )
+
+        {:error, :dns_token_missing}
+    end
+  end
+
+  # Like provision_template/2, but force-recreates Traefik when its running
+  # command/env drifts from the desired ACME config — otherwise the idempotent
+  # "already running" short-circuit would never apply a challenge-type change.
+  defp ensure_traefik_current(template) do
+    container = "homelab-traefik"
+
+    case Client.get("/containers/#{container}/json") do
+      {:ok, %{"State" => %{"Running" => true}, "Config" => config}} ->
+        if traefik_config_drifted?(config, template) do
+          Logger.info("Infrastructure: Traefik ACME config drift detected, recreating")
+          Client.delete("/containers/#{container}?force=true")
+          create_system_container(container, template)
+        else
+          {:ok, :already_running}
+        end
+
+      {:ok, _} ->
+        Client.delete("/containers/#{container}?force=true")
+        create_system_container(container, template)
+
+      {:error, {:not_found, _}} ->
+        create_system_container(container, template)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp traefik_config_drifted?(config, template) do
+    actual_cmd = config["Cmd"] || []
+    actual_env = config["Env"] || []
+    desired_cmd = template.command
+    desired_env = Map.get(template, :env, [])
+
+    not (subset?(desired_cmd, actual_cmd) and subset?(desired_env, actual_env))
+  end
+
+  defp subset?(desired, actual) do
+    desired_set = MapSet.new(desired)
+    actual_set = MapSet.new(actual)
+    MapSet.subset?(desired_set, actual_set)
   end
 
   def provision_service(service_key) when is_map_key(@system_templates, service_key) do

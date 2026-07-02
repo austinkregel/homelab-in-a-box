@@ -156,6 +156,60 @@ defmodule Homelab.ConfigTest do
     end
   end
 
+  describe "self-hosted registry" do
+    setup do
+      prev = %{
+        domain: Application.get_env(:homelab, :base_domain),
+        enabled: Application.get_env(:homelab, :registry_enabled),
+        creds: Application.get_env(:homelab, :registry_credentials)
+      }
+
+      Application.put_env(:homelab, :base_domain, "example.com")
+      Application.delete_env(:homelab, :registry_enabled)
+      Application.delete_env(:homelab, :registry_credentials)
+
+      on_exit(fn ->
+        put_or_delete(:base_domain, prev.domain)
+        put_or_delete(:registry_enabled, prev.enabled)
+        put_or_delete(:registry_credentials, prev.creds)
+      end)
+
+      :ok
+    end
+
+    test "registry_ref_prefix/0 derives from base_domain" do
+      assert Config.registry_ref_prefix() == "registry.example.com"
+    end
+
+    test "registry_for_image/1 detects the self-hosted prefix" do
+      assert Config.registry_for_image("registry.example.com/homelab-built/app:1") ==
+               "self_hosted"
+
+      assert Config.registry_for_image("nginx:latest") == "dockerhub"
+    end
+
+    test "registry_configured?/0 requires both enabled and credentials" do
+      refute Config.registry_configured?()
+
+      Application.put_env(:homelab, :registry_enabled, true)
+      refute Config.registry_configured?()
+
+      Application.put_env(:homelab, :registry_credentials, {"u", "p"})
+      assert Config.registry_configured?()
+    end
+
+    test "image_pullable?/1 for a self-hosted ref follows registry_configured?" do
+      refute Config.image_pullable?("registry.example.com/homelab-built/app:1")
+
+      Application.put_env(:homelab, :registry_enabled, true)
+      Application.put_env(:homelab, :registry_credentials, {"u", "p"})
+      assert Config.image_pullable?("registry.example.com/homelab-built/app:1")
+    end
+  end
+
+  defp put_or_delete(key, nil), do: Application.delete_env(:homelab, key)
+  defp put_or_delete(key, val), do: Application.put_env(:homelab, key, val)
+
   describe "tenant_setting/3" do
     test "returns setting from tenant settings map" do
       tenant = %{settings: %{"max_apps" => 10}}

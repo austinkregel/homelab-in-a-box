@@ -18,4 +18,27 @@ defmodule Homelab.Behaviours.DockerClient do
   @callback delete(path, opts) :: {:ok, term()} | {:error, term()}
   @callback post_stream(path, opts) :: :ok | {:error, term()}
   @callback stream_events(filters :: map(), opts) :: {:ok, term()} | {:error, term()}
+
+  @doc """
+  Builds an image from a tar build context, streaming each decoded build event
+  (e.g. `%{"stream" => "Step 1/4 ..."}`) to `on_event`. Returns `:ok` on success
+  or `{:error, reason}` if the daemon reports a build error or the request fails.
+  """
+  @callback build(query :: String.t(), context :: binary(), on_event :: (map() -> any())) ::
+              :ok | {:error, term()}
+
+  @doc """
+  Pushes a local image reference to its registry, streaming each decoded push
+  event to `on_event`. `opts` must carry the `X-Registry-Auth` header. Returns
+  `:ok` on success or `{:error, reason}` on a push error / failed request.
+  """
+  @callback push(image :: String.t(), opts) :: :ok | {:error, term()}
+
+  @doc """
+  Uploads a raw (uncompressed) tar into a container filesystem at `path`
+  (`PUT /containers/{id}/archive`). Used to place config files (e.g. htpasswd)
+  into a system container.
+  """
+  @callback upload_archive(container :: String.t(), path :: String.t(), tar :: binary()) ::
+              :ok | {:error, term()}
 end
