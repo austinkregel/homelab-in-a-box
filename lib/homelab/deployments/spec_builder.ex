@@ -16,6 +16,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   @type service_spec :: %{
           service_name: String.t(),
           image: String.t(),
+          user: String.t() | nil,
           env: map(),
           volumes: [map()],
           ports: [map()],
@@ -47,6 +48,9 @@ defmodule Homelab.Deployments.SpecBuilder do
       spec = %{
         service_name: service_name(tenant, template),
         image: template.image,
+        # Preserve the adopted container's uid:gid (never chown adopted data). nil
+        # for greenfield deploys, which run as the image's default user.
+        user: template.user,
         env: build_env(template, tenant, deployment),
         volumes: build_volumes(template, tenant),
         ports: ports,
@@ -231,11 +235,20 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> Enum.map(fn vol ->
       container_path = vol["container_path"] || vol["path"] || "/data"
 
-      %{
-        source: volume_name(tenant.slug, template.slug, container_path),
-        target: container_path,
-        type: "volume"
-      }
+      case vol["source"] do
+        source when is_binary(source) and source != "" ->
+          # Adoption passthrough: reference an existing/managed volume by name, or
+          # a `type: "bind"` at a host path, exactly as captured — do not compute a
+          # synthetic tenant-scoped name that would shadow the real data.
+          %{source: source, target: container_path, type: vol["type"] || "volume"}
+
+        _ ->
+          %{
+            source: volume_name(tenant.slug, template.slug, container_path),
+            target: container_path,
+            type: "volume"
+          }
+      end
     end)
   end
 
