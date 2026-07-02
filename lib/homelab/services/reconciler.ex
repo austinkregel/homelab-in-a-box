@@ -122,7 +122,7 @@ defmodule Homelab.Services.Reconciler do
             enforce_ingress_invariant()
 
             state
-            |> sweep_orphans(orchestrator, managed)
+            |> sweep_orphans(orchestrator, managed, leased)
             |> audit_external_bypass()
 
           {:error, reason} ->
@@ -240,9 +240,14 @@ defmodule Homelab.Services.Reconciler do
   end
 
   # 4. Orphan sweep
-  defp sweep_orphans(state, orchestrator, managed) do
+  defp sweep_orphans(state, orchestrator, managed, leased) do
     desired_ids = MapSet.new(Deployments.list_all_external_ids())
-    orphans = Enum.reject(managed, &MapSet.member?(desired_ids, &1.id))
+
+    orphans =
+      managed
+      |> Enum.reject(&MapSet.member?(desired_ids, &1.id))
+      |> Enum.reject(&adoption_protected?(&1, leased))
+
     now = System.monotonic_time(:millisecond)
     grace = orphan_grace_ms()
 
@@ -279,6 +284,20 @@ defmodule Homelab.Services.Reconciler do
       end)
 
     %{state | orphans: new_orphans}
+  end
+
+  # Never reap a container that is being adopted (stamped `homelab.adopted=true`)
+  # or that belongs to a deployment with an active release lease — the saga owns
+  # its lifecycle and its external_id may not be persisted yet. Guards against a
+  # data-loss window during adoption cutover.
+  defp adoption_protected?(%{labels: labels}, leased) do
+    labels = labels || %{}
+
+    Map.get(labels, "homelab.adopted") == "true" or
+      case Integer.parse(Map.get(labels, "homelab.deployment_id", "")) do
+        {id, ""} -> MapSet.member?(leased, id)
+        _ -> false
+      end
   end
 
   defp sever_orphan_route(orchestrator, %{labels: labels}) do
