@@ -30,6 +30,10 @@ defmodule Homelab.Catalog.AppTemplate do
     field :logo_url, :string
     field :category, :string
 
+    # Container user (uid:gid) for adopted services — preserves the original
+    # ownership so we never chown adopted data. nil = image default.
+    field :user, :string
+
     field :auth_mode, Ecto.Enum,
       values: [:oidc_standard, :device_flow, :app_token, :none],
       default: :none
@@ -42,7 +46,7 @@ defmodule Homelab.Catalog.AppTemplate do
   @required_fields ~w(slug name version image)a
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
                       volumes ports resource_limits backup_policy health_check depends_on
-                      source source_id logo_url category auth_mode)a
+                      source source_id logo_url category auth_mode user)a
 
   def changeset(app_template, attrs) do
     app_template
