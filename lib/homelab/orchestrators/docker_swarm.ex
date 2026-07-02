@@ -296,11 +296,21 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       "Env" => env_to_list(spec.env)
     }
 
-    case Map.get(spec, :health_check) do
-      nil -> base
-      healthcheck when is_map(healthcheck) -> Map.put(base, "Healthcheck", healthcheck)
-    end
+    base
+    |> maybe_put_user(Map.get(spec, :user))
+    |> maybe_put_healthcheck(Map.get(spec, :health_check))
   end
+
+  # Preserve an adopted container's uid:gid; omitted for greenfield deploys.
+  defp maybe_put_user(spec, user) when is_binary(user) and user != "",
+    do: Map.put(spec, "User", user)
+
+  defp maybe_put_user(spec, _user), do: spec
+
+  defp maybe_put_healthcheck(spec, healthcheck) when is_map(healthcheck),
+    do: Map.put(spec, "Healthcheck", healthcheck)
+
+  defp maybe_put_healthcheck(spec, _healthcheck), do: spec
 
   defp build_networks(spec) do
     primary = [%{"Target" => spec.network}]
