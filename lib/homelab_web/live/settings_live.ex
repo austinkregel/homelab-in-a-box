@@ -11,6 +11,7 @@ defmodule HomelabWeb.SettingsLive do
     {"authentication", "Authentication", "hero-key"},
     {"infrastructure", "Infrastructure", "hero-server-stack"},
     {"dns", "DNS & Domains", "hero-globe-alt"},
+    {"registry", "Registry", "hero-cube"},
     {"registries", "Registries", "hero-archive-box"},
     {"users", "Users", "hero-user-group"},
     {"danger_zone", "Danger Zone", "hero-exclamation-triangle"}
@@ -95,6 +96,55 @@ defmodule HomelabWeb.SettingsLive do
      socket
      |> load_section_data("registries")
      |> put_flash(:info, "Registry settings saved!")}
+  end
+
+  def handle_event("save_self_hosted_registry", %{"registry" => params}, socket) do
+    if (params["username"] || "") != "", do: Settings.set("registry_username", params["username"])
+
+    if (params["password"] || "") != "",
+      do: Settings.set("registry_password", params["password"], encrypt: true)
+
+    if (params["host_ip"] || "") != "", do: Settings.set("registry_host_ip", params["host_ip"])
+    Settings.set("registry_mirror_enabled", params["mirror_enabled"] || "false")
+
+    {:noreply,
+     socket
+     |> load_section_data("registry")
+     |> put_flash(:info, "Registry settings saved.")}
+  end
+
+  def handle_event("enable_registry", _params, socket) do
+    Settings.set("registry_enabled", "true")
+
+    socket =
+      case Homelab.Infrastructure.Registry.ensure_registry() do
+        {:ok, _} ->
+          if Settings.get("registry_mirror_enabled") == "true" do
+            _ = Homelab.Infrastructure.Registry.ensure_registry_proxy()
+          end
+
+          put_flash(socket, :info, "Registry provisioned. It may take a moment for TLS to issue.")
+
+        {:error, :missing_credentials} ->
+          Settings.set("registry_enabled", "false")
+          put_flash(socket, :error, "Set a username and password before enabling the registry.")
+
+        {:error, reason} ->
+          Settings.set("registry_enabled", "false")
+          put_flash(socket, :error, "Failed to provision registry: #{inspect(reason)}")
+      end
+
+    {:noreply, load_section_data(socket, "registry")}
+  end
+
+  def handle_event("disable_registry", _params, socket) do
+    Settings.set("registry_enabled", "false")
+    _ = Homelab.Infrastructure.Registry.teardown()
+
+    {:noreply,
+     socket
+     |> load_section_data("registry")
+     |> put_flash(:info, "Registry stopped. Data volumes were kept.")}
   end
 
   def handle_event("save_orchestrator", %{"driver" => driver_id}, socket) do
@@ -280,6 +330,18 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:docker_hub_token_set?, Settings.get("docker_hub_token") != nil)
   end
 
+  defp load_section_data(socket, "registry") do
+    base_domain = Homelab.Config.base_domain()
+
+    assign(socket, :registry_enabled?, Settings.get("registry_enabled") == "true")
+    |> assign(:registry_username, Settings.get("registry_username", ""))
+    |> assign(:registry_password_set?, Settings.get("registry_password") != nil)
+    |> assign(:registry_mirror_enabled?, Settings.get("registry_mirror_enabled") == "true")
+    |> assign(:registry_host_ip, Settings.get("registry_host_ip", ""))
+    |> assign(:registry_host, "registry.#{base_domain}")
+    |> assign(:registry_mirror_host, "proxy-registry.#{base_domain}")
+  end
+
   defp load_section_data(socket, "users") do
     assign(socket, :users, Accounts.list_users())
   end
@@ -352,6 +414,7 @@ defmodule HomelabWeb.SettingsLive do
       "authentication" -> render_authentication(assigns)
       "infrastructure" -> render_infrastructure(assigns)
       "dns" -> render_dns(assigns)
+      "registry" -> render_registry(assigns)
       "registries" -> render_registries(assigns)
       "users" -> render_users(assigns)
       "danger_zone" -> render_danger_zone(assigns)
@@ -871,6 +934,131 @@ defmodule HomelabWeb.SettingsLive do
           />
         </div>
       </.form>
+    </div>
+    """
+  end
+
+  defp render_registry(assigns) do
+    ~H"""
+    <div class="p-4">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-base-content">Self-hosted registry</h2>
+          <p class="text-sm text-base-content/50">
+            Push images your Swarm nodes pull locally, plus a Docker Hub pull-through cache.
+          </p>
+        </div>
+        <span class={[
+          "text-xs font-semibold rounded-full px-3 py-1",
+          if(@registry_enabled?,
+            do: "bg-success/15 text-success",
+            else: "bg-base-content/10 text-base-content/50"
+          )
+        ]}>
+          {if(@registry_enabled?, do: "Running", else: "Disabled")}
+        </span>
+      </div>
+
+      <div class="space-y-4">
+        <div class="rounded-lg border border-warning/20 bg-warning/5 p-4 text-xs text-base-content/70 space-y-1">
+          <p>
+            Requires a wildcard <code>*.{Homelab.Config.base_domain()}</code>
+            TLS cert (Traefik DNS-01) and the <code>TRAEFIK_DNS_API_TOKEN</code>
+            env var.
+          </p>
+          <p>The pull-through mirror caches <strong>docker.io only</strong> — not GHCR/ECR/quay.</p>
+        </div>
+
+        <div class="rounded-lg border border-base-content/[0.06] p-4">
+          <h3 class="text-sm font-semibold text-base-content mb-4">Credentials & options</h3>
+          <.form
+            for={%{}}
+            id="self-hosted-registry-form"
+            phx-submit="save_self_hosted_registry"
+            class="space-y-4"
+          >
+            <div>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">Username</label>
+              <input
+                type="text"
+                name="registry[username]"
+                value={@registry_username}
+                placeholder="registry user"
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">Password</label>
+              <input
+                type="password"
+                name="registry[password]"
+                placeholder={if(@registry_password_set?, do: "••••••••", else: "set a password")}
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+                Host IP (optional — for auto DNS records)
+              </label>
+              <input
+                type="text"
+                name="registry[host_ip]"
+                value={@registry_host_ip}
+                placeholder="203.0.113.10"
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+            <label class="flex items-center gap-2 text-sm text-base-content/70">
+              <input
+                type="checkbox"
+                name="registry[mirror_enabled]"
+                value="true"
+                checked={@registry_mirror_enabled?}
+                class="rounded"
+              /> Also run the docker.io pull-through mirror
+            </label>
+            <.button
+              type="submit"
+              label="Save"
+              class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium cursor-pointer"
+            />
+          </.form>
+        </div>
+
+        <div class="rounded-lg border border-base-content/[0.06] p-4 flex items-center gap-3">
+          <button
+            :if={!@registry_enabled?}
+            type="button"
+            phx-click="enable_registry"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium cursor-pointer"
+          >
+            Enable & provision
+          </button>
+          <button
+            :if={@registry_enabled?}
+            type="button"
+            phx-click="disable_registry"
+            class="px-4 py-2 rounded-lg bg-error/90 text-error-content text-sm font-medium cursor-pointer"
+          >
+            Disable
+          </button>
+        </div>
+
+        <div class="rounded-lg border border-base-content/[0.06] p-4 text-xs space-y-3">
+          <h3 class="text-sm font-semibold text-base-content">Node operator instructions</h3>
+          <div>
+            <p class="text-base-content/50 mb-1">Log in and push from any machine:</p>
+            <pre class="bg-base-300 rounded p-2 overflow-x-auto">{"docker login #{@registry_host}\ndocker tag myimage #{@registry_host}/myimage:latest\ndocker push #{@registry_host}/myimage:latest"}</pre>
+          </div>
+          <div>
+            <p class="text-base-content/50 mb-1">
+              To use the mirror, add to each node's <code>/etc/docker/daemon.json</code>
+              (then <code>systemctl restart docker</code>) — this step is manual per node:
+            </p>
+            <pre class="bg-base-300 rounded p-2 overflow-x-auto">{"{ \"registry-mirrors\": [\"https://#{@registry_mirror_host}\"] }"}</pre>
+          </div>
+        </div>
+      </div>
     </div>
     """
   end
