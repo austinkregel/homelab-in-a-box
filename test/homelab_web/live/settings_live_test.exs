@@ -453,4 +453,67 @@ defmodule HomelabWeb.SettingsLiveTest do
       assert html =~ "Registry settings saved"
     end
   end
+
+  describe "import section" do
+    test "renders the import section", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "import"})
+
+      assert html =~ "Import existing stack"
+      assert html =~ "Discover"
+    end
+
+    test "shows an error when discovery cannot reach the daemon", %{conn: conn} do
+      # Default test docker_client is the UnavailableClient, so discovery errors.
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html = render_click(view, "run_discovery", %{})
+      assert html =~ "Discovery failed"
+    end
+
+    test "discovers an in-scope service and previews its migration plan", %{conn: conn} do
+      prev = Application.get_env(:homelab, :docker_client)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      on_exit(fn -> restore_docker_client(prev) end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => "999:999"},
+             "HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}},
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/home/austinkregel/homelab/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html = render_click(view, "run_discovery", %{})
+      assert html =~ "homelab-postgres"
+      assert html =~ "preserve"
+
+      html = render_click(view, "preview_plan", %{})
+      assert html =~ "Phase 1"
+      assert html =~ "backup_verify"
+      assert html =~ "adopt_container"
+    end
+  end
+
+  defp restore_docker_client(nil), do: Application.delete_env(:homelab, :docker_client)
+  defp restore_docker_client(val), do: Application.put_env(:homelab, :docker_client, val)
 end
