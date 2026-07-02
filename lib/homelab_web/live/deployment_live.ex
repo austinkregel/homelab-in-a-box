@@ -1330,8 +1330,16 @@ defmodule HomelabWeb.DeploymentLive do
 
   defp memory_percent(stats) do
     usage = stats.memory_usage || 0
-    limit = stats.memory_limit || 1
-    min_val(round(usage / limit * 100), 100)
+    limit = stats.memory_limit
+
+    # Docker reports a 0 memory_limit for containers with no limit set; `|| 1`
+    # doesn't catch 0 (truthy in Elixir), so guard explicitly to avoid a
+    # divide-by-zero ArithmeticError.
+    if is_number(limit) and limit > 0 do
+      min_val(round(usage / limit * 100), 100)
+    else
+      0
+    end
   end
 
   defp min_val(a, b) when a < b, do: a
