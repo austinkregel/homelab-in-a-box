@@ -35,9 +35,10 @@ defmodule HomelabWeb.CatalogLiveTest do
       assert html =~ "Custom"
     end
 
-    test "curated tab is selected by default", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      assert has_element?(view, "button", "Curated")
+    test "build tab is selected by default", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/catalog")
+      assert html =~ "Build image"
+      assert html =~ "Author a Dockerfile"
     end
 
     test "assigns initial empty state for search and curated", %{conn: conn} do
@@ -47,7 +48,8 @@ defmodule HomelabWeb.CatalogLiveTest do
     end
 
     test "with no catalog sources, the curated tab prompts to search/add", %{conn: conn} do
-      {:ok, _view, html} = live(conn, ~p"/catalog")
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      html = render_click(view, "switch_tab", %{"tab" => "curated"})
       assert html =~ "No catalog sources configured"
     end
   end
@@ -155,6 +157,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       {:ok, view, _html} = live(conn, ~p"/catalog")
 
       send(view.pid, {:curated_loaded, []})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
 
       render_click(view, "toggle_all_registries", %{})
@@ -180,6 +183,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
 
       html = render(view)
@@ -194,6 +198,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       {:ok, view, _html} = live(conn, ~p"/catalog")
 
       send(view.pid, {:curated_loaded, []})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
 
       render_click(view, "toggle_all_registries", %{})
@@ -600,6 +605,7 @@ defmodule HomelabWeb.CatalogLiveTest do
     test "assigns curated entries", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/catalog")
       send(view.pid, {:curated_loaded, []})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
       assert html =~ "0 of 0 apps shown" or html =~ "Curated"
@@ -623,6 +629,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
       assert html =~ "Nextcloud" or html =~ "apps shown"
@@ -657,6 +664,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
       assert html =~ "apps shown"
@@ -691,6 +699,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
       assert html =~ "2 of 2 apps shown" or html =~ "apps shown"
@@ -883,7 +892,7 @@ defmodule HomelabWeb.CatalogLiveTest do
   end
 
   describe "select_entry from curated tab" do
-    test "selecting a curated entry redirects to deploy wizard", %{conn: conn} do
+    test "selecting a curated entry opens the deploy modal in the Workbench", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/catalog")
 
       entries = [
@@ -901,6 +910,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
 
       entry_json =
@@ -917,13 +927,16 @@ defmodule HomelabWeb.CatalogLiveTest do
         })
 
       render_click(view, "select_entry", %{"entry" => entry_json})
-      {path, _flash} = assert_redirect(view)
-      assert path =~ "/deploy/new"
+      html = render(view)
+
+      assert has_element?(view, "#deploy-modal")
+      assert html =~ "Deploy TestApp"
+      refute_redirected(view, ~p"/deploy/new")
     end
   end
 
   describe "select_entry from search results" do
-    test "selecting a search result entry redirects to deploy wizard", %{conn: conn} do
+    test "selecting a search result opens the deploy modal in the Workbench", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/catalog")
       render_click(view, "switch_tab", %{"tab" => "search"})
 
@@ -941,8 +954,10 @@ defmodule HomelabWeb.CatalogLiveTest do
         })
 
       render_click(view, "select_entry", %{"entry" => entry_json})
-      {path, _flash} = assert_redirect(view)
-      assert path =~ "/deploy/new"
+      html = render(view)
+
+      assert has_element?(view, "#deploy-modal")
+      assert html =~ "Deploy SearchApp"
     end
   end
 
@@ -1222,6 +1237,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1247,6 +1263,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       render_click(view, "toggle_all_registries", %{})
       html = render(view)
@@ -1284,6 +1301,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1320,6 +1338,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1347,6 +1366,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1382,6 +1402,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1564,6 +1585,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1589,6 +1611,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       render_click(view, "toggle_all_registries", %{})
       html = render(view)
@@ -1625,6 +1648,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1708,6 +1732,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1734,6 +1759,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1772,6 +1798,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1797,6 +1824,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       render_click(view, "toggle_all_registries", %{})
       html = render(view)
@@ -1824,6 +1852,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -1856,6 +1885,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -2225,6 +2255,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       {:ok, view, _html} = live(conn, ~p"/catalog")
 
       send(view.pid, {:curated_loaded, []})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -2272,6 +2303,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -2307,6 +2339,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3077,6 +3110,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3102,6 +3136,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3127,6 +3162,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3152,6 +3188,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3177,6 +3214,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3202,6 +3240,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3227,6 +3266,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3252,6 +3292,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3282,6 +3323,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3332,6 +3374,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3358,6 +3401,7 @@ defmodule HomelabWeb.CatalogLiveTest do
       ]
 
       send(view.pid, {:curated_loaded, entries})
+      render_click(view, "switch_tab", %{"tab" => "curated"})
       _ = :sys.get_state(view.pid)
       html = render(view)
 
@@ -3410,6 +3454,114 @@ defmodule HomelabWeb.CatalogLiveTest do
 
       html = render(view)
       assert html =~ "hero-cube"
+    end
+  end
+
+  describe "build tab" do
+    test "renders the build editor with a default Dockerfile", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      html = render_click(view, "switch_tab", %{"tab" => "build"})
+
+      assert html =~ "Dockerfile"
+      assert html =~ "Build image"
+      assert html =~ "Author a Dockerfile"
+    end
+
+    test "add_build_file adds a new editable file", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      render_click(view, "add_build_file", %{})
+      html = render(view)
+
+      assert html =~ "file1"
+    end
+
+    test "remove_build_file refuses to remove the Dockerfile", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      html = render_click(view, "remove_build_file", %{"index" => "0"})
+
+      assert html =~ "Dockerfile is required"
+    end
+
+    test "build_image requires a name", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      html =
+        view
+        |> element("form[phx-submit='build_image']")
+        |> render_submit(%{"name" => "", "tag" => "latest"})
+
+      assert html =~ "name is required"
+    end
+
+    test "build_image rejects an empty Dockerfile", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      # Blank out the Dockerfile content.
+      render_change(view, "update_build_file", %{"name" => "Dockerfile", "content" => "   "})
+
+      html =
+        view
+        |> element("form[phx-submit='build_image']")
+        |> render_submit(%{"name" => "My App", "tag" => "latest"})
+
+      assert html =~ "Dockerfile" and html =~ "be empty"
+    end
+
+    test "build_image enters the building state", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      html =
+        view
+        |> element("form[phx-submit='build_image']")
+        |> render_submit(%{"name" => "My App", "tag" => "latest"})
+
+      assert html =~ "Building..."
+    end
+
+    test "a successful build result opens the deploy modal", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      # Prime build_name as the build_image event would.
+      view
+      |> element("form[phx-submit='build_image']")
+      |> render_submit(%{"name" => "Built App", "tag" => "latest"})
+
+      send(view.pid, {:build_result, {:ok, "homelab-built/built-app:latest"}})
+      _ = :sys.get_state(view.pid)
+      html = render(view)
+
+      assert has_element?(view, "#deploy-modal") or html =~ "Deploy Built App"
+    end
+
+    test "a failed build surfaces the error and leaves the modal closed", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      send(view.pid, {:build_result, {:error, {:build_failed, "no such file: app.js"}}})
+      _ = :sys.get_state(view.pid)
+      html = render(view)
+
+      refute has_element?(view, "#deploy-modal")
+      assert html =~ "no such file: app.js"
+    end
+
+    test "build_log events append to the log pane", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog")
+      render_click(view, "switch_tab", %{"tab" => "build"})
+
+      send(view.pid, {:build_log, %{"stream" => "Step 1/2 : FROM alpine\n"}})
+      _ = :sys.get_state(view.pid)
+      html = render(view)
+
+      assert html =~ "Step 1/2 : FROM alpine"
     end
   end
 end
