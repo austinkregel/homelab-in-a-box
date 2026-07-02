@@ -269,6 +269,50 @@ defmodule Homelab.Services.ReconcilerTest do
       :ok = Reconciler.sync_now()
       assert_receive {:undeployed, "rogue1"}, 2_000
     end
+
+    test "never reaps a container labeled homelab.adopted, even past the grace period" do
+      Application.put_env(:homelab, :reconciler, orphan_grace_ms: 0)
+      record_orchestrator_io(self())
+
+      adopted =
+        svc("adopted1", %{
+          labels: %{"homelab.managed" => "true", "homelab.adopted" => "true"}
+        })
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, [adopted]} end)
+
+      start_and_sync!()
+      :ok = Reconciler.sync_now()
+
+      refute_receive {:unpublished, _}, 300
+      refute_receive {:undeployed, "adopted1"}, 300
+    end
+
+    test "never reaps a container whose deployment holds an active release lease" do
+      Application.put_env(:homelab, :reconciler, orphan_grace_ms: 0)
+      record_orchestrator_io(self())
+
+      dep = insert(:deployment, external_id: nil)
+
+      {:ok, release} =
+        Homelab.Deployments.Releases.plan_release(dep, [%{type: :app_container}])
+
+      {:ok, _} = Homelab.Deployments.Releases.acquire_lease(release, "owner", 600)
+
+      leased =
+        svc("leased1", %{
+          labels: %{"homelab.managed" => "true", "homelab.deployment_id" => to_string(dep.id)}
+        })
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, [leased]} end)
+
+      start_and_sync!()
+      :ok = Reconciler.sync_now()
+
+      refute_receive {:undeployed, "leased1"}, 300
+    end
   end
 
   describe "external bypass audit" do
