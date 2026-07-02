@@ -461,6 +461,21 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
       assert html =~ "Resource usage" or html =~ "CPU" or html =~ "Memory"
     end
+
+    test "renders without crashing when the memory limit is 0 (unlimited container)", %{
+      conn: conn,
+      deployment: dep
+    } do
+      # Docker reports memory_limit: 0 for containers with no limit set. memory_percent
+      # must not divide by zero (regression: ArithmeticError crashed the LiveView).
+      Homelab.Mocks.Orchestrator
+      |> stub(:stats, fn _id ->
+        {:ok, %{cpu_percent: 10.0, memory_usage: 268_435_456, memory_limit: 0}}
+      end)
+
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
+      assert html =~ "Resource usage" or html =~ "CPU" or html =~ "Memory"
+    end
   end
 
   describe "traffic tab rendering" do
