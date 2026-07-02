@@ -61,7 +61,9 @@ config :homelab,
   # `Process.put(:docker_client, Homelab.Mocks.DockerClient)`.
   docker_client: Homelab.Docker.UnavailableClient,
   start_services: false,
-  registries: [Homelab.Registries.DockerHub]
+  registries: [Homelab.Registries.DockerHub],
+  # In-process copy (no helper container) so migration steps run against temp dirs.
+  migrate_copy_engine: Homelab.Deployments.Migrate.LocalCopyEngine
 
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
