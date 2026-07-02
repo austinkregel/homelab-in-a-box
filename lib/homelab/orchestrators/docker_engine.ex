@@ -203,11 +203,25 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   # --- Image Management ---
 
+  # Images built in the Workbench live only in the local image store and have no
+  # registry to pull from, so skip the pull for the local-build namespace.
+  defp pull_image("homelab-built/" <> _ = image) do
+    require Logger
+    Logger.info("[DockerEngine] Using locally-built image #{image} (skipping pull)")
+    :ok
+  end
+
   defp pull_image(image) do
     require Logger
     Logger.info("[DockerEngine] Pulling image #{image}...")
 
-    case Client.post_stream("/images/create?fromImage=#{URI.encode(image)}") do
+    opts =
+      case Homelab.Docker.RegistryAuth.for_ref(image) do
+        nil -> []
+        header -> [headers: [header]]
+      end
+
+    case Client.post_stream("/images/create?fromImage=#{URI.encode(image)}", opts) do
       :ok ->
         Logger.info("[DockerEngine] Image #{image} pulled successfully")
         :ok
