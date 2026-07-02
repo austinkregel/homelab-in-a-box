@@ -250,6 +250,22 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert {:ok, "svc_abc123"} = DockerSwarm.deploy(spec)
     end
 
+    test "sets ContainerSpec User when the spec carries one (adopted uid:gid)" do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc1"}}
+      end)
+
+      spec = Map.put(build_spec(), :user, "999:999")
+      assert {:ok, "svc1"} = DockerSwarm.deploy(spec)
+
+      assert_received {:create_body, body}
+      assert get_in(body, ["TaskTemplate", "ContainerSpec", "User"]) == "999:999"
+    end
+
     test "falls back to a lowercase id key when ID is absent" do
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
