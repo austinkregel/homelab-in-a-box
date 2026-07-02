@@ -13,6 +13,7 @@ defmodule HomelabWeb.SettingsLive do
     {"dns", "DNS & Domains", "hero-globe-alt"},
     {"registry", "Registry", "hero-cube"},
     {"registries", "Registries", "hero-archive-box"},
+    {"import", "Import", "hero-arrow-down-tray"},
     {"users", "Users", "hero-user-group"},
     {"danger_zone", "Danger Zone", "hero-exclamation-triangle"}
   ]
@@ -145,6 +146,45 @@ defmodule HomelabWeb.SettingsLive do
      socket
      |> load_section_data("registry")
      |> put_flash(:info, "Registry stopped. Data volumes were kept.")}
+  end
+
+  def handle_event("run_discovery", _params, socket) do
+    case Homelab.Deployments.AdoptionPlanner.review() do
+      {:ok, services} ->
+        {:noreply,
+         socket
+         |> assign(:import_services, services)
+         |> assign(:import_selected, MapSet.new(Enum.map(services, & &1.name)))
+         |> assign(:import_plan, nil)
+         |> assign(:import_error, nil)}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:import_services, [])
+         |> assign(:import_error, "Discovery failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("toggle_import_service", %{"name" => name}, socket) do
+    selected = socket.assigns.import_selected
+
+    selected =
+      if MapSet.member?(selected, name),
+        do: MapSet.delete(selected, name),
+        else: MapSet.put(selected, name)
+
+    # Selection changed — any previewed plan is now stale.
+    {:noreply, assign(socket, import_selected: selected, import_plan: nil)}
+  end
+
+  def handle_event("preview_plan", _params, socket) do
+    selected =
+      (socket.assigns.import_services || [])
+      |> Enum.filter(&MapSet.member?(socket.assigns.import_selected, &1.name))
+
+    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected)
+    {:noreply, assign(socket, :import_plan, plan)}
   end
 
   def handle_event("save_orchestrator", %{"driver" => driver_id}, socket) do
@@ -342,6 +382,14 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:registry_mirror_host, "proxy-registry.#{base_domain}")
   end
 
+  defp load_section_data(socket, "import") do
+    socket
+    |> assign_new(:import_services, fn -> nil end)
+    |> assign_new(:import_selected, fn -> MapSet.new() end)
+    |> assign_new(:import_plan, fn -> nil end)
+    |> assign_new(:import_error, fn -> nil end)
+  end
+
   defp load_section_data(socket, "users") do
     assign(socket, :users, Accounts.list_users())
   end
@@ -416,6 +464,7 @@ defmodule HomelabWeb.SettingsLive do
       "dns" -> render_dns(assigns)
       "registry" -> render_registry(assigns)
       "registries" -> render_registries(assigns)
+      "import" -> render_import(assigns)
       "users" -> render_users(assigns)
       "danger_zone" -> render_danger_zone(assigns)
       _ -> render_general(assigns)
@@ -1194,6 +1243,145 @@ defmodule HomelabWeb.SettingsLive do
     </div>
     """
   end
+
+  defp render_import(assigns) do
+    ~H"""
+    <div class="p-4 space-y-4">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
+          <p class="text-sm text-base-content/50">
+            Discover containers under your existing <code>~/homelab</code>
+            stack and migrate them into managed, plane-owned volumes. Preview only — nothing runs yet.
+          </p>
+        </div>
+        <button
+          type="button"
+          phx-click="run_discovery"
+          class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors cursor-pointer whitespace-nowrap"
+        >
+          {if(@import_services, do: "Re-scan", else: "Discover")}
+        </button>
+      </div>
+
+      <div
+        :if={@import_error}
+        class="rounded-lg bg-error/10 border border-error/20 p-3 text-sm text-error"
+      >
+        {@import_error}
+      </div>
+
+      <p
+        :if={is_nil(@import_services) && is_nil(@import_error)}
+        class="text-sm text-base-content/40 py-6 text-center"
+      >
+        Click <strong>Discover</strong> to scan the running daemon for in-scope services.
+      </p>
+
+      <p :if={@import_services == []} class="text-sm text-base-content/40 py-6 text-center">
+        No in-scope services found under the adoption root.
+      </p>
+
+      <div :if={@import_services not in [nil, []]} class="space-y-2">
+        <div
+          :for={svc <- @import_services}
+          class="rounded-lg border border-base-content/[0.06] p-3"
+        >
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={MapSet.member?(@import_selected, svc.name)}
+              phx-click="toggle_import_service"
+              phx-value-name={svc.name}
+              class="mt-1 rounded"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-sm text-base-content">{svc.name}</span>
+                <span class="text-[11px] text-base-content/40 font-mono">{svc.image}</span>
+                <span
+                  :if={svc.user}
+                  class="text-[10px] bg-base-200 rounded px-1.5 py-0.5 text-base-content/60"
+                >
+                  uid {svc.user}
+                </span>
+              </div>
+              <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                <span
+                  :if={svc.preserve != []}
+                  class="text-[11px] font-semibold text-success bg-success/15 rounded px-2 py-0.5"
+                >
+                  {length(svc.preserve)} preserve
+                </span>
+                <span
+                  :if={svc.rebuildable != []}
+                  class="text-[11px] font-semibold text-info bg-info/15 rounded px-2 py-0.5"
+                >
+                  {length(svc.rebuildable)} rebuildable
+                </span>
+                <span
+                  :if={svc.out_of_scope != []}
+                  class="text-[11px] font-semibold text-base-content/50 bg-base-content/10 rounded px-2 py-0.5"
+                >
+                  {length(svc.out_of_scope)} out of scope
+                </span>
+              </div>
+              <ul :if={svc.preserve != []} class="mt-1.5 space-y-0.5">
+                <li :for={m <- svc.preserve} class="text-[11px] text-base-content/45 font-mono">
+                  {m.target} ← {m.source}
+                </li>
+              </ul>
+            </div>
+          </label>
+        </div>
+
+        <button
+          type="button"
+          phx-click="preview_plan"
+          disabled={MapSet.size(@import_selected) == 0}
+          class="px-4 py-2 rounded-lg bg-base-200 text-base-content text-sm font-medium hover:bg-base-300 transition-colors cursor-pointer disabled:opacity-50"
+        >
+          Preview migration plan
+        </button>
+      </div>
+
+      <div :if={@import_plan} class="rounded-lg border border-base-content/[0.06] p-4 space-y-3">
+        <h3 class="text-sm font-semibold text-base-content">
+          Plan preview — {length(@import_plan.services)} service(s), not executed
+        </h3>
+        <div>
+          <p class="text-xs font-semibold text-base-content/60 mb-1">
+            Phase 1 — copy while the stack stays up
+          </p>
+          <ol class="list-decimal list-inside space-y-0.5">
+            <li :for={step <- @import_plan.phase1} class="text-[11px] font-mono text-base-content/60">
+              {step.type} {plan_step_detail(step)}
+            </li>
+          </ol>
+        </div>
+        <div>
+          <p class="text-xs font-semibold text-warning/80 mb-1">
+            Phase 2 — cutover (one outage; run only after Phase 1 is verified)
+          </p>
+          <ol class="list-decimal list-inside space-y-0.5">
+            <li :for={step <- @import_plan.phase2} class="text-[11px] font-mono text-base-content/60">
+              {step.type} {plan_step_detail(step)}
+            </li>
+          </ol>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # A short human summary of a plan step's resource_handle for the preview.
+  defp plan_step_detail(%{resource_handle: %{"container" => c}}), do: "· #{c}"
+
+  defp plan_step_detail(%{resource_handle: %{"targets" => t}}) when is_list(t),
+    do: "· #{length(t)} target(s)"
+
+  defp plan_step_detail(%{resource_handle: %{"service" => s}}), do: "· #{s}"
+  defp plan_step_detail(_), do: ""
 
   defp render_users(assigns) do
     ~H"""
