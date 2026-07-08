@@ -6,6 +6,11 @@ defmodule HomelabWeb.Layouts do
 
   embed_templates "layouts/*"
 
+  defp notif_dot("error"), do: "bg-error"
+  defp notif_dot("warning"), do: "bg-warning"
+  defp notif_dot("success"), do: "bg-success"
+  defp notif_dot(_info), do: "bg-info"
+
   attr :flash, :map, required: true, doc: "the map of flash messages"
 
   attr :current_scope, :map,
@@ -16,6 +21,7 @@ defmodule HomelabWeb.Layouts do
   attr :tenants, :list, default: [], doc: "list of tenants to show in the sidebar"
   attr :current_user, :map, default: nil, doc: "the currently logged-in user"
   attr :notification_count, :integer, default: 0, doc: "unread notification count"
+  attr :notifications, :list, default: [], doc: "recent notifications for the dropdown"
 
   slot :inner_block, required: true
 
@@ -124,11 +130,77 @@ defmodule HomelabWeb.Layouts do
                 Sign out
               </.link>
             </div>
-            <div :if={@notification_count > 0} class="relative">
-              <.icon name="hero-bell" class="size-5 text-base-content/50" />
-              <span class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-error text-[10px] font-bold text-white flex items-center justify-center">
-                {min(@notification_count, 9)}
-              </span>
+            <div class="relative">
+              <button
+                type="button"
+                phx-click={JS.toggle(to: "#notif-dropdown")}
+                class="relative flex items-center cursor-pointer"
+                aria-label="Notifications"
+              >
+                <.icon
+                  name="hero-bell"
+                  class={[
+                    "size-5",
+                    if(@notification_count > 0,
+                      do: "text-base-content/70",
+                      else: "text-base-content/40"
+                    )
+                  ]}
+                />
+                <span
+                  :if={@notification_count > 0}
+                  class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-error text-[10px] font-bold text-white flex items-center justify-center"
+                >
+                  {min(@notification_count, 9)}
+                </span>
+              </button>
+              <div
+                id="notif-dropdown"
+                hidden
+                class="absolute bottom-full right-0 mb-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-base-content/10 bg-base-100 shadow-xl z-50"
+              >
+                <div class="flex items-center justify-between px-4 py-2.5 border-b border-base-content/[0.06]">
+                  <span class="text-sm font-semibold text-base-content">Notifications</span>
+                  <button
+                    :if={@notifications != []}
+                    type="button"
+                    phx-click="notif-mark-all-read"
+                    class="text-xs text-primary hover:underline cursor-pointer"
+                  >
+                    Mark all read
+                  </button>
+                </div>
+                <div
+                  :if={@notifications == []}
+                  class="px-4 py-6 text-center text-xs text-base-content/40"
+                >
+                  No notifications yet.
+                </div>
+                <button
+                  :for={n <- @notifications}
+                  type="button"
+                  phx-click="notif-open"
+                  phx-value-id={n.id}
+                  class={[
+                    "w-full text-left px-4 py-3 border-b border-base-content/[0.04] hover:bg-base-content/[0.03] cursor-pointer",
+                    is_nil(n.read_at) && "bg-primary/[0.04]"
+                  ]}
+                >
+                  <div class="flex items-start gap-2">
+                    <span class={[
+                      "mt-1 w-1.5 h-1.5 rounded-full shrink-0",
+                      notif_dot(n.severity)
+                    ]}>
+                    </span>
+                    <div class="min-w-0">
+                      <p class="text-xs font-semibold text-base-content truncate">{n.title}</p>
+                      <p :if={n.body} class="text-[11px] text-base-content/60 line-clamp-2">
+                        {n.body}
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
           <div class="flex items-center gap-2.5 px-3 py-1.5">

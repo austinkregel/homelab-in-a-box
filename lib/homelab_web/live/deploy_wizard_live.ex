@@ -1073,6 +1073,8 @@ defmodule HomelabWeb.DeployWizardLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class={[if(@view_mode == :visual, do: "max-w-6xl", else: "max-w-4xl"), "mx-auto"]}>
         <div class="mb-4">

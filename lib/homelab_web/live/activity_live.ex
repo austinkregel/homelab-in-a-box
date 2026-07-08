@@ -44,6 +44,8 @@ defmodule HomelabWeb.ActivityLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-10">
         <%!-- Page header --%>

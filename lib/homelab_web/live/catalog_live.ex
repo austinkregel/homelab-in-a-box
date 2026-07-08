@@ -484,6 +484,8 @@ defmodule HomelabWeb.CatalogLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div>
         <div class="mb-5">
