@@ -36,10 +36,6 @@ defmodule Homelab.Backups do
     end
   end
 
-  def get_backup_job!(id) do
-    Repo.get!(BackupJob, id) |> Repo.preload(deployment: [:tenant, :app_template])
-  end
-
   def create_backup_job(attrs) do
     %BackupJob{}
     |> BackupJob.changeset(attrs)
