@@ -12,6 +12,18 @@ defmodule HomelabWeb.CatalogLiveTest do
 
   setup do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+
+    # Pin catalog sources off so the curated tab doesn't auto-load real entries
+    # and race the entries these tests inject via `{:curated_loaded, ...}`.
+    prev = Application.get_env(:homelab, :application_catalogs)
+    Application.put_env(:homelab, :application_catalogs, [])
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:homelab, :application_catalogs, prev),
+        else: Application.delete_env(:homelab, :application_catalogs)
+    end)
+
     :ok
   end
 
