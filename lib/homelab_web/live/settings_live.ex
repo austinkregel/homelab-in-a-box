@@ -239,6 +239,25 @@ defmodule HomelabWeb.SettingsLive do
      |> put_flash(:info, "Gateway updated!")}
   end
 
+  def handle_event("save_storage_roots", %{"storage" => params}, socket) do
+    # Persist to Settings AND put_env for immediate effect this run (the modules
+    # read the ETS-cached setting first, which set/3 populates).
+    for {key, value} <- [
+          {"adoption_root", params["adoption_root"]},
+          {"managed_root", params["managed_root"]}
+        ],
+        is_binary(value) and String.trim(value) != "" do
+      trimmed = String.trim(value)
+      Settings.set(key, trimmed, category: "infrastructure")
+      Application.put_env(:homelab, String.to_existing_atom(key), trimmed)
+    end
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Storage roots updated.")
+     |> load_section_data("infrastructure")}
+  end
+
   def handle_event("rerun_setup", _params, socket) do
     Settings.delete("setup_completed")
     {:noreply, push_navigate(socket, to: ~p"/setup")}
@@ -416,6 +435,8 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:selected_orchestrator, current_id)
     |> assign(:gateways, Homelab.Config.gateways())
     |> assign(:selected_gateway, current_gateway_id)
+    |> assign(:adoption_root, Homelab.Deployments.AdoptionPolicy.adoption_root())
+    |> assign(:managed_root, Homelab.Deployments.PermanentHome.managed_root())
   end
 
   defp load_section_data(socket, "dns") do
@@ -788,6 +809,60 @@ defmodule HomelabWeb.SettingsLive do
             </div>
           </button>
         </div>
+      </div>
+
+      <div>
+        <h2 class="text-lg font-semibold text-base-content mb-2">Storage roots</h2>
+        <p class="text-sm text-base-content/50 mb-4">
+          Where migration reads from and writes to. Set these to match your host's disk layout
+          <em>before</em>
+          importing an existing stack. (Also settable via the <code>HOMELAB_ADOPTION_ROOT</code>
+          / <code>HOMELAB_MANAGED_ROOT</code>
+          env vars; a value saved here wins.)
+        </p>
+        <.form
+          for={%{}}
+          id="storage-roots-form"
+          phx-submit="save_storage_roots"
+          class="space-y-4 max-w-md"
+        >
+          <div>
+            <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+              Adoption root
+            </label>
+            <input
+              type="text"
+              name="storage[adoption_root]"
+              value={@adoption_root}
+              placeholder="/home/you/homelab"
+              class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-2 text-sm font-mono"
+            />
+            <p class="text-xs text-base-content/40 mt-1">
+              Only bind mounts under this path are discoverable for import.
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+              Managed root
+            </label>
+            <input
+              type="text"
+              name="storage[managed_root]"
+              value={@managed_root}
+              placeholder="/home/you/homelab-managed"
+              class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-2 text-sm font-mono"
+            />
+            <p class="text-xs text-base-content/40 mt-1">
+              Local disk (with headroom) where plane-managed volumes physically live. Not a network mount.
+            </p>
+          </div>
+          <button
+            type="submit"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:bg-primary/90 cursor-pointer"
+          >
+            Save storage roots
+          </button>
+        </.form>
       </div>
     </div>
     """

@@ -368,6 +368,32 @@ defmodule HomelabWeb.SettingsLiveTest do
       html = render_click(view, "switch_section", %{"section" => "infrastructure"})
       assert html =~ "Traefik"
     end
+
+    test "save_storage_roots persists and takes effect immediately", %{conn: conn} do
+      on_exit(fn ->
+        Homelab.Settings.evict("adoption_root")
+        Homelab.Settings.evict("managed_root")
+        Application.delete_env(:homelab, :adoption_root)
+        Application.delete_env(:homelab, :managed_root)
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      view
+      |> form("#storage-roots-form", %{
+        "storage" => %{"adoption_root" => "/srv/appdata", "managed_root" => "/mnt/tank/managed"}
+      })
+      |> render_submit()
+
+      # Persisted...
+      assert Homelab.Settings.get("adoption_root") == "/srv/appdata"
+      assert Homelab.Settings.get("managed_root") == "/mnt/tank/managed"
+
+      # ...and the modules read the new values right away (cache-only lookup).
+      assert Homelab.Deployments.AdoptionPolicy.adoption_root() == "/srv/appdata"
+      assert Homelab.Deployments.PermanentHome.managed_root() == "/mnt/tank/managed"
+    end
   end
 
   describe "users section" do
