@@ -13,6 +13,21 @@ defmodule Homelab.Deployments.Releases do
 
   @default_lease_seconds 120
 
+  # --- PubSub ---------------------------------------------------------------
+
+  @doc "Global releases topic — every release transition is broadcast here."
+  def topic, do: "releases"
+
+  @doc "Per-deployment releases topic; the deployment detail view subscribes here."
+  def topic(deployment_id), do: "releases:deployment:#{deployment_id}"
+
+  defp broadcast_release_updated(deployment_id) do
+    msg = {:release_updated, deployment_id}
+    Phoenix.PubSub.broadcast(Homelab.PubSub, topic(), msg)
+    Phoenix.PubSub.broadcast(Homelab.PubSub, topic(deployment_id), msg)
+    :ok
+  end
+
   # --- Planning -------------------------------------------------------------
 
   @doc """
@@ -53,6 +68,16 @@ defmodule Homelab.Deployments.Releases do
 
   def get_release!(id), do: Release |> Repo.get!(id) |> Repo.preload(:steps)
   def get_release(id), do: Release |> Repo.get(id) |> preload_steps()
+
+  @doc "The most recent releases for a deployment (newest first), steps preloaded."
+  def list_releases_for_deployment(deployment_id, limit \\ 5) do
+    Release
+    |> where([r], r.deployment_id == ^deployment_id)
+    |> order_by([r], desc: r.inserted_at, desc: r.id)
+    |> limit(^limit)
+    |> Repo.all()
+    |> Enum.map(&preload_steps/1)
+  end
 
   @doc "The single active (non-terminal) release for a deployment, if any."
   def get_active_release(deployment_id) do
@@ -126,7 +151,13 @@ defmodule Homelab.Deployments.Releases do
       |> Repo.update_all(set: set)
 
     release = get_release!(id)
-    if count == 1, do: {:ok, release}, else: {:noop, release}
+
+    if count == 1 do
+      broadcast_release_updated(release.deployment_id)
+      {:ok, release}
+    else
+      {:noop, release}
+    end
   end
 
   @doc """
@@ -146,7 +177,19 @@ defmodule Homelab.Deployments.Releases do
       |> Repo.update_all(set: set)
 
     step = Repo.get!(ReleaseStep, id)
-    if count == 1, do: {:ok, step}, else: {:noop, step}
+
+    if count == 1 do
+      deployment_id =
+        Release
+        |> where([r], r.id == ^step.release_id)
+        |> select([r], r.deployment_id)
+        |> Repo.one()
+
+      broadcast_release_updated(deployment_id)
+      {:ok, step}
+    else
+      {:noop, step}
+    end
   end
 
   # --- Lease ----------------------------------------------------------------
