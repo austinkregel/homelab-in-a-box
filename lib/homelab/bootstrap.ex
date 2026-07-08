@@ -146,6 +146,21 @@ defmodule Homelab.Bootstrap do
     Application.get_env(:homelab, :bootstrap, false)
   end
 
+  # Overridable in tests to avoid real sleeps / DNS. Defaults preserve prod behavior.
+  defp wait_opts do
+    Application.get_env(:homelab, :bootstrap_wait,
+      attempts: @max_wait_attempts,
+      interval_ms: @wait_interval_ms
+    )
+  end
+
+  defp wait_attempts, do: Keyword.get(wait_opts(), :attempts, @max_wait_attempts)
+  defp wait_interval_ms, do: Keyword.get(wait_opts(), :interval_ms, @wait_interval_ms)
+
+  defp tcp_target do
+    Application.get_env(:homelab, :bootstrap_tcp_target, {~c"#{@postgres_container}", 5432})
+  end
+
   defp ensure_network do
     case Client.get("/networks/#{@network}") do
       {:ok, _} ->
@@ -236,20 +251,22 @@ defmodule Homelab.Bootstrap do
     do_wait_for_tcp(0)
   end
 
-  defp do_wait_for_tcp(attempt) when attempt >= @max_wait_attempts do
-    {:error, :postgres_tcp_timeout}
-  end
-
   defp do_wait_for_tcp(attempt) do
-    case :gen_tcp.connect(~c"#{@postgres_container}", 5432, [], 2_000) do
-      {:ok, socket} ->
-        :gen_tcp.close(socket)
-        Logger.info("Bootstrap: TCP connection to Postgres confirmed")
-        :ok
+    if attempt >= wait_attempts() do
+      {:error, :postgres_tcp_timeout}
+    else
+      {host, port} = tcp_target()
 
-      {:error, _} ->
-        Process.sleep(@wait_interval_ms)
-        do_wait_for_tcp(attempt + 1)
+      case :gen_tcp.connect(host, port, [], 2_000) do
+        {:ok, socket} ->
+          :gen_tcp.close(socket)
+          Logger.info("Bootstrap: TCP connection to Postgres confirmed")
+          :ok
+
+        {:error, _} ->
+          Process.sleep(wait_interval_ms())
+          do_wait_for_tcp(attempt + 1)
+      end
     end
   end
 
@@ -367,23 +384,19 @@ defmodule Homelab.Bootstrap do
     do_wait_for_postgres(0)
   end
 
-  defp do_wait_for_postgres(attempt) when attempt >= @max_wait_attempts do
-    {:error, :postgres_timeout}
-  end
-
   defp do_wait_for_postgres(attempt) do
-    case Client.get("/containers/#{@postgres_container}/json") do
-      {:ok, %{"State" => %{"Health" => %{"Status" => "healthy"}}}} ->
-        Logger.info("Bootstrap: Postgres is healthy")
-        :ok
+    if attempt >= wait_attempts() do
+      {:error, :postgres_timeout}
+    else
+      case Client.get("/containers/#{@postgres_container}/json") do
+        {:ok, %{"State" => %{"Health" => %{"Status" => "healthy"}}}} ->
+          Logger.info("Bootstrap: Postgres is healthy")
+          :ok
 
-      {:ok, %{"State" => %{"Running" => true}}} ->
-        Process.sleep(@wait_interval_ms)
-        do_wait_for_postgres(attempt + 1)
-
-      _ ->
-        Process.sleep(@wait_interval_ms)
-        do_wait_for_postgres(attempt + 1)
+        _ ->
+          Process.sleep(wait_interval_ms())
+          do_wait_for_postgres(attempt + 1)
+      end
     end
   end
 
@@ -470,19 +483,19 @@ defmodule Homelab.Bootstrap do
     do_wait_for_oban_postgres(0)
   end
 
-  defp do_wait_for_oban_postgres(attempt) when attempt >= @max_wait_attempts do
-    {:error, :oban_postgres_timeout}
-  end
-
   defp do_wait_for_oban_postgres(attempt) do
-    case Client.get("/containers/#{@oban_postgres_container}/json") do
-      {:ok, %{"State" => %{"Health" => %{"Status" => "healthy"}}}} ->
-        Logger.info("Bootstrap: Oban Postgres is healthy")
-        :ok
+    if attempt >= wait_attempts() do
+      {:error, :oban_postgres_timeout}
+    else
+      case Client.get("/containers/#{@oban_postgres_container}/json") do
+        {:ok, %{"State" => %{"Health" => %{"Status" => "healthy"}}}} ->
+          Logger.info("Bootstrap: Oban Postgres is healthy")
+          :ok
 
-      _ ->
-        Process.sleep(@wait_interval_ms)
-        do_wait_for_oban_postgres(attempt + 1)
+        _ ->
+          Process.sleep(wait_interval_ms())
+          do_wait_for_oban_postgres(attempt + 1)
+      end
     end
   end
 
