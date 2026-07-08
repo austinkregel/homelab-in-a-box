@@ -290,6 +290,72 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "catalog section" do
+    setup do
+      on_exit(fn -> Homelab.Settings.evict("enabled_catalogs") end)
+      :ok
+    end
+
+    test "lists every catalog source with os_bases enabled by default", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "catalog"})
+
+      assert html =~ "OS bases"
+      assert html =~ "Curated"
+      assert html =~ "Hotio"
+    end
+
+    test "toggling a source persists the enabled list", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "catalog"})
+
+      render_click(view, "toggle_catalog", %{"id" => "curated"})
+
+      assert "curated" in Jason.decode!(Homelab.Settings.get("enabled_catalogs"))
+    end
+  end
+
+  describe "orphan sweep controls" do
+    setup do
+      on_exit(fn -> Homelab.Settings.evict("reconciler_sweep_mode") end)
+      :ok
+    end
+
+    test "renders the sweep-mode control defaulting to sever-only", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      assert html =~ "Orphan sweep"
+      assert html =~ "Sever only"
+      assert html =~ "Armed"
+      assert html =~ "Paused"
+    end
+
+    test "save_sweep_mode persists a valid mode", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      render_click(view, "save_sweep_mode", %{"mode" => "armed"})
+      assert Homelab.Settings.get("reconciler_sweep_mode") == "armed"
+    end
+
+    test "save_sweep_mode rejects an invalid mode", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      html = render_click(view, "save_sweep_mode", %{"mode" => "nonsense"})
+      assert html =~ "Unknown sweep mode"
+      assert Homelab.Settings.get("reconciler_sweep_mode", "sever_only") == "sever_only"
+    end
+
+    test "renders an empty orphan panel when the reconciler is not running", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "danger_zone"})
+      # No orphan rows, no crash — list_orphans/0 returns [] when not running.
+      refute html =~ "Orphaned containers"
+    end
+  end
+
   describe "infrastructure section details" do
     test "shows Docker orchestrator option", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")

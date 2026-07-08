@@ -13,6 +13,7 @@ defmodule HomelabWeb.SettingsLive do
     {"dns", "DNS & Domains", "hero-globe-alt"},
     {"registry", "Registry", "hero-cube"},
     {"registries", "Registries", "hero-archive-box"},
+    {"catalog", "Catalog", "hero-rectangle-stack"},
     {"import", "Import", "hero-arrow-down-tray"},
     {"users", "Users", "hero-user-group"},
     {"danger_zone", "Danger Zone", "hero-exclamation-triangle"}
@@ -210,6 +211,47 @@ defmodule HomelabWeb.SettingsLive do
     {:noreply, push_navigate(socket, to: ~p"/setup")}
   end
 
+  def handle_event("save_sweep_mode", %{"mode" => mode}, socket)
+      when mode in ~w(sever_only armed paused) do
+    {:ok, _} = Settings.set("reconciler_sweep_mode", mode, category: "reconciler")
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Orphan sweep mode set to #{sweep_mode_label(mode)}.")
+     |> load_section_data("danger_zone")}
+  end
+
+  def handle_event("save_sweep_mode", _params, socket) do
+    {:noreply, put_flash(socket, :error, "Unknown sweep mode.")}
+  end
+
+  def handle_event("toggle_catalog", %{"id" => id}, socket) do
+    enabled = enabled_catalog_ids()
+    updated = if id in enabled, do: List.delete(enabled, id), else: [id | enabled]
+    {:ok, _} = Settings.set("enabled_catalogs", Jason.encode!(updated))
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Catalog sources updated.")
+     |> load_section_data("catalog")}
+  end
+
+  def handle_event("remove_orphan", %{"id" => id}, socket) do
+    socket =
+      case Homelab.Services.Reconciler.remove_orphan(id) do
+        :ok ->
+          put_flash(socket, :info, "Orphaned container removed.")
+
+        {:error, :not_orphaned} ->
+          put_flash(socket, :error, "That container is no longer tracked.")
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Could not remove container: #{inspect(reason)}")
+      end
+
+    {:noreply, load_section_data(socket, "danger_zone")}
+  end
+
   def handle_event("save_dns", %{"dns" => params}, socket) do
     if params["cloudflare_api_token"] && params["cloudflare_api_token"] != "" do
       Settings.set("cloudflare_api_token", params["cloudflare_api_token"], encrypt: true)
@@ -394,6 +436,23 @@ defmodule HomelabWeb.SettingsLive do
     assign(socket, :users, Accounts.list_users())
   end
 
+  defp load_section_data(socket, "catalog") do
+    all =
+      Enum.map(Homelab.Config.all_application_catalogs(), fn mod ->
+        %{id: mod.driver_id(), name: mod.display_name(), description: mod.description()}
+      end)
+
+    socket
+    |> assign(:all_catalogs, all)
+    |> assign(:enabled_catalogs, enabled_catalog_ids())
+  end
+
+  defp load_section_data(socket, "danger_zone") do
+    socket
+    |> assign(:sweep_mode, Settings.get("reconciler_sweep_mode", "sever_only"))
+    |> assign(:orphans, Homelab.Services.Reconciler.list_orphans())
+  end
+
   defp load_section_data(socket, _), do: socket
 
   @impl true
@@ -404,6 +463,8 @@ defmodule HomelabWeb.SettingsLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-10">
         <%!-- Page header --%>
@@ -464,6 +525,7 @@ defmodule HomelabWeb.SettingsLive do
       "dns" -> render_dns(assigns)
       "registry" -> render_registry(assigns)
       "registries" -> render_registries(assigns)
+      "catalog" -> render_catalog(assigns)
       "import" -> render_import(assigns)
       "users" -> render_users(assigns)
       "danger_zone" -> render_danger_zone(assigns)
@@ -1436,11 +1498,158 @@ defmodule HomelabWeb.SettingsLive do
     """
   end
 
+  defp enabled_catalog_ids do
+    case Settings.get("enabled_catalogs") do
+      nil ->
+        ["os_bases"]
+
+      json when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, ids} when is_list(ids) -> ids
+          _ -> ["os_bases"]
+        end
+    end
+  end
+
+  defp render_catalog(assigns) do
+    ~H"""
+    <div class="p-4">
+      <h2 class="text-lg font-semibold text-base-content mb-1">Catalog</h2>
+      <p class="text-xs text-base-content/60 mb-4">
+        Choose which catalog sources appear in the Workbench. Nothing is forced on you —
+        enable only what you want. It's your server.
+      </p>
+      <div class="space-y-3">
+        <label
+          :for={catalog <- @all_catalogs}
+          class="flex items-start gap-3 rounded-lg border border-base-content/[0.08] p-3 cursor-pointer"
+        >
+          <input
+            type="checkbox"
+            checked={catalog.id in @enabled_catalogs}
+            phx-click="toggle_catalog"
+            phx-value-id={catalog.id}
+            class="mt-1"
+          />
+          <span class="text-xs">
+            <span class="font-semibold text-base-content">{catalog.name}</span>
+            <span class="block text-base-content/60">{catalog.description}</span>
+          </span>
+        </label>
+      </div>
+    </div>
+    """
+  end
+
+  defp sweep_mode_label("sever_only"), do: "sever only"
+  defp sweep_mode_label("armed"), do: "armed"
+  defp sweep_mode_label("paused"), do: "paused"
+  defp sweep_mode_label(other), do: other
+
   defp render_danger_zone(assigns) do
     ~H"""
     <div class="p-4">
       <h2 class="text-lg font-semibold text-error mb-4">Danger Zone</h2>
       <div class="space-y-4">
+        <div class="rounded-lg border border-error/20 bg-error/5 p-4">
+          <h3 class="text-sm font-semibold text-base-content mb-2">Orphan sweep</h3>
+          <p class="text-xs text-base-content/60 mb-4">
+            An orphan is a managed container with no deployment record. Choose what the
+            reconciler does when it finds one.
+          </p>
+          <div class="space-y-3">
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="sever_only"
+                checked={@sweep_mode == "sever_only"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="sever_only"
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-base-content">Sever only (default)</span>
+                <span class="block text-base-content/60">
+                  Orphans lose their public route and are listed below, but are never deleted automatically.
+                </span>
+              </span>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="armed"
+                checked={@sweep_mode == "armed"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="armed"
+                data-confirm="Arm the orphan sweep? Managed containers without a deployment record will be PERMANENTLY REMOVED after the grace period."
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-error">Armed</span>
+                <span class="block text-base-content/60">
+                  Orphans are deleted after the grace period. Use only when you trust every managed label.
+                </span>
+              </span>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="paused"
+                checked={@sweep_mode == "paused"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="paused"
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-base-content">Paused</span>
+                <span class="block text-base-content/60">
+                  No orphan handling at all — severed routes are not re-enforced. For manual surgery.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          <div :if={@orphans != []} class="mt-4">
+            <h4 class="text-xs font-semibold text-base-content mb-2">Orphaned containers</h4>
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-left text-base-content/50">
+                  <th class="py-1 pr-2">Name</th>
+                  <th class="py-1 pr-2">Container</th>
+                  <th class="py-1 pr-2">Tenant / App</th>
+                  <th class="py-1 pr-2">Detected</th>
+                  <th class="py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={orphan <- @orphans} class="border-t border-base-content/[0.06]">
+                  <td class="py-1 pr-2 font-mono">{orphan.name}</td>
+                  <td class="py-1 pr-2 font-mono text-base-content/50">
+                    {String.slice(orphan.id, 0, 12)}
+                  </td>
+                  <td class="py-1 pr-2">{orphan.tenant || "—"} / {orphan.app || "—"}</td>
+                  <td class="py-1 pr-2 text-base-content/50">
+                    {Calendar.strftime(orphan.detected_at, "%Y-%m-%d %H:%M")}
+                  </td>
+                  <td class="py-1 text-right">
+                    <button
+                      type="button"
+                      phx-click="remove_orphan"
+                      phx-value-id={orphan.id}
+                      data-confirm={"Permanently remove container #{orphan.name}? This cannot be undone."}
+                      class="text-error hover:underline cursor-pointer"
+                    >
+                      Remove now
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <div class="rounded-lg border border-error/20 bg-error/5 p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Re-run Setup Wizard</h3>
           <p class="text-xs text-base-content/60 mb-4">
@@ -1456,25 +1665,16 @@ defmodule HomelabWeb.SettingsLive do
         </div>
         <div class="rounded-lg border border-base-content/[0.08] p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Export Config</h3>
-          <p class="text-xs text-base-content/60 mb-4">Export your configuration (placeholder).</p>
-          <button
-            type="button"
-            class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
-          >
-            Export
-          </button>
-        </div>
-        <div class="rounded-lg border border-base-content/[0.08] p-4">
-          <h3 class="text-sm font-semibold text-base-content mb-2">Import Config</h3>
           <p class="text-xs text-base-content/60 mb-4">
-            Import configuration from file (placeholder).
+            Download this instance's non-secret settings as JSON. Encrypted secrets are excluded.
           </p>
-          <button
-            type="button"
-            class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
+          <a
+            href={~p"/settings/export"}
+            download
+            class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-base-content/70 hover:bg-base-content/5 cursor-pointer"
           >
-            Import
-          </button>
+            <.icon name="hero-arrow-down-tray" class="size-4" /> Export
+          </a>
         </div>
       </div>
     </div>
