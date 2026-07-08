@@ -175,6 +175,16 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.labels["homelab.app"] == "nextcloud"
       assert spec.labels["homelab.deployment_id"] == "42"
       assert spec.labels["homelab.exposure"] == "sso_protected"
+      refute Map.has_key?(spec.labels, "homelab.adopted")
+    end
+
+    test "adopted templates carry the homelab.adopted label" do
+      tenant = build_tenant(%{slug: "friends"})
+      template = build_template(%{slug: "adopted-pg", source: "adopted"})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["homelab.adopted"] == "true"
     end
 
     test "returns error when required env vars are missing" do

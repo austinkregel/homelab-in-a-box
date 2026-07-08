@@ -292,13 +292,21 @@ defmodule Homelab.Deployments.SpecBuilder do
   end
 
   defp build_labels(template, tenant, deployment) do
-    %{
+    base = %{
       "homelab.managed" => "true",
       "homelab.tenant" => tenant.slug,
       "homelab.app" => template.slug,
       "homelab.deployment_id" => to_string(deployment.id),
       "homelab.exposure" => to_string(Access.effective_exposure(deployment))
     }
+
+    # Adopted deployments carry `homelab.adopted=true` so the reconciler's
+    # orphan-sweep exemption holds across restarts/recreates, not just at cutover.
+    if template.source == "adopted" do
+      Map.put(base, "homelab.adopted", "true")
+    else
+      base
+    end
   end
 
   defp validate_required_env(template, overrides) do
