@@ -8,10 +8,10 @@ defmodule Homelab.Deployments.PermanentHome do
   (referenced by name in container specs) AND a plain directory under the managed
   root — which can be backed up off-box (e.g. rsync to the NAS) like any folder.
 
-  The managed root (`config :homelab, :managed_root`) should be on a local disk
-  with headroom; the prod default is `/home/austinkregel/homelab-managed` (the
-  2.6 TB `/dev/sda2`). Live database data must NOT live on a network mount —
-  network FS is for backups, not for running DBs.
+  The managed root should be on a local disk with headroom; it defaults to
+  `<home>/homelab-managed` (i.e. `~/homelab-managed`) and is overridable via
+  `HOMELAB_MANAGED_ROOT` or Settings → Infrastructure. Live database data must
+  NOT live on a network mount — network FS is for backups, not for running DBs.
 
   Migration writes the verified copy INTO `backing_dir/2`; the managed container
   then mounts `volume_name/2`, which resolves to those same bytes.
@@ -21,17 +21,16 @@ defmodule Homelab.Deployments.PermanentHome do
 
   alias Homelab.Docker.Client
 
-  @managed_root_default "/home/austinkregel/homelab-managed"
-
   @doc """
   The disk root where managed volumes physically live. Resolution order: a UI
   override (Settings `managed_root`, read cache-only), then the
-  `HOMELAB_MANAGED_ROOT` env var (via app config), then the built-in default.
+  `HOMELAB_MANAGED_ROOT` env var (via app config), then a runtime default of
+  `~/homelab-managed` (`/root/homelab-managed` in a container).
   """
   def managed_root do
     Homelab.Settings.get_cached("managed_root") ||
       Application.get_env(:homelab, :managed_root) ||
-      @managed_root_default
+      Path.join(System.user_home() || "/root", "homelab-managed")
   end
 
   @doc "The host directory that backs an adopted mount's managed volume."

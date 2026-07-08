@@ -1,5 +1,6 @@
 defmodule Homelab.Deployments.AdoptionDiscoveryTest do
-  use ExUnit.Case, async: true
+  # async: false — pins the global :adoption_root so scope checks are deterministic.
+  use ExUnit.Case, async: false
 
   import Mox
 
@@ -10,6 +11,14 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
   # Route this process's Docker client to the mock (no global state mutated).
   setup do
     Process.put(:docker_client, Homelab.Mocks.DockerClient)
+    Application.put_env(:homelab, :adoption_root, "/srv/homelab")
+    Homelab.Settings.evict("adoption_root")
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :adoption_root)
+      Homelab.Settings.evict("adoption_root")
+    end)
+
     :ok
   end
 
@@ -56,7 +65,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
           "Mounts" => [
             %{
               "Type" => "bind",
-              "Source" => "/home/austinkregel/homelab/appdata/homelab-postgres",
+              "Source" => "/srv/homelab/appdata/homelab-postgres",
               "Destination" => "/var/lib/postgresql/data",
               "RW" => true
             }
@@ -67,7 +76,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
     assert cap.in_scope
     assert [mount] = cap.mounts
     assert mount.type == "bind"
-    assert mount.source == "/home/austinkregel/homelab/appdata/homelab-postgres"
+    assert mount.source == "/srv/homelab/appdata/homelab-postgres"
     assert mount.target == "/var/lib/postgresql/data"
     assert mount.anonymous == false
     assert mount.tier == :preserve
@@ -81,7 +90,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
           "Mounts" => [
             %{
               "Type" => "bind",
-              "Source" => "/home/austinkregel/homelab/scripts/create-mariadb-database.sh",
+              "Source" => "/srv/homelab/scripts/create-mariadb-database.sh",
               "Destination" => "/docker-entrypoint-initdb.d/x.sh",
               "RW" => true
             },
@@ -111,7 +120,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
           "Mounts" => [
             %{
               "Type" => "bind",
-              "Source" => "/home/austinkregel/homelab/appdata/influxdb/config",
+              "Source" => "/srv/homelab/appdata/influxdb/config",
               "Destination" => "/etc/influxdb",
               "RW" => true
             },
@@ -167,7 +176,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
            "Mounts" => [
              %{
                "Type" => "bind",
-               "Source" => "/home/austinkregel/homelab/scripts/init.sh",
+               "Source" => "/srv/homelab/scripts/init.sh",
                "Destination" => "/docker-entrypoint-initdb.d/x.sh",
                "RW" => true
              },
@@ -208,7 +217,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
            "Mounts" => [
              %{
                "Type" => "bind",
-               "Source" => "/home/austinkregel/homelab/appdata/homelab-postgres",
+               "Source" => "/srv/homelab/appdata/homelab-postgres",
                "Destination" => "/var/lib/postgresql/data",
                "RW" => true
              }
@@ -219,8 +228,8 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
       assert {:ok, cap} = AdoptionDiscovery.inspect_container("homelab-postgres")
       assert [mount] = cap.mounts
       assert mount.type == "bind"
-      assert mount.source == "/home/austinkregel/homelab/appdata/homelab-postgres"
-      assert mount.mountpoint == "/home/austinkregel/homelab/appdata/homelab-postgres"
+      assert mount.source == "/srv/homelab/appdata/homelab-postgres"
+      assert mount.mountpoint == "/srv/homelab/appdata/homelab-postgres"
       assert mount.target == "/var/lib/postgresql/data"
       assert mount.anonymous == false
       assert mount.tier == :preserve
@@ -234,7 +243,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
            "Mounts" => [
              %{
                "Type" => "bind",
-               "Source" => "/home/austinkregel/homelab/appdata/homelab-postgres",
+               "Source" => "/srv/homelab/appdata/homelab-postgres",
                "Destination" => "/var/lib/postgresql/data",
                "RW" => true
              },
@@ -263,7 +272,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
            "Mounts" => [
              %{
                "Type" => "bind",
-               "Source" => "/home/austinkregel/homelab/appdata/influxdb/config",
+               "Source" => "/srv/homelab/appdata/influxdb/config",
                "Destination" => "/etc/influxdb",
                "RW" => true
              },
@@ -345,7 +354,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
                "Mounts" => [
                  %{
                    "Type" => "bind",
-                   "Source" => "/home/austinkregel/homelab/appdata/pg",
+                   "Source" => "/srv/homelab/appdata/pg",
                    "Destination" => "/var/lib/postgresql/data",
                    "RW" => true
                  }
@@ -418,7 +427,7 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
                "Mounts" => [
                  %{
                    "Type" => "bind",
-                   "Source" => "/home/austinkregel/homelab/appdata/pg",
+                   "Source" => "/srv/homelab/appdata/pg",
                    "Destination" => "/var/lib/postgresql/data",
                    "RW" => true
                  }

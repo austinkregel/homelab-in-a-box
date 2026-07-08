@@ -26,9 +26,10 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   ## Scope
 
   In-scope = the service has at least one **bind mount whose host path is under
-  the adoption root** (default `/home/austinkregel/homelab`), AND its name is not
-  in the self-exclusion list. Path matching normalizes Docker Desktop's
-  `/host_mnt` prefix so it works on both the Linux prod host and a macOS dev box.
+  the adoption root** (default `<home>/homelab`, i.e. `~/homelab`; override with
+  `HOMELAB_ADOPTION_ROOT` or Settings → Infrastructure), AND its name is not in
+  the self-exclusion list. Path matching normalizes Docker Desktop's `/host_mnt`
+  prefix so it works on both the Linux prod host and a macOS dev box.
 
   We deliberately do NOT use volume-name prefixes for scope: names collide
   (`homelab-iab-*` is the plane's own DB, `homelab-development-*` is a dev
@@ -40,7 +41,6 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   current decisions, not immutable truth.
   """
 
-  @adoption_root_default "/home/austinkregel/homelab"
   @host_mount_prefixes ["/host_mnt"]
 
   # The plane's OWN containers — never candidates for adoption (it manages
@@ -85,8 +85,13 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   def adoption_root do
     Homelab.Settings.get_cached("adoption_root") ||
       Application.get_env(:homelab, :adoption_root) ||
-      @adoption_root_default
+      default_root("homelab")
   end
+
+  # A person-agnostic default derived at runtime: the current user's home +
+  # `homelab` (i.e. `~/homelab`). In a container this is `/root/homelab`, so set
+  # HOMELAB_ADOPTION_ROOT to the real host path there.
+  defp default_root(suffix), do: Path.join(System.user_home() || "/root", suffix)
 
   @doc """
   True if a service (its name + list of mounts) belongs to this homelab and is

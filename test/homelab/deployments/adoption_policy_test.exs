@@ -1,7 +1,20 @@
 defmodule Homelab.Deployments.AdoptionPolicyTest do
-  use ExUnit.Case, async: true
+  # async: false — pins the global :adoption_root so scope checks are deterministic.
+  use ExUnit.Case, async: false
 
   alias Homelab.Deployments.AdoptionPolicy
+
+  setup do
+    Application.put_env(:homelab, :adoption_root, "/srv/homelab")
+    Homelab.Settings.evict("adoption_root")
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :adoption_root)
+      Homelab.Settings.evict("adoption_root")
+    end)
+
+    :ok
+  end
 
   # Mounts as the discovery handler hands them over: %{source:, target:, type:}.
   defp bind(source, target), do: %{source: source, target: target, type: "bind"}
@@ -9,14 +22,14 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
 
   describe "scope" do
     test "a service with a bind under the adoption root is in scope" do
-      mounts = [bind("/home/austinkregel/homelab/appdata/sonarr", "/config")]
+      mounts = [bind("/srv/homelab/appdata/sonarr", "/config")]
       assert AdoptionPolicy.service_in_scope?("sonarr", mounts)
     end
 
     test "mariadb is in scope via its init-script bind even though its data is a named volume" do
       mounts = [
         bind(
-          "/home/austinkregel/homelab/scripts/create-mariadb-database.sh",
+          "/srv/homelab/scripts/create-mariadb-database.sh",
           "/docker-entrypoint-initdb.d/x.sh"
         ),
         vol("homelab_homelab-mariadb", "/var/lib/mysql")
@@ -26,7 +39,7 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     end
 
     test "the plane's own infra is self-excluded even if a path matched" do
-      mounts = [bind("/home/austinkregel/homelab/whatever", "/x")]
+      mounts = [bind("/srv/homelab/whatever", "/x")]
       refute AdoptionPolicy.service_in_scope?("homelab-iab-postgres", mounts)
       refute AdoptionPolicy.service_in_scope?("homelab-in-a-box-postgres-1", mounts)
       refute AdoptionPolicy.service_in_scope?("homelab-traefik", mounts)
@@ -40,13 +53,13 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
 
     test "Docker Desktop /host_mnt prefix is normalized for matching" do
       # adoption_root is the prod default; simulate a mac bind that maps under it.
-      mounts = [bind("/host_mnt/home/austinkregel/homelab/appdata/x", "/config")]
+      mounts = [bind("/host_mnt/srv/homelab/appdata/x", "/config")]
       assert AdoptionPolicy.service_in_scope?("x", mounts)
     end
 
     test "an unrelated dev project is out of scope" do
       refute AdoptionPolicy.service_in_scope?("marketplace-mysql-1", [
-               bind("/host_mnt/Users/austinkregel/src/marketplace/x.sh", "/init.sh"),
+               bind("/host_mnt/srv/other/x.sh", "/init.sh"),
                vol("marketplace_sail-mysql", "/var/lib/mysql")
              ])
     end
@@ -54,19 +67,19 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
 
   describe "default is preserve" do
     test "an unclassified in-scope data dir is preserved" do
-      m = bind("/home/austinkregel/homelab/appdata/homelab-postgres", "/var/lib/postgresql/data")
+      m = bind("/srv/homelab/appdata/homelab-postgres", "/var/lib/postgresql/data")
       assert %{tier: :preserve} = AdoptionPolicy.classify_mount("homelab-postgres", m, [m])
     end
 
     test "gitlab data is preserved" do
-      m = bind("/home/austinkregel/homelab/appdata/gitlab/data", "/var/opt/gitlab")
+      m = bind("/srv/homelab/appdata/gitlab/data", "/var/opt/gitlab")
       assert %{tier: :preserve} = AdoptionPolicy.classify_mount("gitlab", m, [m])
     end
   end
 
   describe "rebuildable rules" do
     test "plex /config is preserved but /transcode is rebuildable" do
-      config = bind("/home/austinkregel/homelab/appdata/plex", "/config")
+      config = bind("/srv/homelab/appdata/plex", "/config")
       transcode = bind("/tmp", "/transcode")
       mounts = [config, transcode]
 
@@ -76,13 +89,13 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
 
     test "influxdb is entirely rebuildable (metric ingestion)" do
       data = %{source: "b375626d", target: "/var/lib/influxdb2", type: "volume"}
-      mounts = [data, bind("/home/austinkregel/homelab/appdata/influxdb/config", "/etc/influxdb")]
+      mounts = [data, bind("/srv/homelab/appdata/influxdb/config", "/etc/influxdb")]
       assert %{tier: :rebuildable} = AdoptionPolicy.classify_mount("influxdb", data, mounts)
     end
 
     test "prometheus TSDB is rebuildable but its config dir is preserved" do
       tsdb = %{source: "245f1cb0", target: "/prometheus", type: "volume"}
-      config = bind("/home/austinkregel/homelab/appdata/prometheus", "/etc/prometheus")
+      config = bind("/srv/homelab/appdata/prometheus", "/etc/prometheus")
       mounts = [tsdb, config]
 
       assert %{tier: :rebuildable} = AdoptionPolicy.classify_mount("prometheus", tsdb, mounts)
@@ -90,7 +103,7 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     end
 
     test "meilisearch is rebuildable AND reset_on_update" do
-      data = bind("/home/austinkregel/homelab/appdata/homelab-meilisearch", "/meili_data")
+      data = bind("/srv/homelab/appdata/homelab-meilisearch", "/meili_data")
 
       assert %{tier: :rebuildable, reset_on_update: true} =
                AdoptionPolicy.classify_mount("homelab-meilisearch", data, [data])
@@ -98,7 +111,7 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
 
     test "model cache named volumes are rebuildable" do
       cache = vol("homelab_hf-cache", "/root/.cache/huggingface")
-      anchor = bind("/home/austinkregel/homelab/appdata/whisper/config", "/config")
+      anchor = bind("/srv/homelab/appdata/whisper/config", "/config")
 
       assert %{tier: :rebuildable} =
                AdoptionPolicy.classify_mount("wyoming-whisper", cache, [cache, anchor])

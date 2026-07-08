@@ -566,8 +566,19 @@ defmodule HomelabWeb.SettingsLiveTest do
 
     test "discovers an in-scope service and previews its migration plan", %{conn: conn} do
       prev = Application.get_env(:homelab, :docker_client)
+      prev_root = Application.get_env(:homelab, :adoption_root)
       Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
-      on_exit(fn -> restore_docker_client(prev) end)
+      Application.put_env(:homelab, :adoption_root, "/srv/homelab")
+      Homelab.Settings.evict("adoption_root")
+
+      on_exit(fn ->
+        restore_docker_client(prev)
+        Homelab.Settings.evict("adoption_root")
+
+        if prev_root,
+          do: Application.put_env(:homelab, :adoption_root, prev_root),
+          else: Application.delete_env(:homelab, :adoption_root)
+      end)
 
       stub(Homelab.Mocks.DockerClient, :get, fn
         "/containers/json?all=true", _opts ->
@@ -584,7 +595,7 @@ defmodule HomelabWeb.SettingsLiveTest do
              "Mounts" => [
                %{
                  "Type" => "bind",
-                 "Source" => "/home/austinkregel/homelab/appdata/pg",
+                 "Source" => "/srv/homelab/appdata/pg",
                  "Destination" => "/var/lib/postgresql/data",
                  "RW" => true
                }
@@ -612,9 +623,11 @@ defmodule HomelabWeb.SettingsLiveTest do
       prev_root = Application.get_env(:homelab, :adoption_root)
       Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
       Application.put_env(:homelab, :adoption_root, "/srv/appdata")
+      Homelab.Settings.evict("adoption_root")
 
       on_exit(fn ->
         restore_docker_client(prev)
+        Homelab.Settings.evict("adoption_root")
 
         if prev_root,
           do: Application.put_env(:homelab, :adoption_root, prev_root),

@@ -242,7 +242,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
             },
             %{
               "container_path" => "/etc/app",
-              "source" => "/home/austinkregel/homelab/app/etc",
+              "source" => "/srv/homelab/app/etc",
               "type" => "bind"
             }
           ]
@@ -254,7 +254,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert %{source: "homelab-managed-pg", target: "/var/lib/postgresql/data", type: "volume"} in spec.volumes
 
-      assert %{source: "/home/austinkregel/homelab/app/etc", target: "/etc/app", type: "bind"} in spec.volumes
+      assert %{source: "/srv/homelab/app/etc", target: "/etc/app", type: "bind"} in spec.volumes
     end
 
     test "still computes a synthetic volume name when no source is given" do

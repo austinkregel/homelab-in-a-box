@@ -8,25 +8,35 @@ defmodule Homelab.Deployments.PermanentHomeTest do
   setup :verify_on_exit!
 
   setup do
-    Application.put_env(:homelab, :managed_root, "/home/austinkregel/homelab-managed")
-    on_exit(fn -> Application.delete_env(:homelab, :managed_root) end)
+    Application.put_env(:homelab, :managed_root, "/srv/homelab-managed")
+    Homelab.Settings.evict("managed_root")
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :managed_root)
+      Homelab.Settings.evict("managed_root")
+    end)
+
     # Route this process's Docker client to the mock (no global state mutated).
     Process.put(:docker_client, Homelab.Mocks.DockerClient)
     :ok
   end
 
-  test "managed_root resolves app-config value, then the built-in default" do
+  test "managed_root resolves app-config value, then a home-derived default" do
     Application.put_env(:homelab, :managed_root, "/mnt/tank/managed")
     Homelab.Settings.evict("managed_root")
     assert PermanentHome.managed_root() == "/mnt/tank/managed"
 
+    # With nothing configured it derives from the current user's home, never a
+    # hardcoded path.
     Application.delete_env(:homelab, :managed_root)
-    assert PermanentHome.managed_root() == "/home/austinkregel/homelab-managed"
+
+    assert PermanentHome.managed_root() ==
+             Path.join(System.user_home() || "/root", "homelab-managed")
   end
 
   test "backing_dir places data under the managed root, slugged" do
     assert PermanentHome.backing_dir("homelab-postgres", "/var/lib/postgresql/data") ==
-             "/home/austinkregel/homelab-managed/homelab-postgres/var-lib-postgresql-data"
+             "/srv/homelab-managed/homelab-postgres/var-lib-postgresql-data"
   end
 
   test "volume_name is deterministic and docker-safe" do
@@ -48,7 +58,7 @@ defmodule Homelab.Deployments.PermanentHomeTest do
     assert spec["DriverOpts"]["type"] == "none"
 
     assert spec["DriverOpts"]["device"] ==
-             "/home/austinkregel/homelab-managed/homelab-mariadb/var-lib-mysql"
+             "/srv/homelab-managed/homelab-mariadb/var-lib-mysql"
 
     assert spec["Labels"]["homelab.managed"] == "true"
     assert spec["Labels"]["homelab.adopted"] == "true"

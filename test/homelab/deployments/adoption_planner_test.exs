@@ -1,5 +1,6 @@
 defmodule Homelab.Deployments.AdoptionPlannerTest do
-  use ExUnit.Case, async: true
+  # async: false — pins the global :adoption_root so scope checks are deterministic.
+  use ExUnit.Case, async: false
 
   import Mox
 
@@ -10,15 +11,23 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
 
   setup do
     Process.put(:docker_client, Homelab.Mocks.DockerClient)
+    Application.put_env(:homelab, :adoption_root, "/srv/homelab")
+    Homelab.Settings.evict("adoption_root")
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :adoption_root)
+      Homelab.Settings.evict("adoption_root")
+    end)
+
     :ok
   end
 
   defp preserve_mount do
     %{
       type: "bind",
-      source: "/home/austinkregel/homelab/appdata/pg",
+      source: "/srv/homelab/appdata/pg",
       target: "/var/lib/postgresql/data",
-      mountpoint: "/home/austinkregel/homelab/appdata/pg",
+      mountpoint: "/srv/homelab/appdata/pg",
       tier: :preserve,
       anonymous: false,
       rw: true,
@@ -53,8 +62,8 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
 
       [target] = backup.resource_handle["targets"]
       assert target["name"] == "homelab-postgres"
-      assert target["path"] == "/home/austinkregel/homelab/appdata/pg"
-      assert target["source"] == "/home/austinkregel/homelab/appdata/pg"
+      assert target["path"] == "/srv/homelab/appdata/pg"
+      assert target["source"] == "/srv/homelab/appdata/pg"
       assert target["container_path"] == "/var/lib/postgresql/data"
       assert target["tier"] == "preserve"
 
@@ -144,7 +153,7 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
              "Mounts" => [
                %{
                  "Type" => "bind",
-                 "Source" => "/home/austinkregel/homelab/appdata/pg",
+                 "Source" => "/srv/homelab/appdata/pg",
                  "Destination" => "/var/lib/postgresql/data",
                  "RW" => true
                }
@@ -162,7 +171,7 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
              "Mounts" => [
                %{
                  "Type" => "bind",
-                 "Source" => "/home/austinkregel/src/app",
+                 "Source" => "/srv/other/app",
                  "Destination" => "/app",
                  "RW" => true
                }
