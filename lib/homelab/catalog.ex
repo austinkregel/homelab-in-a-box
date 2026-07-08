@@ -20,10 +20,6 @@ defmodule Homelab.Catalog do
     end
   end
 
-  def get_app_template!(id) do
-    Repo.get!(AppTemplate, id)
-  end
-
   def get_app_template_by_slug(slug) do
     case Repo.get_by(AppTemplate, slug: slug) do
       nil -> {:error, :not_found}
@@ -45,9 +41,5 @@ defmodule Homelab.Catalog do
 
   def delete_app_template(%AppTemplate{} = template) do
     Repo.delete(template)
-  end
-
-  def change_app_template(%AppTemplate{} = template, attrs \\ %{}) do
-    AppTemplate.changeset(template, attrs)
   end
 end

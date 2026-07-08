@@ -97,6 +97,17 @@ defmodule Homelab.Factory do
     }
   end
 
+  def notification_factory do
+    %Homelab.Notifications.Notification{
+      title: sequence(:notif_title, &"Notification #{&1}"),
+      body: "Something happened",
+      severity: "info",
+      read_at: nil,
+      link: nil,
+      user: build(:user)
+    }
+  end
+
   def service_status_factory do
     %{
       id: sequence(:id, &"svc_#{&1}"),

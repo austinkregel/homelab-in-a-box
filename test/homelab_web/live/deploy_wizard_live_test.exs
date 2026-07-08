@@ -13,6 +13,11 @@ defmodule HomelabWeb.DeployWizardLiveTest do
   setup :verify_on_exit!
 
   setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
+  setup do
     tenant = insert(:tenant)
 
     template =

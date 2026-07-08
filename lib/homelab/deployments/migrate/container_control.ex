@@ -53,4 +53,61 @@ defmodule Homelab.Deployments.Migrate.ContainerControl do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @impl true
+  def env(id) do
+    case Client.get("/containers/#{id}/json") do
+      {:ok, %{"Config" => %{"Env" => env}}} when is_list(env) -> {:ok, parse_env(env)}
+      {:ok, _other} -> {:ok, %{}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def image_env(image) do
+    case Client.get("/images/#{image}/json") do
+      {:ok, %{"Config" => %{"Env" => env}}} when is_list(env) -> {:ok, parse_env(env)}
+      {:ok, _other} -> {:ok, %{}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def port_bindings(id) do
+    case Client.get("/containers/#{id}/json") do
+      {:ok, %{"HostConfig" => %{"PortBindings" => bindings}}} when is_map(bindings) ->
+        {:ok, parse_port_bindings(bindings)}
+
+      {:ok, _other} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # ["KEY=VALUE", ...] -> %{"KEY" => "VALUE"}
+  defp parse_env(list) do
+    Map.new(list, fn pair ->
+      case String.split(pair, "=", parts: 2) do
+        [k, v] -> {k, v}
+        [k] -> {k, ""}
+      end
+    end)
+  end
+
+  # %{"5432/tcp" => [%{"HostPort" => "5432"}]} -> [%{"internal","external","protocol"}]
+  defp parse_port_bindings(bindings) do
+    Enum.flat_map(bindings, fn {port_proto, host_list} ->
+      {port, proto} =
+        case String.split(port_proto, "/", parts: 2) do
+          [p, pr] -> {p, pr}
+          [p] -> {p, "tcp"}
+        end
+
+      for %{"HostPort" => host_port} <- host_list || [], host_port not in [nil, ""] do
+        %{"internal" => port, "external" => host_port, "protocol" => proto}
+      end
+    end)
+  end
 end

@@ -62,4 +62,13 @@ defmodule Homelab.Behaviours.Orchestrator do
   @callback health_check(service_id()) :: {:ok, :healthy | :unhealthy} | {:error, term()}
   @callback logs(service_id(), opts :: keyword()) :: {:ok, String.t()} | {:error, term()}
   @callback stats(service_id()) :: {:ok, map()} | {:error, term()}
+
+  @type network :: %{name: String.t(), driver: String.t(), labels: map()}
+  @type volume :: %{name: String.t(), driver: String.t(), labels: map()}
+
+  @doc "Lists the Docker networks available for wiring workloads to."
+  @callback list_networks() :: {:ok, [network()]} | {:error, term()}
+
+  @doc "Lists the Docker volumes available for mounting into workloads."
+  @callback list_volumes() :: {:ok, [volume()]} | {:error, term()}
 end

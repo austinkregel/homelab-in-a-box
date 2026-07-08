@@ -13,6 +13,8 @@ defmodule HomelabWeb.SettingsLive do
     {"dns", "DNS & Domains", "hero-globe-alt"},
     {"registry", "Registry", "hero-cube"},
     {"registries", "Registries", "hero-archive-box"},
+    {"catalog", "Catalog", "hero-rectangle-stack"},
+    {"import", "Import", "hero-arrow-down-tray"},
     {"users", "Users", "hero-user-group"},
     {"danger_zone", "Danger Zone", "hero-exclamation-triangle"}
   ]
@@ -147,6 +149,78 @@ defmodule HomelabWeb.SettingsLive do
      |> put_flash(:info, "Registry stopped. Data volumes were kept.")}
   end
 
+  def handle_event("run_discovery", _params, socket) do
+    case Homelab.Deployments.AdoptionPlanner.review() do
+      {:ok, services} ->
+        {:noreply,
+         socket
+         |> assign(:import_services, services)
+         |> assign(:import_selected, MapSet.new(Enum.map(services, & &1.name)))
+         |> assign(:import_plan, nil)
+         |> assign(:import_error, nil)}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:import_services, [])
+         |> assign(:import_error, "Discovery failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("toggle_import_service", %{"name" => name}, socket) do
+    selected = socket.assigns.import_selected
+
+    selected =
+      if MapSet.member?(selected, name),
+        do: MapSet.delete(selected, name),
+        else: MapSet.put(selected, name)
+
+    # Selection changed — any previewed plan is now stale.
+    {:noreply, assign(socket, import_selected: selected, import_plan: nil)}
+  end
+
+  def handle_event("preview_plan", _params, socket) do
+    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
+    {:noreply, assign(socket, :import_plan, plan)}
+  end
+
+  def handle_event("select_import_tenant", %{"tenant_id" => id}, socket) do
+    {:noreply, assign(socket, :import_tenant_id, String.to_integer(id))}
+  end
+
+  def handle_event("apply_import", _params, socket) do
+    tenant_id = socket.assigns.import_tenant_id
+    # Rebuild the plan from the current selection so a stale assign can't be applied.
+    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
+
+    cond do
+      is_nil(tenant_id) ->
+        {:noreply, put_flash(socket, :error, "Choose a space to import into first.")}
+
+      plan.services == [] ->
+        {:noreply, put_flash(socket, :error, "Select at least one service to import.")}
+
+      true ->
+        case Homelab.Deployments.apply_adoption_plan(plan, tenant_id: tenant_id) do
+          {:ok, results} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Import started — #{length(results)} release(s) running.")
+             |> assign(
+               :import_result,
+               Enum.map(results, fn r ->
+                 %{service: r.service, deployment_id: r.deployment.id, release_id: r.release.id}
+               end)
+             )
+             |> assign(:import_plan, nil)}
+
+          {:error, {service, reason}} ->
+            {:noreply,
+             put_flash(socket, :error, "Import failed for #{service}: #{inspect(reason)}")}
+        end
+    end
+  end
+
   def handle_event("save_orchestrator", %{"driver" => driver_id}, socket) do
     Settings.set("orchestrator", driver_id)
 
@@ -168,6 +242,47 @@ defmodule HomelabWeb.SettingsLive do
   def handle_event("rerun_setup", _params, socket) do
     Settings.delete("setup_completed")
     {:noreply, push_navigate(socket, to: ~p"/setup")}
+  end
+
+  def handle_event("save_sweep_mode", %{"mode" => mode}, socket)
+      when mode in ~w(sever_only armed paused) do
+    {:ok, _} = Settings.set("reconciler_sweep_mode", mode, category: "reconciler")
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Orphan sweep mode set to #{sweep_mode_label(mode)}.")
+     |> load_section_data("danger_zone")}
+  end
+
+  def handle_event("save_sweep_mode", _params, socket) do
+    {:noreply, put_flash(socket, :error, "Unknown sweep mode.")}
+  end
+
+  def handle_event("toggle_catalog", %{"id" => id}, socket) do
+    enabled = enabled_catalog_ids()
+    updated = if id in enabled, do: List.delete(enabled, id), else: [id | enabled]
+    {:ok, _} = Settings.set("enabled_catalogs", Jason.encode!(updated))
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Catalog sources updated.")
+     |> load_section_data("catalog")}
+  end
+
+  def handle_event("remove_orphan", %{"id" => id}, socket) do
+    socket =
+      case Homelab.Services.Reconciler.remove_orphan(id) do
+        :ok ->
+          put_flash(socket, :info, "Orphaned container removed.")
+
+        {:error, :not_orphaned} ->
+          put_flash(socket, :error, "That container is no longer tracked.")
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Could not remove container: #{inspect(reason)}")
+      end
+
+    {:noreply, load_section_data(socket, "danger_zone")}
   end
 
   def handle_event("save_dns", %{"dns" => params}, socket) do
@@ -342,8 +457,40 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:registry_mirror_host, "proxy-registry.#{base_domain}")
   end
 
+  defp load_section_data(socket, "import") do
+    socket
+    |> assign_new(:import_services, fn -> nil end)
+    |> assign_new(:import_selected, fn -> MapSet.new() end)
+    |> assign_new(:import_plan, fn -> nil end)
+    |> assign_new(:import_error, fn -> nil end)
+    |> assign_new(:import_result, fn -> nil end)
+    |> assign_new(:import_tenant_id, fn ->
+      case socket.assigns.tenants do
+        [%{id: id} | _] -> id
+        _ -> nil
+      end
+    end)
+  end
+
   defp load_section_data(socket, "users") do
     assign(socket, :users, Accounts.list_users())
+  end
+
+  defp load_section_data(socket, "catalog") do
+    all =
+      Enum.map(Homelab.Config.all_application_catalogs(), fn mod ->
+        %{id: mod.driver_id(), name: mod.display_name(), description: mod.description()}
+      end)
+
+    socket
+    |> assign(:all_catalogs, all)
+    |> assign(:enabled_catalogs, enabled_catalog_ids())
+  end
+
+  defp load_section_data(socket, "danger_zone") do
+    socket
+    |> assign(:sweep_mode, Settings.get("reconciler_sweep_mode", "sever_only"))
+    |> assign(:orphans, Homelab.Services.Reconciler.list_orphans())
   end
 
   defp load_section_data(socket, _), do: socket
@@ -356,6 +503,8 @@ defmodule HomelabWeb.SettingsLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-10">
         <%!-- Page header --%>
@@ -416,6 +565,8 @@ defmodule HomelabWeb.SettingsLive do
       "dns" -> render_dns(assigns)
       "registry" -> render_registry(assigns)
       "registries" -> render_registries(assigns)
+      "catalog" -> render_catalog(assigns)
+      "import" -> render_import(assigns)
       "users" -> render_users(assigns)
       "danger_zone" -> render_danger_zone(assigns)
       _ -> render_general(assigns)
@@ -1195,6 +1346,191 @@ defmodule HomelabWeb.SettingsLive do
     """
   end
 
+  defp render_import(assigns) do
+    ~H"""
+    <div class="p-4 space-y-4">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
+          <p class="text-sm text-base-content/50">
+            Discover containers under your existing <code>~/homelab</code>
+            stack and migrate them into managed, plane-owned volumes. Preview the plan, then Apply to run it — your original containers are kept and never deleted.
+          </p>
+        </div>
+        <button
+          type="button"
+          phx-click="run_discovery"
+          class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors cursor-pointer whitespace-nowrap"
+        >
+          {if(@import_services, do: "Re-scan", else: "Discover")}
+        </button>
+      </div>
+
+      <div
+        :if={@import_error}
+        class="rounded-lg bg-error/10 border border-error/20 p-3 text-sm text-error"
+      >
+        {@import_error}
+      </div>
+
+      <p
+        :if={is_nil(@import_services) && is_nil(@import_error)}
+        class="text-sm text-base-content/40 py-6 text-center"
+      >
+        Click <strong>Discover</strong> to scan the running daemon for in-scope services.
+      </p>
+
+      <p :if={@import_services == []} class="text-sm text-base-content/40 py-6 text-center">
+        No in-scope services found under the adoption root.
+      </p>
+
+      <div :if={@import_services not in [nil, []]} class="space-y-2">
+        <div
+          :for={svc <- @import_services}
+          class="rounded-lg border border-base-content/[0.06] p-3"
+        >
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={MapSet.member?(@import_selected, svc.name)}
+              phx-click="toggle_import_service"
+              phx-value-name={svc.name}
+              class="mt-1 rounded"
+            />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-sm text-base-content">{svc.name}</span>
+                <span class="text-[11px] text-base-content/40 font-mono">{svc.image}</span>
+                <span
+                  :if={svc.user}
+                  class="text-[10px] bg-base-200 rounded px-1.5 py-0.5 text-base-content/60"
+                >
+                  uid {svc.user}
+                </span>
+              </div>
+              <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                <span
+                  :if={svc.preserve != []}
+                  class="text-[11px] font-semibold text-success bg-success/15 rounded px-2 py-0.5"
+                >
+                  {length(svc.preserve)} preserve
+                </span>
+                <span
+                  :if={svc.rebuildable != []}
+                  class="text-[11px] font-semibold text-info bg-info/15 rounded px-2 py-0.5"
+                >
+                  {length(svc.rebuildable)} rebuildable
+                </span>
+                <span
+                  :if={svc.out_of_scope != []}
+                  class="text-[11px] font-semibold text-base-content/50 bg-base-content/10 rounded px-2 py-0.5"
+                >
+                  {length(svc.out_of_scope)} out of scope
+                </span>
+              </div>
+              <ul :if={svc.preserve != []} class="mt-1.5 space-y-0.5">
+                <li :for={m <- svc.preserve} class="text-[11px] text-base-content/45 font-mono">
+                  {m.target} ← {m.source}
+                </li>
+              </ul>
+            </div>
+          </label>
+        </div>
+
+        <button
+          type="button"
+          phx-click="preview_plan"
+          disabled={MapSet.size(@import_selected) == 0}
+          class="px-4 py-2 rounded-lg bg-base-200 text-base-content text-sm font-medium hover:bg-base-300 transition-colors cursor-pointer disabled:opacity-50"
+        >
+          Preview migration plan
+        </button>
+      </div>
+
+      <div :if={@import_plan} class="rounded-lg border border-base-content/[0.06] p-4 space-y-3">
+        <h3 class="text-sm font-semibold text-base-content">
+          Plan preview — {length(@import_plan.services)} service(s), not executed
+        </h3>
+        <div>
+          <p class="text-xs font-semibold text-base-content/60 mb-1">
+            Phase 1 — copy while the stack stays up
+          </p>
+          <ol class="list-decimal list-inside space-y-0.5">
+            <li :for={step <- @import_plan.phase1} class="text-[11px] font-mono text-base-content/60">
+              {step.type} {plan_step_detail(step)}
+            </li>
+          </ol>
+        </div>
+        <div>
+          <p class="text-xs font-semibold text-warning/80 mb-1">
+            Phase 2 — cutover (one outage; run only after Phase 1 is verified)
+          </p>
+          <ol class="list-decimal list-inside space-y-0.5">
+            <li :for={step <- @import_plan.phase2} class="text-[11px] font-mono text-base-content/60">
+              {step.type} {plan_step_detail(step)}
+            </li>
+          </ol>
+        </div>
+
+        <div class="flex items-end gap-3 pt-2 border-t border-base-content/[0.06]">
+          <label class="text-xs text-base-content/60">
+            Import into space
+            <select
+              name="tenant_id"
+              phx-change="select_import_tenant"
+              class="mt-1 block rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm"
+            >
+              <option
+                :for={tenant <- @tenants}
+                value={tenant.id}
+                selected={tenant.id == @import_tenant_id}
+              >
+                {tenant.name}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            phx-click="apply_import"
+            disabled={is_nil(@import_tenant_id)}
+            data-confirm="This briefly stops each selected service and cuts it over to a managed container. Originals are kept and never deleted. Continue?"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:bg-primary/90 disabled:opacity-40 cursor-pointer"
+          >
+            Apply — run migration
+          </button>
+        </div>
+      </div>
+
+      <div :if={@import_result} class="rounded-lg border border-success/20 bg-success/5 p-4 space-y-1">
+        <h3 class="text-sm font-semibold text-base-content mb-1">Import started</h3>
+        <p :for={r <- @import_result} class="text-xs">
+          <.link
+            navigate={~p"/deployments/#{r.deployment_id}"}
+            class="text-primary hover:underline font-mono"
+          >
+            {r.service}
+          </.link>
+          <span class="text-base-content/50">— follow progress on its Releases tab</span>
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  defp selected_import_services(socket) do
+    (socket.assigns.import_services || [])
+    |> Enum.filter(&MapSet.member?(socket.assigns.import_selected, &1.name))
+  end
+
+  # A short human summary of a plan step's resource_handle for the preview.
+  defp plan_step_detail(%{resource_handle: %{"container" => c}}), do: "· #{c}"
+
+  defp plan_step_detail(%{resource_handle: %{"targets" => t}}) when is_list(t),
+    do: "· #{length(t)} target(s)"
+
+  defp plan_step_detail(%{resource_handle: %{"service" => s}}), do: "· #{s}"
+  defp plan_step_detail(_), do: ""
+
   defp render_users(assigns) do
     ~H"""
     <div class="p-4">
@@ -1248,11 +1584,158 @@ defmodule HomelabWeb.SettingsLive do
     """
   end
 
+  defp enabled_catalog_ids do
+    case Settings.get("enabled_catalogs") do
+      nil ->
+        ["os_bases"]
+
+      json when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, ids} when is_list(ids) -> ids
+          _ -> ["os_bases"]
+        end
+    end
+  end
+
+  defp render_catalog(assigns) do
+    ~H"""
+    <div class="p-4">
+      <h2 class="text-lg font-semibold text-base-content mb-1">Catalog</h2>
+      <p class="text-xs text-base-content/60 mb-4">
+        Choose which catalog sources appear in the Workbench. Nothing is forced on you —
+        enable only what you want. It's your server.
+      </p>
+      <div class="space-y-3">
+        <label
+          :for={catalog <- @all_catalogs}
+          class="flex items-start gap-3 rounded-lg border border-base-content/[0.08] p-3 cursor-pointer"
+        >
+          <input
+            type="checkbox"
+            checked={catalog.id in @enabled_catalogs}
+            phx-click="toggle_catalog"
+            phx-value-id={catalog.id}
+            class="mt-1"
+          />
+          <span class="text-xs">
+            <span class="font-semibold text-base-content">{catalog.name}</span>
+            <span class="block text-base-content/60">{catalog.description}</span>
+          </span>
+        </label>
+      </div>
+    </div>
+    """
+  end
+
+  defp sweep_mode_label("sever_only"), do: "sever only"
+  defp sweep_mode_label("armed"), do: "armed"
+  defp sweep_mode_label("paused"), do: "paused"
+  defp sweep_mode_label(other), do: other
+
   defp render_danger_zone(assigns) do
     ~H"""
     <div class="p-4">
       <h2 class="text-lg font-semibold text-error mb-4">Danger Zone</h2>
       <div class="space-y-4">
+        <div class="rounded-lg border border-error/20 bg-error/5 p-4">
+          <h3 class="text-sm font-semibold text-base-content mb-2">Orphan sweep</h3>
+          <p class="text-xs text-base-content/60 mb-4">
+            An orphan is a managed container with no deployment record. Choose what the
+            reconciler does when it finds one.
+          </p>
+          <div class="space-y-3">
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="sever_only"
+                checked={@sweep_mode == "sever_only"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="sever_only"
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-base-content">Sever only (default)</span>
+                <span class="block text-base-content/60">
+                  Orphans lose their public route and are listed below, but are never deleted automatically.
+                </span>
+              </span>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="armed"
+                checked={@sweep_mode == "armed"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="armed"
+                data-confirm="Arm the orphan sweep? Managed containers without a deployment record will be PERMANENTLY REMOVED after the grace period."
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-error">Armed</span>
+                <span class="block text-base-content/60">
+                  Orphans are deleted after the grace period. Use only when you trust every managed label.
+                </span>
+              </span>
+            </label>
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input
+                type="radio"
+                name="sweep_mode"
+                value="paused"
+                checked={@sweep_mode == "paused"}
+                phx-click="save_sweep_mode"
+                phx-value-mode="paused"
+                class="mt-1"
+              />
+              <span class="text-xs">
+                <span class="font-semibold text-base-content">Paused</span>
+                <span class="block text-base-content/60">
+                  No orphan handling at all — severed routes are not re-enforced. For manual surgery.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          <div :if={@orphans != []} class="mt-4">
+            <h4 class="text-xs font-semibold text-base-content mb-2">Orphaned containers</h4>
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-left text-base-content/50">
+                  <th class="py-1 pr-2">Name</th>
+                  <th class="py-1 pr-2">Container</th>
+                  <th class="py-1 pr-2">Tenant / App</th>
+                  <th class="py-1 pr-2">Detected</th>
+                  <th class="py-1"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={orphan <- @orphans} class="border-t border-base-content/[0.06]">
+                  <td class="py-1 pr-2 font-mono">{orphan.name}</td>
+                  <td class="py-1 pr-2 font-mono text-base-content/50">
+                    {String.slice(orphan.id, 0, 12)}
+                  </td>
+                  <td class="py-1 pr-2">{orphan.tenant || "—"} / {orphan.app || "—"}</td>
+                  <td class="py-1 pr-2 text-base-content/50">
+                    {Calendar.strftime(orphan.detected_at, "%Y-%m-%d %H:%M")}
+                  </td>
+                  <td class="py-1 text-right">
+                    <button
+                      type="button"
+                      phx-click="remove_orphan"
+                      phx-value-id={orphan.id}
+                      data-confirm={"Permanently remove container #{orphan.name}? This cannot be undone."}
+                      class="text-error hover:underline cursor-pointer"
+                    >
+                      Remove now
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
         <div class="rounded-lg border border-error/20 bg-error/5 p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Re-run Setup Wizard</h3>
           <p class="text-xs text-base-content/60 mb-4">
@@ -1268,25 +1751,16 @@ defmodule HomelabWeb.SettingsLive do
         </div>
         <div class="rounded-lg border border-base-content/[0.08] p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Export Config</h3>
-          <p class="text-xs text-base-content/60 mb-4">Export your configuration (placeholder).</p>
-          <button
-            type="button"
-            class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
-          >
-            Export
-          </button>
-        </div>
-        <div class="rounded-lg border border-base-content/[0.08] p-4">
-          <h3 class="text-sm font-semibold text-base-content mb-2">Import Config</h3>
           <p class="text-xs text-base-content/60 mb-4">
-            Import configuration from file (placeholder).
+            Download this instance's non-secret settings as JSON. Encrypted secrets are excluded.
           </p>
-          <button
-            type="button"
-            class="px-4 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:bg-base-content/5 cursor-pointer"
+          <a
+            href={~p"/settings/export"}
+            download
+            class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-base-content/70 hover:bg-base-content/5 cursor-pointer"
           >
-            Import
-          </button>
+            <.icon name="hero-arrow-down-tray" class="size-4" /> Export
+          </a>
         </div>
       </div>
     </div>

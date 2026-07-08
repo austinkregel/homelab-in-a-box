@@ -169,6 +169,47 @@ defmodule Homelab.Orchestrators.DockerEngine do
     end
   end
 
+  @impl true
+  def list_networks do
+    case Client.get("/networks") do
+      {:ok, networks} when is_list(networks) ->
+        {:ok, Enum.map(networks, &parse_network/1)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def list_volumes do
+    case Client.get("/volumes") do
+      {:ok, %{"Volumes" => volumes}} when is_list(volumes) ->
+        {:ok, Enum.map(volumes, &parse_volume/1)}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_network(net) do
+    %{
+      name: net["Name"] || "",
+      driver: net["Driver"] || "",
+      labels: net["Labels"] || %{}
+    }
+  end
+
+  defp parse_volume(vol) do
+    %{
+      name: vol["Name"] || "",
+      driver: vol["Driver"] || "",
+      labels: vol["Labels"] || %{}
+    }
+  end
+
   # Connects the workload container to its internal networks (bridge nets for
   # DB/service dependencies and the shared mesh). It deliberately does NOT connect
   # Traefik to the deployment network — external reachability is granted later,
@@ -255,7 +296,15 @@ defmodule Homelab.Orchestrators.DockerEngine do
     payload
     |> maybe_put_exposed_ports(exposed_ports)
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
+    |> maybe_put_user(Map.get(spec, :user))
   end
+
+  # Preserve an adopted container's uid:gid. Omitted for greenfield deploys so the
+  # image's default user applies.
+  defp maybe_put_user(payload, user) when is_binary(user) and user != "",
+    do: Map.put(payload, "User", user)
+
+  defp maybe_put_user(payload, _user), do: payload
 
   defp maybe_put_exposed_ports(payload, exposed_ports) when map_size(exposed_ports) > 0 do
     Map.put(payload, "ExposedPorts", exposed_ports)

@@ -175,6 +175,16 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.labels["homelab.app"] == "nextcloud"
       assert spec.labels["homelab.deployment_id"] == "42"
       assert spec.labels["homelab.exposure"] == "sso_protected"
+      refute Map.has_key?(spec.labels, "homelab.adopted")
+    end
+
+    test "adopted templates carry the homelab.adopted label" do
+      tenant = build_tenant(%{slug: "friends"})
+      template = build_template(%{slug: "adopted-pg", source: "adopted"})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["homelab.adopted"] == "true"
     end
 
     test "returns error when required env vars are missing" do
@@ -215,6 +225,64 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.env == %{}
+    end
+  end
+
+  describe "adoption: volume passthrough and user" do
+    test "passes an explicit volume source and type through verbatim" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          volumes: [
+            %{
+              "container_path" => "/var/lib/postgresql/data",
+              "source" => "homelab-managed-pg",
+              "type" => "volume"
+            },
+            %{
+              "container_path" => "/etc/app",
+              "source" => "/home/austinkregel/homelab/app/etc",
+              "type" => "bind"
+            }
+          ]
+        })
+
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert %{source: "homelab-managed-pg", target: "/var/lib/postgresql/data", type: "volume"} in spec.volumes
+
+      assert %{source: "/home/austinkregel/homelab/app/etc", target: "/etc/app", type: "bind"} in spec.volumes
+    end
+
+    test "still computes a synthetic volume name when no source is given" do
+      tenant = build_tenant()
+      template = build_template(%{volumes: [%{"container_path" => "/data"}]})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert [%{source: "homelab-friends-nextcloud-data", target: "/data", type: "volume"}] =
+               spec.volumes
+    end
+
+    test "threads the template user (uid:gid) into the spec" do
+      tenant = build_tenant()
+      template = build_template(%{user: "999:999"})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.user == "999:999"
+    end
+
+    test "spec user is nil when the template has none" do
+      tenant = build_tenant()
+      deployment = build_deployment(tenant, build_template())
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.user == nil
     end
   end
 

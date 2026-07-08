@@ -141,6 +141,66 @@ defmodule Homelab.Deployments.ReleasesTest do
     end
   end
 
+  describe "list_releases_for_deployment/2" do
+    test "returns releases newest-first with steps preloaded" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+
+      # Advance to a terminal status so a second release is allowed.
+      {:ok, _} = Releases.transition_release(release, :running, [:planning, :provisioning])
+
+      {:ok, second} = Releases.plan_release(deployment, [%{type: :app_container}])
+
+      assert [first_listed, second_listed] = Releases.list_releases_for_deployment(deployment.id)
+      assert first_listed.id == second.id
+      assert second_listed.id == release.id
+      refute match?(%Ecto.Association.NotLoaded{}, first_listed.steps)
+    end
+
+    test "respects the limit" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      {:ok, _} = Releases.transition_release(release, :running, [:planning, :provisioning])
+      {:ok, _} = Releases.plan_release(deployment, [%{type: :app_container}])
+
+      assert length(Releases.list_releases_for_deployment(deployment.id, 1)) == 1
+    end
+  end
+
+  describe "PubSub broadcasts" do
+    test "transition_release broadcasts on the deployment topic" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      Phoenix.PubSub.subscribe(Homelab.PubSub, Releases.topic(deployment.id))
+
+      {:ok, _} = Releases.transition_release(release, :provisioning, [:planning])
+      assert_receive {:release_updated, deployment_id}
+      assert deployment_id == deployment.id
+    end
+
+    test "transition_step broadcasts on the deployment topic" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      step = Releases.next_pending_step(release)
+      Phoenix.PubSub.subscribe(Homelab.PubSub, Releases.topic(deployment.id))
+
+      {:ok, _} = Releases.transition_step(step, :completed, [:pending])
+      assert_receive {:release_updated, deployment_id}
+      assert deployment_id == deployment.id
+    end
+
+    test "a no-op transition does not broadcast" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      step = Releases.next_pending_step(release)
+      {:ok, _} = Releases.transition_step(step, :completed, [:pending])
+
+      Phoenix.PubSub.subscribe(Homelab.PubSub, Releases.topic(deployment.id))
+      assert {:noop, _} = Releases.transition_step(step, :failed, [:pending])
+      refute_receive {:release_updated, _}
+    end
+  end
+
   describe "get_or_create_secret/3 (generate-once)" do
     test "generates on first call and reuses thereafter" do
       deployment = insert(:deployment)

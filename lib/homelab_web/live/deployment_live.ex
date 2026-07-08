@@ -35,6 +35,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
       |> assign(:siblings, [])
+      |> assign(:releases, [])
 
     {:ok, socket}
   end
@@ -52,11 +53,20 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:page_title, deployment.app_template.name)
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
+      |> assign(
+        :releases,
+        Homelab.Deployments.Releases.list_releases_for_deployment(deployment.id)
+      )
       |> assign_readiness()
 
     socket =
       if connected?(socket) do
         Phoenix.PubSub.subscribe(Homelab.PubSub, "metrics:update")
+
+        Phoenix.PubSub.subscribe(
+          Homelab.PubSub,
+          Homelab.Deployments.Releases.topic(deployment.id)
+        )
 
         Phoenix.PubSub.subscribe(
           Homelab.PubSub,
@@ -85,6 +95,23 @@ defmodule HomelabWeb.DeploymentLive do
     if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
       deployment = Deployments.get_deployment!(deployment_id)
       {:noreply, socket |> assign(:deployment, deployment) |> assign_readiness()}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:release_updated, deployment_id}, socket) do
+    if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
+      deployment = Deployments.get_deployment!(deployment_id)
+
+      {:noreply,
+       socket
+       |> assign(:deployment, deployment)
+       |> assign(
+         :releases,
+         Homelab.Deployments.Releases.list_releases_for_deployment(deployment_id)
+       )
+       |> assign_readiness()}
     else
       {:noreply, socket}
     end
@@ -378,12 +405,24 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   def handle_event("delete", _params, socket) do
-    Deployments.destroy_deployment(socket.assigns.deployment)
+    case Deployments.destroy_deployment(socket.assigns.deployment) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Deployment deleted.")
+         |> push_navigate(to: ~p"/")}
 
-    {:noreply,
-     socket
-     |> put_flash(:info, "Deployment deleted.")
-     |> push_navigate(to: ~p"/")}
+      {:error, {:undeploy_failed, _reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Could not remove the container, so the deployment was kept. Retry delete once Docker is reachable."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to delete deployment.")}
+    end
   end
 
   defp load_traffic_stats(socket) do
@@ -427,6 +466,8 @@ defmodule HomelabWeb.DeploymentLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div :if={@deployment}>
         <div class="flex items-center gap-2 text-sm text-base-content/40 mb-4">
@@ -456,7 +497,8 @@ defmodule HomelabWeb.DeploymentLive do
                 "logs",
                 "environment",
                 "volumes",
-                "backups"
+                "backups",
+                "releases"
               ]
             }
             type="button"
@@ -1205,6 +1247,56 @@ defmodule HomelabWeb.DeploymentLive do
             </p>
           </div>
         </div>
+
+        <%!-- Releases tab --%>
+        <div :if={@active_tab == "releases"} class="space-y-4">
+          <p :if={@releases == []} class="text-sm text-base-content/50 py-4">
+            No releases yet. Multi-step deploys and adoptions appear here as they run.
+          </p>
+
+          <div
+            :for={release <- @releases}
+            class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
+          >
+            <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+              <div class="flex items-center gap-3">
+                <.status_pill status={release.status} />
+                <span class="text-xs text-base-content/40">
+                  {Calendar.strftime(release.inserted_at, "%b %d, %Y %H:%M")}
+                </span>
+              </div>
+              <span :if={release.lease_owner} class="text-[11px] text-base-content/40 font-mono">
+                lease: {release.lease_owner}
+              </span>
+            </div>
+
+            <div
+              :if={release.error_message}
+              class="px-4 py-2 bg-error/5 text-error text-xs border-b border-error/10"
+            >
+              {release.error_message}
+            </div>
+
+            <ul class="divide-y divide-base-content/5">
+              <li
+                :for={step <- Enum.sort_by(release.steps, & &1.position)}
+                class="flex items-start gap-3 px-4 py-2.5"
+              >
+                <% {icon, icon_class} = step_icon(step.status) %>
+                <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
+                <div class="min-w-0">
+                  <p class="text-sm text-base-content">
+                    {step.type |> to_string() |> String.replace("_", " ")}
+                    <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
+                  </p>
+                  <p :if={step.error_message} class="text-xs text-error mt-0.5">
+                    {step.error_message}
+                  </p>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </div>
       </div>
     </Layouts.app>
     """
@@ -1364,6 +1456,14 @@ defmodule HomelabWeb.DeploymentLive do
   defp pill_classes(:stopped), do: "bg-base-200 text-base-content/50"
   defp pill_classes(:removing), do: "bg-error/10 text-error"
   defp pill_classes(:completed), do: "bg-success/10 text-success"
+  defp pill_classes(:planning), do: "bg-info/10 text-info"
+  defp pill_classes(:provisioning), do: "bg-info/10 text-info"
+  defp pill_classes(:rolling_back), do: "bg-warning/10 text-warning"
+  defp pill_classes(:rolled_back), do: "bg-base-200 text-base-content/50"
+  defp pill_classes(:rollback_failed), do: "bg-error/10 text-error"
+  defp pill_classes(:compensating), do: "bg-warning/10 text-warning"
+  defp pill_classes(:compensated), do: "bg-base-200 text-base-content/50"
+  defp pill_classes(:skipped), do: "bg-base-200 text-base-content/50"
   defp pill_classes(_), do: "bg-base-200 text-base-content/50"
 
   defp dot_color(:running), do: "bg-success"
@@ -1401,5 +1501,22 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_status(:stopped), do: "Stopped"
   defp format_status(:removing), do: "Removing"
   defp format_status(:completed), do: "Completed"
+  defp format_status(:planning), do: "Planning"
+  defp format_status(:provisioning), do: "Provisioning"
+  defp format_status(:rolling_back), do: "Rolling back"
+  defp format_status(:rolled_back), do: "Rolled back"
+  defp format_status(:rollback_failed), do: "Rollback failed"
+  defp format_status(:compensating), do: "Compensating"
+  defp format_status(:compensated), do: "Compensated"
+  defp format_status(:skipped), do: "Skipped"
   defp format_status(status), do: to_string(status)
+
+  # Icon for a release step's status.
+  defp step_icon(:completed), do: {"hero-check-circle", "text-success"}
+  defp step_icon(:running), do: {"hero-arrow-path", "text-info animate-spin"}
+  defp step_icon(:failed), do: {"hero-exclamation-circle", "text-error"}
+  defp step_icon(:compensating), do: {"hero-arrow-uturn-left", "text-warning"}
+  defp step_icon(:compensated), do: {"hero-arrow-uturn-left", "text-base-content/40"}
+  defp step_icon(:skipped), do: {"hero-minus-circle", "text-base-content/40"}
+  defp step_icon(_pending), do: {"hero-clock", "text-base-content/30"}
 end

@@ -10,6 +10,23 @@ defmodule HomelabWeb.CatalogLiveTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+
+    # Pin catalog sources off so the curated tab doesn't auto-load real entries
+    # and race the entries these tests inject via `{:curated_loaded, ...}`.
+    prev = Application.get_env(:homelab, :application_catalogs)
+    Application.put_env(:homelab, :application_catalogs, [])
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:homelab, :application_catalogs, prev),
+        else: Application.delete_env(:homelab, :application_catalogs)
+    end)
+
+    :ok
+  end
+
   setup %{conn: conn} do
     tenant = insert(:tenant)
     template = insert(:app_template)
@@ -27,18 +44,29 @@ defmodule HomelabWeb.CatalogLiveTest do
   end
 
   describe "mount" do
-    test "renders workbench page with the tabs", %{conn: conn} do
+    test "renders the catalog page with the tabs", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
-      assert html =~ "Workbench"
+      assert html =~ "Catalog"
       assert html =~ "Curated"
       assert html =~ "Search"
       assert html =~ "Custom"
     end
 
-    test "build tab is selected by default", %{conn: conn} do
+    test "search tab is selected by default", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/catalog")
-      assert html =~ "Build image"
-      assert html =~ "Author a Dockerfile"
+      assert html =~ "Search images..."
+      refute html =~ "Author a Dockerfile"
+    end
+
+    test "?template= opens the deploy modal for that template", %{conn: conn, template: template} do
+      {:ok, view, html} = live(conn, ~p"/catalog?template=#{template.id}")
+      assert has_element?(view, "#deploy-modal")
+      assert html =~ "Deploy #{template.name}"
+    end
+
+    test "?template= with an unknown id renders normally (no modal)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/catalog?template=999999")
+      refute has_element?(view, "#deploy-modal")
     end
 
     test "assigns initial empty state for search and curated", %{conn: conn} do
@@ -3454,114 +3482,6 @@ defmodule HomelabWeb.CatalogLiveTest do
 
       html = render(view)
       assert html =~ "hero-cube"
-    end
-  end
-
-  describe "build tab" do
-    test "renders the build editor with a default Dockerfile", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      html = render_click(view, "switch_tab", %{"tab" => "build"})
-
-      assert html =~ "Dockerfile"
-      assert html =~ "Build image"
-      assert html =~ "Author a Dockerfile"
-    end
-
-    test "add_build_file adds a new editable file", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      render_click(view, "add_build_file", %{})
-      html = render(view)
-
-      assert html =~ "file1"
-    end
-
-    test "remove_build_file refuses to remove the Dockerfile", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      html = render_click(view, "remove_build_file", %{"index" => "0"})
-
-      assert html =~ "Dockerfile is required"
-    end
-
-    test "build_image requires a name", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      html =
-        view
-        |> element("form[phx-submit='build_image']")
-        |> render_submit(%{"name" => "", "tag" => "latest"})
-
-      assert html =~ "name is required"
-    end
-
-    test "build_image rejects an empty Dockerfile", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      # Blank out the Dockerfile content.
-      render_change(view, "update_build_file", %{"name" => "Dockerfile", "content" => "   "})
-
-      html =
-        view
-        |> element("form[phx-submit='build_image']")
-        |> render_submit(%{"name" => "My App", "tag" => "latest"})
-
-      assert html =~ "Dockerfile" and html =~ "be empty"
-    end
-
-    test "build_image enters the building state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      html =
-        view
-        |> element("form[phx-submit='build_image']")
-        |> render_submit(%{"name" => "My App", "tag" => "latest"})
-
-      assert html =~ "Building..."
-    end
-
-    test "a successful build result opens the deploy modal", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      # Prime build_name as the build_image event would.
-      view
-      |> element("form[phx-submit='build_image']")
-      |> render_submit(%{"name" => "Built App", "tag" => "latest"})
-
-      send(view.pid, {:build_result, {:ok, "homelab-built/built-app:latest"}})
-      _ = :sys.get_state(view.pid)
-      html = render(view)
-
-      assert has_element?(view, "#deploy-modal") or html =~ "Deploy Built App"
-    end
-
-    test "a failed build surfaces the error and leaves the modal closed", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      send(view.pid, {:build_result, {:error, {:build_failed, "no such file: app.js"}}})
-      _ = :sys.get_state(view.pid)
-      html = render(view)
-
-      refute has_element?(view, "#deploy-modal")
-      assert html =~ "no such file: app.js"
-    end
-
-    test "build_log events append to the log pane", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/catalog")
-      render_click(view, "switch_tab", %{"tab" => "build"})
-
-      send(view.pid, {:build_log, %{"stream" => "Step 1/2 : FROM alpine\n"}})
-      _ = :sys.get_state(view.pid)
-      html = render(view)
-
-      assert html =~ "Step 1/2 : FROM alpine"
     end
   end
 end

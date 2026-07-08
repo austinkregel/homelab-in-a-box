@@ -44,10 +44,12 @@ defmodule HomelabWeb.Router do
     live_session :authenticated,
       on_mount: [
         {HomelabWeb.Live.Hooks, :require_setup},
-        {HomelabWeb.Live.Hooks, :require_auth}
+        {HomelabWeb.Live.Hooks, :require_auth},
+        {HomelabWeb.Live.Hooks, :notifications}
       ] do
       live "/", DashboardLive, :index
       live "/catalog", CatalogLive, :index
+      live "/workbench", WorkbenchLive, :index
       live "/deploy/new", DeployWizardLive, :new
       live "/tenants/:id", TenantLive, :show
       live "/deployments/:id", DeploymentLive, :show
@@ -56,6 +58,9 @@ defmodule HomelabWeb.Router do
       live "/activity", ActivityLive, :index
       live "/settings", SettingsLive, :index
     end
+
+    # Non-LiveView routes (controllers can't live inside a live_session).
+    get "/settings/export", SettingsExportController, :export
   end
 
   scope "/api/v1", HomelabWeb.Api.V1 do

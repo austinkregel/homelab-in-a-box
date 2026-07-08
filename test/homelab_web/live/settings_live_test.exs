@@ -290,6 +290,72 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "catalog section" do
+    setup do
+      on_exit(fn -> Homelab.Settings.evict("enabled_catalogs") end)
+      :ok
+    end
+
+    test "lists every catalog source with os_bases enabled by default", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "catalog"})
+
+      assert html =~ "OS bases"
+      assert html =~ "Curated"
+      assert html =~ "Hotio"
+    end
+
+    test "toggling a source persists the enabled list", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "catalog"})
+
+      render_click(view, "toggle_catalog", %{"id" => "curated"})
+
+      assert "curated" in Jason.decode!(Homelab.Settings.get("enabled_catalogs"))
+    end
+  end
+
+  describe "orphan sweep controls" do
+    setup do
+      on_exit(fn -> Homelab.Settings.evict("reconciler_sweep_mode") end)
+      :ok
+    end
+
+    test "renders the sweep-mode control defaulting to sever-only", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      assert html =~ "Orphan sweep"
+      assert html =~ "Sever only"
+      assert html =~ "Armed"
+      assert html =~ "Paused"
+    end
+
+    test "save_sweep_mode persists a valid mode", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      render_click(view, "save_sweep_mode", %{"mode" => "armed"})
+      assert Homelab.Settings.get("reconciler_sweep_mode") == "armed"
+    end
+
+    test "save_sweep_mode rejects an invalid mode", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      html = render_click(view, "save_sweep_mode", %{"mode" => "nonsense"})
+      assert html =~ "Unknown sweep mode"
+      assert Homelab.Settings.get("reconciler_sweep_mode", "sever_only") == "sever_only"
+    end
+
+    test "renders an empty orphan panel when the reconciler is not running", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "danger_zone"})
+      # No orphan rows, no crash — list_orphans/0 returns [] when not running.
+      refute html =~ "Orphaned containers"
+    end
+  end
+
   describe "infrastructure section details" do
     test "shows Docker orchestrator option", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
@@ -453,4 +519,121 @@ defmodule HomelabWeb.SettingsLiveTest do
       assert html =~ "Registry settings saved"
     end
   end
+
+  describe "import section" do
+    test "renders the import section", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "import"})
+
+      assert html =~ "Import existing stack"
+      assert html =~ "Discover"
+    end
+
+    test "shows an error when discovery cannot reach the daemon", %{conn: conn} do
+      # Default test docker_client is the UnavailableClient, so discovery errors.
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html = render_click(view, "run_discovery", %{})
+      assert html =~ "Discovery failed"
+    end
+
+    test "discovers an in-scope service and previews its migration plan", %{conn: conn} do
+      prev = Application.get_env(:homelab, :docker_client)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      on_exit(fn -> restore_docker_client(prev) end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => "999:999"},
+             "HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}},
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/home/austinkregel/homelab/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html = render_click(view, "run_discovery", %{})
+      assert html =~ "homelab-postgres"
+      assert html =~ "preserve"
+
+      html = render_click(view, "preview_plan", %{})
+      assert html =~ "Phase 1"
+      assert html =~ "backup_verify"
+      assert html =~ "adopt_container"
+    end
+
+    test "apply_import creates a deployment + release and shows the started panel", %{conn: conn} do
+      tenant = insert(:tenant)
+
+      prev = Application.get_env(:homelab, :docker_client)
+      prev_root = Application.get_env(:homelab, :adoption_root)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      Application.put_env(:homelab, :adoption_root, "/srv/appdata")
+
+      on_exit(fn ->
+        restore_docker_client(prev)
+
+        if prev_root,
+          do: Application.put_env(:homelab, :adoption_root, prev_root),
+          else: Application.delete_env(:homelab, :adoption_root)
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => "999:999"},
+             "HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}},
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+      render_click(view, "run_discovery", %{})
+      render_click(view, "preview_plan", %{})
+      render_click(view, "select_import_tenant", %{"tenant_id" => to_string(tenant.id)})
+
+      html = render_click(view, "apply_import", %{})
+      assert html =~ "Import started"
+
+      deployment = Homelab.Repo.get_by(Homelab.Deployments.Deployment, tenant_id: tenant.id)
+      assert deployment
+      assert deployment.status == :pending
+      assert Homelab.Deployments.Releases.get_active_release(deployment.id)
+    end
+  end
+
+  defp restore_docker_client(nil), do: Application.delete_env(:homelab, :docker_client)
+  defp restore_docker_client(val), do: Application.put_env(:homelab, :docker_client, val)
 end

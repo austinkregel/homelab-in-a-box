@@ -87,13 +87,37 @@ defmodule Homelab.ConfigTest do
   end
 
   describe "application_catalogs/0" do
+    setup do
+      on_exit(fn -> Homelab.Settings.evict("enabled_catalogs") end)
+      :ok
+    end
+
     test "returns list of catalog modules" do
       catalogs = Config.application_catalogs()
       assert is_list(catalogs)
     end
 
-    test "defaults to empty — the workbench starts bare" do
-      assert Config.application_catalogs() == []
+    test "defaults to only os_bases enabled" do
+      assert Config.application_catalogs() == [Homelab.Catalogs.OsBases]
+    end
+
+    test "honors the enabled_catalogs setting" do
+      {:ok, _} =
+        Homelab.Settings.set("enabled_catalogs", Jason.encode!(["os_bases", "curated"]))
+
+      catalogs = Config.application_catalogs()
+      assert Homelab.Catalogs.OsBases in catalogs
+      assert Homelab.Catalogs.Curated in catalogs
+      refute Homelab.Catalogs.Hotio in catalogs
+    end
+
+    test "all_application_catalogs/0 lists every source regardless of enablement" do
+      all = Config.all_application_catalogs()
+      assert Homelab.Catalogs.OsBases in all
+      assert Homelab.Catalogs.Curated in all
+      assert Homelab.Catalogs.LinuxServer in all
+      assert Homelab.Catalogs.Hotio in all
+      assert Homelab.Catalogs.AwesomeSelfhosted in all
     end
   end
 

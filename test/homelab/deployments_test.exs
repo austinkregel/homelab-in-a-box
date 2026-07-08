@@ -10,6 +10,12 @@ defmodule Homelab.DeploymentsTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  # Default so the DNS push path (read-back before create) works in deploy tests.
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
   describe "list_deployments/0" do
     test "returns all deployments with preloaded associations" do
       insert(:deployment)
@@ -358,6 +364,20 @@ defmodule Homelab.DeploymentsTest do
 
       assert {:ok, _} = Deployments.destroy_deployment(deployment)
       assert {:error, :not_found} = Deployments.get_deployment(deployment.id)
+    end
+
+    test "keeps the row and marks it failed when undeploy fails" do
+      deployment = insert(:deployment, status: :running, external_id: "ext_123")
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "ext_123" -> {:error, :boom} end)
+
+      assert {:error, {:undeploy_failed, :boom}} =
+               Deployments.destroy_deployment(deployment)
+
+      assert {:ok, kept} = Deployments.get_deployment(deployment.id)
+      assert kept.status == :failed
+      assert kept.error_message =~ "Undeploy failed"
     end
   end
 

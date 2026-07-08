@@ -106,6 +106,24 @@ defmodule Homelab.Settings do
     end
   end
 
+  @doc """
+  All non-encrypted settings as a `%{key => value}` map. Encrypted secrets are
+  excluded — they can't round-trip safely and must not leave the instance.
+  """
+  def export_all do
+    SystemSetting
+    |> where([s], s.encrypted == false)
+    |> Repo.all()
+    |> Map.new(fn s -> {s.key, s.value} end)
+  end
+
+  @doc "Removes a key from the ETS cache only (no DB write). For cache control/tests."
+  def evict(key) do
+    init_cache()
+    :ets.delete(@cache_table, key)
+    :ok
+  end
+
   def all_by_category(category) do
     SystemSetting
     |> where([s], s.category == ^category)

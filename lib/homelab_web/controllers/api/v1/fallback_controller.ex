@@ -25,6 +25,13 @@ defmodule HomelabWeb.Api.V1.FallbackController do
     )
   end
 
+  def call(conn, {:error, {:undeploy_failed, reason}}) do
+    conn
+    |> put_status(:bad_gateway)
+    |> put_view(json: HomelabWeb.Api.V1.ErrorJSON)
+    |> render(:error, status: 502, message: "Container removal failed: #{inspect(reason)}")
+  end
+
   def call(conn, {:error, reason}) do
     conn
     |> put_status(:internal_server_error)

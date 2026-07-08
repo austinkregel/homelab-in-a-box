@@ -24,6 +24,7 @@ defmodule HomelabWeb.TenantLive do
           |> assign(:tenants, all_tenants)
           |> assign(:deployments, deployments)
           |> assign(:counts, counts)
+          |> assign(:editing, false)
 
         {:ok, socket}
 
@@ -52,6 +53,55 @@ defmodule HomelabWeb.TenantLive do
   @impl true
   def handle_event("navigate", %{"to" => path}, socket) do
     {:noreply, push_navigate(socket, to: path)}
+  end
+
+  def handle_event("open_edit", _params, socket) do
+    {:noreply, assign(socket, :editing, true)}
+  end
+
+  def handle_event("close_edit", _params, socket) do
+    {:noreply, assign(socket, :editing, false)}
+  end
+
+  def handle_event("save_tenant", %{"name" => name}, socket) do
+    case Tenants.update_tenant(socket.assigns.tenant, %{name: name}) do
+      {:ok, tenant} ->
+        {:noreply,
+         socket
+         |> assign(:tenant, tenant)
+         |> assign(:page_title, tenant.name)
+         |> assign(:editing, false)
+         |> put_flash(:info, "Space renamed.")}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Failed to rename space.")}
+    end
+  end
+
+  def handle_event("delete_tenant", _params, socket) do
+    tenant = socket.assigns.tenant
+
+    case Deployments.list_deployments_for_tenant(tenant.id) do
+      [] ->
+        case Tenants.delete_tenant(tenant) do
+          {:ok, _} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Space \"#{tenant.name}\" deleted.")
+             |> push_navigate(to: ~p"/")}
+
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "Failed to delete space.")}
+        end
+
+      _deployments ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Move or delete this space's deployments before deleting it."
+         )}
+    end
   end
 
   def handle_event("stop", %{"id" => id}, socket) do
@@ -89,12 +139,28 @@ defmodule HomelabWeb.TenantLive do
 
   def handle_event("delete", %{"id" => id}, socket) do
     deployment = Deployments.get_deployment!(String.to_integer(id))
-    Deployments.destroy_deployment(deployment)
 
-    {:noreply,
-     socket
-     |> put_flash(:info, "#{deployment.app_template.name} deleted.")
-     |> assign(:deployments, Deployments.list_deployments_for_tenant(socket.assigns.tenant.id))}
+    case Deployments.destroy_deployment(deployment) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "#{deployment.app_template.name} deleted.")
+         |> assign(
+           :deployments,
+           Deployments.list_deployments_for_tenant(socket.assigns.tenant.id)
+         )}
+
+      {:error, {:undeploy_failed, _reason}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Could not remove #{deployment.app_template.name}'s container, so it was kept. Retry once Docker is reachable."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Failed to delete #{deployment.app_template.name}.")}
+    end
   end
 
   @impl true
@@ -105,6 +171,8 @@ defmodule HomelabWeb.TenantLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-5">
         <div class="flex items-center gap-2 text-sm text-base-content/40">
@@ -125,12 +193,66 @@ defmodule HomelabWeb.TenantLive do
               <p class="text-sm text-base-content/40 font-mono">{@tenant.slug}</p>
             </div>
           </div>
-          <.link
-            navigate={~p"/catalog"}
-            class="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 hover:-translate-y-0.5 transition-all duration-200"
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              phx-click="open_edit"
+              class="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-base-content/10 text-sm font-medium text-base-content/70 hover:bg-base-content/5 cursor-pointer"
+            >
+              <.icon name="hero-pencil-square" class="size-4" /> Edit
+            </button>
+            <button
+              type="button"
+              phx-click="delete_tenant"
+              data-confirm={"Delete the space \"#{@tenant.name}\"? This cannot be undone."}
+              class="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-error/20 text-sm font-medium text-error hover:bg-error/10 cursor-pointer"
+            >
+              <.icon name="hero-trash" class="size-4" /> Delete
+            </button>
+            <.link
+              navigate={~p"/catalog"}
+              class="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-semibold shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 hover:-translate-y-0.5 transition-all duration-200"
+            >
+              <.icon name="hero-plus-mini" class="size-4" /> Deploy App
+            </.link>
+          </div>
+        </div>
+
+        <div
+          :if={@editing}
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          phx-click="close_edit"
+        >
+          <div
+            class="w-full max-w-md rounded-xl bg-base-100 p-6 shadow-xl"
+            phx-click-away="close_edit"
           >
-            <.icon name="hero-plus-mini" class="size-4" /> Deploy App
-          </.link>
+            <h2 class="text-lg font-semibold text-base-content mb-4">Rename space</h2>
+            <form phx-submit="save_tenant" class="space-y-4">
+              <input
+                type="text"
+                name="name"
+                value={@tenant.name}
+                required
+                class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-2 text-sm"
+              />
+              <div class="flex justify-end gap-2">
+                <button
+                  type="button"
+                  phx-click="close_edit"
+                  class="px-4 py-2 rounded-lg text-sm text-base-content/60 hover:bg-base-content/5 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold cursor-pointer"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
 
         <%!-- Summary cards --%>

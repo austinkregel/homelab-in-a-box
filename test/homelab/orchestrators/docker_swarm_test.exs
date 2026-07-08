@@ -24,6 +24,31 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     :ok
   end
 
+  describe "list_networks/0 and list_volumes/0 (mocked daemon)" do
+    test "list_networks maps the response to name/driver/labels" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/networks", _opts ->
+        {:ok, [%{"Name" => "ingress", "Driver" => "overlay", "Labels" => %{}}]}
+      end)
+
+      assert {:ok, [%{name: "ingress", driver: "overlay", labels: %{}}]} =
+               DockerSwarm.list_networks()
+    end
+
+    test "list_volumes maps the response and tolerates a nil list" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok, %{"Volumes" => [%{"Name" => "vol1", "Driver" => "local", "Labels" => %{}}]}}
+      end)
+
+      assert {:ok, [%{name: "vol1", driver: "local", labels: %{}}]} = DockerSwarm.list_volumes()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok, %{"Volumes" => nil}}
+      end)
+
+      assert {:ok, []} = DockerSwarm.list_volumes()
+    end
+  end
+
   # --- Payload Builder Tests (test indirectly through deploy) ---
 
   describe "deploy/1" do
@@ -248,6 +273,22 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       end)
 
       assert {:ok, "svc_abc123"} = DockerSwarm.deploy(spec)
+    end
+
+    test "sets ContainerSpec User when the spec carries one (adopted uid:gid)" do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc1"}}
+      end)
+
+      spec = Map.put(build_spec(), :user, "999:999")
+      assert {:ok, "svc1"} = DockerSwarm.deploy(spec)
+
+      assert_received {:create_body, body}
+      assert get_in(body, ["TaskTemplate", "ContainerSpec", "User"]) == "999:999"
     end
 
     test "falls back to a lowercase id key when ID is absent" do

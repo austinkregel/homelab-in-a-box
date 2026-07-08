@@ -55,8 +55,25 @@ config :homelab, :release_step_handlers, %{
   backup_verify: Homelab.Deployments.ReleaseSteps.BackupVerify,
   quiesce_old: Homelab.Deployments.ReleaseSteps.QuiesceOld,
   migrate_volume: Homelab.Deployments.ReleaseSteps.MigrateCopy,
-  resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld
+  resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld,
+  adopt_credentials: Homelab.Deployments.ReleaseSteps.AdoptCredentials,
+  adopt_volume: Homelab.Deployments.ReleaseSteps.AdoptVolume,
+  adopt_container: Homelab.Deployments.ReleaseSteps.AdoptContainer,
+  verify_integrity: Homelab.Deployments.ReleaseSteps.VerifyIntegrity
 }
+
+# Real migrations copy through a throwaway helper container so uid:gid is
+# preserved and the containerized plane can reach both paths. Tests override
+# this with the in-process LocalCopyEngine (see config/test.exs).
+config :homelab, :migrate_copy_engine, Homelab.Deployments.Migrate.ContainerCopyEngine
+
+# Workbench scratch workspace (disk-backed, no DB). `root` holds per-user
+# upload dirs joined into build contexts; `quota_bytes` caps each; the janitor
+# purges dirs untouched for `ttl_hours`.
+config :homelab, :workbench,
+  root: Path.join(System.tmp_dir!(), "homelab-workbench"),
+  quota_bytes: 1_073_741_824,
+  ttl_hours: 24
 
 # Configure the mailer
 #

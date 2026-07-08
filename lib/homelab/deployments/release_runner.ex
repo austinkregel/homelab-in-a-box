@@ -159,6 +159,13 @@ defmodule Homelab.Deployments.ReleaseRunner do
       :ok ->
         release = Releases.get_release(release_id)
         Releases.transition_release(release, :rolled_back, [:rolling_back])
+
+        notify_admins_rollback(
+          ctx.deployment,
+          "Release rolled back",
+          "The release for #{deployment_label(ctx.deployment)} failed and was rolled back: #{format_error(reason)}"
+        )
+
         {:cancel, {:rolled_back, format_error(reason)}}
 
       {:error, comp_reason} ->
@@ -169,9 +176,39 @@ defmodule Homelab.Deployments.ReleaseRunner do
           error: format_error(comp_reason)
         )
 
+        notify_admins_rollback(
+          ctx.deployment,
+          "Release rollback FAILED",
+          "The release for #{deployment_label(ctx.deployment)} failed AND its rollback failed — manual intervention needed: #{format_error(comp_reason)}"
+        )
+
         {:error, {:rollback_failed, comp_reason}}
     end
   end
+
+  # Surfaces a stuck/rolled-back release to admins via the notification bell.
+  defp notify_admins_rollback(deployment, title, body) do
+    link = deployment && "/deployments/#{deployment.id}"
+
+    for admin <- Homelab.Accounts.list_admins() do
+      Homelab.Notifications.create(%{
+        user_id: admin.id,
+        title: title,
+        body: body,
+        severity: "error",
+        link: link
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp deployment_label(nil), do: "a deployment"
+
+  defp deployment_label(%{app_template: %{name: name}}) when is_binary(name), do: name
+  defp deployment_label(%{id: id}), do: "deployment ##{id}"
 
   defp compensate_all(steps, ctx) do
     Enum.reduce_while(steps, :ok, fn step, _acc ->

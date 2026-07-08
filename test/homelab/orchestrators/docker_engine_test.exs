@@ -130,6 +130,44 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       refute_received {:post_stream, _}
     end
 
+    test "sets the container User when the spec carries one (adopted uid:gid)" do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "cid"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(base_spec(%{user: "999:999"}))
+      assert_received {:create_body, body}
+      assert body["User"] == "999:999"
+    end
+
+    test "omits User when the spec has none" do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "cid"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(base_spec())
+      assert_received {:create_body, body}
+      refute Map.has_key?(body, "User")
+    end
+
     test "builds mounts, ports, exposed ports and healthcheck into the payload" do
       test_pid = self()
 
@@ -895,6 +933,58 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       end)
 
       assert {:error, {:http_error, 500, %{}}} = DockerEngine.deploy(base_spec())
+    end
+  end
+
+  describe "list_networks/0" do
+    test "maps the /networks response to name/driver/labels" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/networks", _opts ->
+        {:ok,
+         [
+           %{"Name" => "bridge", "Driver" => "bridge", "Labels" => %{}},
+           %{"Name" => "homelab-internal", "Driver" => "bridge", "Labels" => %{"a" => "b"}}
+         ]}
+      end)
+
+      assert {:ok, networks} = DockerEngine.list_networks()
+
+      assert networks == [
+               %{name: "bridge", driver: "bridge", labels: %{}},
+               %{name: "homelab-internal", driver: "bridge", labels: %{"a" => "b"}}
+             ]
+    end
+
+    test "propagates an error" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/networks", _opts ->
+        {:error, {:http_error, 500, %{}}}
+      end)
+
+      assert {:error, {:http_error, 500, %{}}} = DockerEngine.list_networks()
+    end
+  end
+
+  describe "list_volumes/0" do
+    test "maps the /volumes response to name/driver/labels" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok,
+         %{
+           "Volumes" => [
+             %{"Name" => "data", "Driver" => "local", "Labels" => %{"k" => "v"}}
+           ],
+           "Warnings" => nil
+         }}
+      end)
+
+      assert {:ok, [%{name: "data", driver: "local", labels: %{"k" => "v"}}]} =
+               DockerEngine.list_volumes()
+    end
+
+    test "returns [] when the daemon reports no volumes" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok, %{"Volumes" => nil}}
+      end)
+
+      assert {:ok, []} = DockerEngine.list_volumes()
     end
   end
 
