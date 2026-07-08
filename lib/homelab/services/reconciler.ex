@@ -11,8 +11,19 @@ defmodule Homelab.Services.Reconciler do
     3. **Enforces the ingress invariant**: Traefik is connected to an
        ingress-published deployment's network *iff* it is `:running`. This is the
        only thing that grants external reachability, and it is idempotent.
-    4. **Sweeps orphans**: a managed container with no deployment record has its
-       public route severed immediately and is removed after a grace period.
+    4. **Sweeps orphans**: a managed container with no deployment record. The
+       action taken depends on the `reconciler_sweep_mode` setting:
+         * `sever_only` (default): sever the public route, notify, and record the
+           orphan — but **never** delete the container. The user reviews and
+           removes orphans by hand under Settings → Danger Zone.
+         * `armed`: sever, then delete the container after a grace period. Arming
+           resets every recorded orphan's grace clock, so nothing is deleted on
+           the very next tick after switching modes.
+         * `paused`: no orphan handling at all (severed routes are not enforced).
+       The orphan registry is in-memory GenServer state (no persistence, no
+       migration): after a restart the next pass re-discovers and re-severs
+       orphans within one interval, and in `armed` mode the grace clock restarts —
+       which is strictly safer than deleting sooner.
     5. **Audits external bypasses**: deployments reachable via host ports (not
        Traefik) raise an admin alert.
 
@@ -30,12 +41,14 @@ defmodule Homelab.Services.Reconciler do
   alias Homelab.Deployments.{Access, ReleaseRunner, Releases, SpecBuilder}
   alias Homelab.Notifications
   alias Homelab.Services.ActivityLog
+  alias Homelab.Settings
 
   @pubsub_topic "deployments:status"
   @default_interval_ms 20_000
   @deploying_timeout_ms 120_000
   @orphan_grace_ms 120_000
   @stable_ms 10_000
+  @sweep_mode_setting "reconciler_sweep_mode"
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -57,6 +70,30 @@ defmodule Homelab.Services.Reconciler do
     end
   end
 
+  @doc """
+  The currently-tracked orphaned containers (managed containers with no
+  deployment record). Safe to call when the reconciler isn't running — returns
+  `[]` — so LiveViews can render without depending on the GenServer.
+  """
+  def list_orphans do
+    case Process.whereis(__MODULE__) do
+      nil -> []
+      pid -> GenServer.call(pid, :list_orphans)
+    end
+  end
+
+  @doc """
+  Manually removes a tracked orphan container now (the only delete path when the
+  sweep is not `armed`). Returns `:ok`, `{:error, :not_orphaned}` for an unknown
+  id, or `{:error, reason}` if the orchestrator undeploy fails.
+  """
+  def remove_orphan(container_id) do
+    case Process.whereis(__MODULE__) do
+      nil -> {:error, :not_orphaned}
+      pid -> GenServer.call(pid, {:remove_orphan, container_id})
+    end
+  end
+
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :interval, cfg(:interval_ms, @default_interval_ms))
@@ -64,6 +101,7 @@ defmodule Homelab.Services.Reconciler do
     state = %{
       interval: interval,
       orphans: %{},
+      sweep_mode: :sever_only,
       flagged_bypass: MapSet.new()
     }
 
@@ -92,6 +130,46 @@ defmodule Homelab.Services.Reconciler do
   @impl true
   def handle_call(:sync, _from, state) do
     {:reply, :ok, reconcile(state)}
+  end
+
+  def handle_call(:list_orphans, _from, state) do
+    orphans =
+      Enum.map(state.orphans, fn {id, entry} ->
+        labels = entry.labels || %{}
+
+        %{
+          id: id,
+          name: entry.name,
+          detected_at: entry.detected_at,
+          tenant: labels["homelab.tenant"],
+          app: labels["homelab.app"]
+        }
+      end)
+
+    {:reply, orphans, state}
+  end
+
+  def handle_call({:remove_orphan, container_id}, _from, state) do
+    case Map.get(state.orphans, container_id) do
+      nil ->
+        {:reply, {:error, :not_orphaned}, state}
+
+      entry ->
+        case Homelab.Config.orchestrator().undeploy(container_id) do
+          :ok ->
+            alert(
+              :error,
+              "Orphaned container removed",
+              "Removed orphaned container #{entry.name} (#{container_id}) manually by an administrator.",
+              nil
+            )
+
+            {:reply, :ok, %{state | orphans: Map.delete(state.orphans, container_id)}}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
   end
 
   defp schedule_tick(interval) when is_integer(interval) do
@@ -239,63 +317,101 @@ defmodule Homelab.Services.Reconciler do
     end)
   end
 
-  # 4. Orphan sweep
+  # 4. Orphan sweep. Behaviour depends on the sweep mode (see moduledoc).
   defp sweep_orphans(state, orchestrator, managed, leased) do
-    desired_ids = MapSet.new(Deployments.list_all_external_ids())
+    mode = sweep_mode()
 
-    orphans =
-      managed
-      |> Enum.reject(&MapSet.member?(desired_ids, &1.id))
-      |> Enum.reject(&adoption_protected?(&1, leased))
+    case mode do
+      :paused ->
+        # Do nothing this pass; retain timestamps (grace resets on arming anyway).
+        %{state | sweep_mode: :paused}
 
-    now = System.monotonic_time(:millisecond)
-    grace = orphan_grace_ms()
+      _ ->
+        desired_ids = MapSet.new(Deployments.list_all_external_ids())
+        existing_ids = MapSet.new(Deployments.list_all_ids())
 
-    new_orphans =
-      Enum.reduce(orphans, %{}, fn container, acc ->
-        case Map.get(state.orphans, container.id) do
-          nil ->
-            sever_orphan_route(orchestrator, container)
+        orphans =
+          managed
+          |> Enum.reject(&MapSet.member?(desired_ids, &1.id))
+          |> Enum.reject(&adoption_protected?(&1, leased, existing_ids))
 
-            alert(
-              :warning,
-              "Orphaned container detected",
-              "Container #{container.name} (#{container.id}) has no deployment record; its public route was severed and it will be removed after the grace period.",
-              nil
-            )
+        now = System.monotonic_time(:millisecond)
+        grace = orphan_grace_ms()
 
-            Map.put(acc, container.id, now)
+        # Arming resets every recorded orphan's grace clock, so an orphan first
+        # seen while in sever-only mode is not deleted on the first armed tick.
+        prior =
+          if mode == :armed and state.sweep_mode != :armed do
+            Map.new(state.orphans, fn {id, entry} -> {id, %{entry | first_seen: now}} end)
+          else
+            state.orphans
+          end
 
-          first_seen when now - first_seen >= grace ->
-            _ = orchestrator.undeploy(container.id)
+        new_orphans =
+          Enum.reduce(orphans, %{}, fn container, acc ->
+            case Map.get(prior, container.id) do
+              nil ->
+                sever_orphan_route(orchestrator, container)
+                alert(:warning, "Orphaned container detected", detected_body(container, mode), nil)
+                Map.put(acc, container.id, orphan_entry(container, now))
 
-            alert(
-              :error,
-              "Orphaned container removed",
-              "Removed orphaned container #{container.name} (#{container.id}) after grace period.",
-              nil
-            )
+              %{first_seen: first_seen} = entry when mode == :armed and now - first_seen >= grace ->
+                _ = orchestrator.undeploy(container.id)
 
-            acc
+                alert(
+                  :error,
+                  "Orphaned container removed",
+                  "Removed orphaned container #{entry.name} (#{container.id}) after grace period.",
+                  nil
+                )
 
-          first_seen ->
-            Map.put(acc, container.id, first_seen)
-        end
-      end)
+                acc
 
-    %{state | orphans: new_orphans}
+              entry ->
+                # Sever-only, or armed-but-still-within-grace: keep tracking it.
+                Map.put(acc, container.id, entry)
+            end
+          end)
+
+        %{state | orphans: new_orphans, sweep_mode: mode}
+    end
+  end
+
+  defp orphan_entry(container, now) do
+    %{
+      first_seen: now,
+      detected_at: DateTime.utc_now(),
+      name: container.name,
+      labels: container.labels || %{}
+    }
+  end
+
+  defp detected_body(container, :armed) do
+    "Container #{container.name} (#{container.id}) has no deployment record; its public route was severed and it will be removed after the grace period."
+  end
+
+  defp detected_body(container, _sever_only) do
+    "Container #{container.name} (#{container.id}) has no deployment record; its public route was severed. It will NOT be removed automatically (sweep mode: sever-only). Review it under Settings → Danger Zone."
+  end
+
+  defp sweep_mode do
+    case Settings.get(@sweep_mode_setting, "sever_only") do
+      "armed" -> :armed
+      "paused" -> :paused
+      _ -> :sever_only
+    end
   end
 
   # Never reap a container that is being adopted (stamped `homelab.adopted=true`)
-  # or that belongs to a deployment with an active release lease — the saga owns
-  # its lifecycle and its external_id may not be persisted yet. Guards against a
-  # data-loss window during adoption cutover.
-  defp adoption_protected?(%{labels: labels}, leased) do
+  # or whose `homelab.deployment_id` label points at a deployment row that still
+  # exists (leased or not) — the saga owns its lifecycle and its external_id may
+  # not be persisted yet. Closes the data-loss window during adoption cutover.
+  defp adoption_protected?(%{labels: labels}, leased, existing_ids) do
     labels = labels || %{}
 
     Map.get(labels, "homelab.adopted") == "true" or
       case Integer.parse(Map.get(labels, "homelab.deployment_id", "")) do
-        {id, ""} -> MapSet.member?(leased, id)
+        {id, ""} -> MapSet.member?(leased, id) or MapSet.member?(existing_ids, id)
         _ -> false
       end
   end
