@@ -263,6 +263,16 @@ defmodule Homelab.Deployments.Releases do
     )
   end
 
+  @doc "Deletes the given secret keys for a deployment (for adoption-credentials rollback)."
+  def delete_secrets(deployment_id, keys) when is_list(keys) do
+    {count, _} =
+      DeploymentSecret
+      |> where([s], s.deployment_id == ^deployment_id and s.key in ^keys)
+      |> Repo.delete_all()
+
+    {:ok, count}
+  end
+
   @doc "All decrypted secrets for a deployment as a `%{key => plaintext}` map."
   def decrypted_secrets(deployment_id) do
     DeploymentSecret
