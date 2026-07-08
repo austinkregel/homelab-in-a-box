@@ -31,6 +31,24 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceResumeTest do
       :ok
     end
 
+    @impl true
+    def env(id) do
+      send(pid(), {:env, id})
+      {:ok, Application.get_env(:homelab, :stub_container_env, %{})}
+    end
+
+    @impl true
+    def image_env(image) do
+      send(pid(), {:image_env, image})
+      {:ok, Application.get_env(:homelab, :stub_image_env, %{})}
+    end
+
+    @impl true
+    def port_bindings(id) do
+      send(pid(), {:port_bindings, id})
+      {:ok, Application.get_env(:homelab, :stub_port_bindings, [])}
+    end
+
     defp pid, do: Application.get_env(:homelab, :quiesce_test_pid)
   end
 

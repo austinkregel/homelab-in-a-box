@@ -41,7 +41,7 @@ defmodule Homelab.Deployments.Migrate.ContainerControlTest do
       end
     end
 
-    test "exports exactly the four lifecycle ops the behaviour requires" do
+    test "exports exactly the ops the behaviour requires" do
       callbacks = MapSet.new(ContainerOps.behaviour_info(:callbacks))
 
       assert callbacks ==
@@ -49,8 +49,58 @@ defmodule Homelab.Deployments.Migrate.ContainerControlTest do
                  restart_policy: 1,
                  set_restart_policy: 2,
                  stop: 2,
-                 start: 1
+                 start: 1,
+                 env: 1,
+                 image_env: 1,
+                 port_bindings: 1
                )
+    end
+  end
+
+  describe "env/1 and image_env/1 (mocked daemon)" do
+    test "parse KEY=VALUE env lists into a map" do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/c1/json", _ -> {:ok, %{"Config" => %{"Env" => ["A=1", "B=x=y", "C="]}}}
+        "/images/img/json", _ -> {:ok, %{"Config" => %{"Env" => ["PATH=/usr/bin"]}}}
+      end)
+
+      assert {:ok, %{"A" => "1", "B" => "x=y", "C" => ""}} = ContainerControl.env("c1")
+      assert {:ok, %{"PATH" => "/usr/bin"}} = ContainerControl.image_env("img")
+    end
+
+    test "return an empty map when env is absent" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _ -> {:ok, %{"Config" => %{}}} end)
+      assert {:ok, %{}} = ContainerControl.env("c1")
+    end
+
+    test "propagate errors" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _ -> {:error, :boom} end)
+      assert {:error, :boom} = ContainerControl.env("c1")
+    end
+  end
+
+  describe "port_bindings/1 (mocked daemon)" do
+    test "maps HostConfig.PortBindings to SpecBuilder shape and drops empty host ports" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/containers/c1/json", _ ->
+        {:ok,
+         %{
+           "HostConfig" => %{
+             "PortBindings" => %{
+               "5432/tcp" => [%{"HostPort" => "5432"}],
+               "9000/udp" => [%{"HostPort" => ""}]
+             }
+           }
+         }}
+      end)
+
+      assert {:ok, bindings} = ContainerControl.port_bindings("c1")
+      assert %{"internal" => "5432", "external" => "5432", "protocol" => "tcp"} in bindings
+      refute Enum.any?(bindings, &(&1["internal"] == "9000"))
+    end
+
+    test "returns [] when there are no port bindings" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _ -> {:ok, %{"HostConfig" => %{}}} end)
+      assert {:ok, []} = ContainerControl.port_bindings("c1")
     end
   end
 
