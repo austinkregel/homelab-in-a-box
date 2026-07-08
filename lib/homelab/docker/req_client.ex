@@ -22,6 +22,21 @@ defmodule Homelab.Docker.ReqClient do
     Application.get_env(:homelab, :docker_socket, @default_socket)
   end
 
+  @doc """
+  Base URL for the Docker Engine API. Defaults to `http://localhost` (over the
+  Unix socket). Tests set `config :homelab, #{inspect(__MODULE__)}, base_url:`
+  to point at a Bypass/Plug server over TCP.
+  """
+  def base_url, do: override_base_url() || "http://localhost"
+
+  defp override_base_url, do: Application.get_env(:homelab, __MODULE__, [])[:base_url]
+
+  @doc "Clears the negotiated API-version cache (persistent_term). For tests/ops."
+  def reset_api_version_cache do
+    :persistent_term.erase({__MODULE__, :api_version})
+    :ok
+  end
+
   @impl true
   def get(path, opts \\ []) do
     request(:get, path, opts)
@@ -36,7 +51,7 @@ defmodule Homelab.Docker.ReqClient do
   @impl true
   def post_stream(path, opts \\ []) do
     version = api_version()
-    url = "http://localhost/#{version}#{path}"
+    url = "#{base_url()}/#{version}#{path}"
 
     base_opts =
       [method: :post, url: url, retry: false, into: :self, receive_timeout: 600_000]
@@ -88,7 +103,7 @@ defmodule Homelab.Docker.ReqClient do
   @impl true
   def build(query, context, on_event) when is_binary(context) and is_function(on_event, 1) do
     version = api_version()
-    url = "http://localhost/#{version}/build?#{query}"
+    url = "#{base_url()}/#{version}/build?#{query}"
 
     base_opts =
       [
@@ -118,7 +133,7 @@ defmodule Homelab.Docker.ReqClient do
   def push(image, opts \\ []) do
     version = api_version()
     {name, tag} = split_image_ref(image)
-    url = "http://localhost/#{version}/images/#{URI.encode(name)}/push?tag=#{URI.encode(tag)}"
+    url = "#{base_url()}/#{version}/images/#{URI.encode(name)}/push?tag=#{URI.encode(tag)}"
 
     base_opts =
       [method: :post, url: url, retry: false, into: :self, receive_timeout: 600_000]
@@ -156,7 +171,8 @@ defmodule Homelab.Docker.ReqClient do
   # Splits "registry.example.com/homelab-built/app:1.2" into {name, tag},
   # defaulting the tag to "latest". A ":" only counts as a tag separator when it
   # appears in the final path segment (registry host ports contain ":").
-  defp split_image_ref(ref) do
+  @doc false
+  def split_image_ref(ref) do
     case String.split(ref, "/") do
       [_ | _] = parts ->
         {prefix, last} = {Enum.drop(parts, -1), List.last(parts)}
@@ -251,7 +267,7 @@ defmodule Homelab.Docker.ReqClient do
   def stream_events(filters \\ %{}, _opts \\ []) do
     version = api_version()
     encoded_filters = Jason.encode!(filters)
-    url = "http://localhost/#{version}/events?filters=#{URI.encode(encoded_filters)}"
+    url = "#{base_url()}/#{version}/events?filters=#{URI.encode(encoded_filters)}"
 
     base_opts =
       [method: :get, url: url, retry: false, into: :self, receive_timeout: :infinity]
@@ -276,7 +292,7 @@ defmodule Homelab.Docker.ReqClient do
 
   defp request(method, path, opts) do
     version = api_version()
-    url = "http://localhost/#{version}#{path}"
+    url = "#{base_url()}/#{version}#{path}"
 
     base_opts =
       [
@@ -318,7 +334,7 @@ defmodule Homelab.Docker.ReqClient do
 
   defp fetch_and_cache_api_version do
     req_opts =
-      [method: :get, url: "http://localhost/version", retry: false]
+      [method: :get, url: "#{base_url()}/version", retry: false]
       |> maybe_add_unix_socket()
 
     version =
@@ -335,9 +351,12 @@ defmodule Homelab.Docker.ReqClient do
   end
 
   defp maybe_add_unix_socket(opts) do
-    case socket_path() do
-      nil -> opts
-      path -> Keyword.put(opts, :unix_socket, path)
+    # When a base_url override is configured (tests point at a TCP Bypass server),
+    # do not attach a Unix socket — the two are mutually exclusive.
+    cond do
+      override_base_url() != nil -> opts
+      socket_path() == nil -> opts
+      true -> Keyword.put(opts, :unix_socket, socket_path())
     end
   end
 end
