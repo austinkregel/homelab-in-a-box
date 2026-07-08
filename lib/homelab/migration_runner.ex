@@ -16,7 +16,18 @@ defmodule Homelab.MigrationRunner do
       Homelab.Bootstrap.maybe_seed_from_env()
     end
 
+    # Tables now exist — warm the settings ETS cache so cache-only reads
+    # (e.g. storage roots) see DB-persisted overrides after a restart. Guarded:
+    # a fresh/unavailable DB (or the test sandbox at boot) must not break boot.
+    _ = warm_settings_cache()
+
     :ignore
+  end
+
+  defp warm_settings_cache do
+    Homelab.Settings.warm_cache()
+  rescue
+    _ -> :ok
   end
 
   def child_spec(opts) do

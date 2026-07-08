@@ -77,8 +77,16 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   @type tier :: :preserve | :rebuildable | :out_of_scope
   @type classification :: %{tier: tier(), reset_on_update: boolean()}
 
-  @doc "The configured host root that delimits in-scope data."
-  def adoption_root, do: Application.get_env(:homelab, :adoption_root, @adoption_root_default)
+  @doc """
+  The host root that delimits in-scope data. Resolution order: a UI override
+  (Settings `adoption_root`, read cache-only), then the `HOMELAB_ADOPTION_ROOT`
+  env var (via app config), then the built-in default.
+  """
+  def adoption_root do
+    Homelab.Settings.get_cached("adoption_root") ||
+      Application.get_env(:homelab, :adoption_root) ||
+      @adoption_root_default
+  end
 
   @doc """
   True if a service (its name + list of mounts) belongs to this homelab and is

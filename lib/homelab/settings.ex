@@ -59,6 +59,20 @@ defmodule Homelab.Settings do
     end
   end
 
+  @doc """
+  Reads a setting from the ETS cache ONLY — never touches the DB. Returns
+  `default` on a miss. Safe to call from hot paths and no-DB contexts; relies on
+  `warm_cache/0` (run at boot) and `set/3` to keep the cache populated.
+  """
+  def get_cached(key, default \\ nil) do
+    init_cache()
+
+    case :ets.lookup(@cache_table, key) do
+      [{^key, value}] -> value
+      [] -> default
+    end
+  end
+
   def set(key, value, opts \\ []) do
     category = Keyword.get(opts, :category, "general")
     encrypt? = Keyword.get(opts, :encrypt, false)

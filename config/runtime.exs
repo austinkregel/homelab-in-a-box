@@ -15,6 +15,19 @@ config :homelab, HomelabWeb.Endpoint,
 bootstrap? = System.get_env("BOOTSTRAP") in ~w(true 1)
 config :homelab, bootstrap: bootstrap?
 
+# Storage roots for the adoption/migration flow. `adoption_root` delimits which
+# of your existing bind mounts are in-scope for discovery; `managed_root` is the
+# local disk where plane-managed volumes physically live. Both default to sane
+# values in their modules and can also be overridden at runtime from
+# Settings -> Infrastructure (which wins over these). Set them to match your host.
+if adoption_root = System.get_env("HOMELAB_ADOPTION_ROOT") do
+  config :homelab, :adoption_root, adoption_root
+end
+
+if managed_root = System.get_env("HOMELAB_MANAGED_ROOT") do
+  config :homelab, :managed_root, managed_root
+end
+
 if bootstrap? do
   config :homelab, :docker_socket, System.get_env("DOCKER_SOCKET", "/var/run/docker.sock")
 

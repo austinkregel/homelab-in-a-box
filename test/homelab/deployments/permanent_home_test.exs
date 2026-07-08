@@ -15,6 +15,15 @@ defmodule Homelab.Deployments.PermanentHomeTest do
     :ok
   end
 
+  test "managed_root resolves app-config value, then the built-in default" do
+    Application.put_env(:homelab, :managed_root, "/mnt/tank/managed")
+    Homelab.Settings.evict("managed_root")
+    assert PermanentHome.managed_root() == "/mnt/tank/managed"
+
+    Application.delete_env(:homelab, :managed_root)
+    assert PermanentHome.managed_root() == "/home/austinkregel/homelab-managed"
+  end
+
   test "backing_dir places data under the managed root, slugged" do
     assert PermanentHome.backing_dir("homelab-postgres", "/var/lib/postgresql/data") ==
              "/home/austinkregel/homelab-managed/homelab-postgres/var-lib-postgresql-data"

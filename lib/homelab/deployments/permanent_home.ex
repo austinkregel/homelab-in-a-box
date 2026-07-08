@@ -23,8 +23,16 @@ defmodule Homelab.Deployments.PermanentHome do
 
   @managed_root_default "/home/austinkregel/homelab-managed"
 
-  @doc "The configured disk root where managed volumes are physically stored."
-  def managed_root, do: Application.get_env(:homelab, :managed_root, @managed_root_default)
+  @doc """
+  The disk root where managed volumes physically live. Resolution order: a UI
+  override (Settings `managed_root`, read cache-only), then the
+  `HOMELAB_MANAGED_ROOT` env var (via app config), then the built-in default.
+  """
+  def managed_root do
+    Homelab.Settings.get_cached("managed_root") ||
+      Application.get_env(:homelab, :managed_root) ||
+      @managed_root_default
+  end
 
   @doc "The host directory that backs an adopted mount's managed volume."
   def backing_dir(service, container_path) do
