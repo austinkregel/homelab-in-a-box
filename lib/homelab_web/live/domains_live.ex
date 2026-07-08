@@ -143,7 +143,27 @@ defmodule HomelabWeb.DomainsLive do
         as: :record
       )
 
-    {:noreply, assign(socket, show_modal: :add_record, modal_form: form)}
+    {:noreply, assign(socket, show_modal: :add_record, modal_form: form, editing_record_id: nil)}
+  end
+
+  def handle_event("open_edit_record", %{"id" => id}, socket) do
+    record = Networking.get_dns_record!(String.to_integer(id))
+
+    form =
+      to_form(
+        %{
+          "dns_zone_id" => to_string(record.dns_zone_id),
+          "name" => record.name,
+          "type" => record.type,
+          "value" => record.value,
+          "ttl" => to_string(record.ttl),
+          "scope" => to_string(record.scope)
+        },
+        as: :record
+      )
+
+    {:noreply,
+     assign(socket, show_modal: :add_record, modal_form: form, editing_record_id: record.id)}
   end
 
   def handle_event("save_record", %{"record" => params}, socket) do
@@ -153,19 +173,28 @@ defmodule HomelabWeb.DomainsLive do
       type: params["type"],
       value: params["value"],
       ttl: String.to_integer(params["ttl"] || "300"),
-      scope: params["scope"],
-      managed: false
+      scope: params["scope"]
     }
 
-    case Networking.create_dns_record(attrs) do
+    result =
+      case socket.assigns[:editing_record_id] do
+        nil ->
+          Networking.create_dns_record(Map.put(attrs, :managed, false))
+
+        id ->
+          Networking.update_dns_record(Networking.get_dns_record!(id), attrs)
+      end
+
+    case result do
       {:ok, record} ->
         Networking.push_record_to_provider(record)
+        verb = if socket.assigns[:editing_record_id], do: "updated", else: "created"
 
         {:noreply,
          socket
          |> load_all_data()
-         |> assign(show_modal: nil, modal_form: nil)
-         |> put_flash(:info, "DNS record created!")}
+         |> assign(show_modal: nil, modal_form: nil, editing_record_id: nil)
+         |> put_flash(:info, "DNS record #{verb}!")}
 
       {:error, changeset} ->
         {:noreply, assign(socket, modal_form: to_form(changeset, as: :record))}
@@ -276,6 +305,8 @@ defmodule HomelabWeb.DomainsLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-8">
         <%!-- Page header --%>
@@ -787,6 +818,14 @@ defmodule HomelabWeb.DomainsLive do
                 </span>
               </td>
               <td class="px-6 py-4 text-right">
+                <button
+                  type="button"
+                  phx-click="open_edit_record"
+                  phx-value-id={record.id}
+                  class="text-xs text-base-content/50 hover:text-base-content transition-colors cursor-pointer mr-3"
+                >
+                  Edit
+                </button>
                 <button
                   type="button"
                   phx-click="delete_record"

@@ -167,6 +167,54 @@ defmodule HomelabWeb.TenantLiveTest do
       html = render_click(view, "delete", %{"id" => to_string(dep.id)})
       assert html =~ "deleted"
     end
+
+    test "delete keeps the deployment and flashes when undeploy fails", %{
+      conn: conn,
+      tenant: tenant,
+      running: dep
+    } do
+      Homelab.Mocks.Orchestrator
+      |> stub(:undeploy, fn _spec -> {:error, :docker_down} end)
+
+      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      html = render_click(view, "delete", %{"id" => to_string(dep.id)})
+      assert html =~ "was kept"
+      assert {:ok, _} = Homelab.Deployments.get_deployment(dep.id)
+    end
+  end
+
+  describe "tenant edit and delete" do
+    test "save_tenant renames the space", %{conn: conn, tenant: tenant} do
+      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      render_click(view, "open_edit", %{})
+      render_submit(view, "save_tenant", %{"name" => "Renamed Space"})
+
+      assert {:ok, updated} = Homelab.Tenants.get_tenant(tenant.id)
+      assert updated.name == "Renamed Space"
+    end
+
+    test "delete is blocked while the space has deployments", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      insert(:deployment, tenant: tenant, app_template: template)
+
+      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      html = render_click(view, "delete_tenant", %{})
+
+      assert html =~ "Move or delete this space"
+      assert {:ok, _} = Homelab.Tenants.get_tenant(tenant.id)
+    end
+
+    test "delete succeeds when the space is empty", %{conn: conn} do
+      empty = insert(:tenant)
+      {:ok, view, _html} = live(conn, ~p"/tenants/#{empty.id}")
+      render_click(view, "delete_tenant", %{})
+
+      assert_redirect(view, ~p"/")
+      assert {:error, :not_found} = Homelab.Tenants.get_tenant(empty.id)
+    end
   end
 
   describe "handle_info :refresh" do

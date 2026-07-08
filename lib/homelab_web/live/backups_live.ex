@@ -60,6 +60,24 @@ defmodule HomelabWeb.BackupsLive do
     end
   end
 
+  def handle_event("delete_backup", %{"backup_id" => backup_id}, socket) do
+    case Backups.get_backup_job(backup_id) do
+      {:ok, %{status: :running}} ->
+        {:noreply, put_flash(socket, :error, "Can't delete a backup while it's running.")}
+
+      {:ok, job} ->
+        Backups.delete_backup_job(job)
+
+        {:noreply,
+         socket
+         |> assign(:backups, Backups.list_backup_jobs())
+         |> put_flash(:info, "Backup job deleted. The remote snapshot was not removed.")}
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "Backup not found.")}
+    end
+  end
+
   defp format_size(nil), do: "—"
   defp format_size(0), do: "—"
   defp format_size(bytes) when bytes < 1024, do: "#{bytes} B"
@@ -80,6 +98,8 @@ defmodule HomelabWeb.BackupsLive do
       page_title={@page_title}
       tenants={@tenants}
       current_user={@current_user}
+      notification_count={@notification_count}
+      notifications={@notifications}
     >
       <div class="space-y-10">
         <%!-- Page header --%>
@@ -198,6 +218,16 @@ defmodule HomelabWeb.BackupsLive do
                     >
                       —
                     </span>
+                    <button
+                      :if={backup.status != :running}
+                      type="button"
+                      phx-click="delete_backup"
+                      phx-value-backup_id={backup.id}
+                      data-confirm="Delete this backup job record? The remote snapshot is not deleted."
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-error hover:bg-error/10 transition-colors cursor-pointer"
+                    >
+                      <.icon name="hero-trash" class="size-3.5" /> Delete
+                    </button>
                   </td>
                 </tr>
               </tbody>

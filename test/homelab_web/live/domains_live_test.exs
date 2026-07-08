@@ -8,6 +8,11 @@ defmodule HomelabWeb.DomainsLiveTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
   setup %{conn: conn} do
     tenant = insert(:tenant)
     template = insert(:app_template)
@@ -200,6 +205,38 @@ defmodule HomelabWeb.DomainsLiveTest do
         |> render_submit()
 
       assert html =~ "DNS record created"
+    end
+
+    test "open_edit_record then save_record updates the record", %{conn: conn, zone: zone} do
+      record =
+        insert(:dns_record, dns_zone: zone, name: "edit-me", type: "A", value: "10.0.0.1")
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _attrs -> {:ok, %{id: "rec_x"}} end)
+      |> stub(:update_record, fn _zone, _id, _attrs -> {:ok, %{id: "rec_x"}} end)
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "switch_tab", %{"tab" => "records"})
+      render_click(view, "open_edit_record", %{"id" => to_string(record.id)})
+
+      html =
+        view
+        |> form("#add-record-form", %{
+          "record" => %{
+            "dns_zone_id" => to_string(zone.id),
+            "name" => "edit-me",
+            "type" => "A",
+            "value" => "10.0.0.2",
+            "ttl" => "600",
+            "scope" => "public"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "DNS record updated"
+      assert {:ok, updated} = Homelab.Networking.get_dns_record(record.id)
+      assert updated.value == "10.0.0.2"
+      assert updated.ttl == 600
     end
 
     test "delete_record deletes a DNS record", %{conn: conn, zone: zone} do

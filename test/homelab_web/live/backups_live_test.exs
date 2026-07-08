@@ -182,6 +182,14 @@ defmodule HomelabWeb.BackupsLiveTest do
       html = render_click(view, "restore", %{"backup_id" => to_string(backup.id)})
       assert html =~ "Backup restore completed" or html =~ "Restore"
     end
+
+    test "delete_backup removes the job record", %{conn: conn, backup: backup} do
+      {:ok, view, _html} = live(conn, ~p"/backups")
+      html = render_click(view, "delete_backup", %{"backup_id" => to_string(backup.id)})
+
+      assert html =~ "Backup job deleted"
+      assert Homelab.Backups.get_backup_job(backup.id) == {:error, :not_found}
+    end
   end
 
   describe "page header" do
