@@ -66,11 +66,33 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert resume.resource_handle["restart_policy"] == "always"
     end
 
-    test "emits the Phase-2 cutover steps" do
+    test "emits the Phase-2 cutover steps with enriched handles" do
       plan = AdoptionPlanner.build_plan([review_fixture()])
 
       assert Enum.map(plan.phase2, & &1.type) ==
                [:adopt_credentials, :adopt_volume, :adopt_container, :verify_integrity]
+
+      [creds, _volume, container, _verify] = plan.phase2
+      assert creds.resource_handle["image"] == "postgres:16.2"
+      assert creds.resource_handle["container"] == "abc123"
+
+      assert container.resource_handle["container"] == "abc123"
+      assert container.resource_handle["restart_policy"] == "always"
+      assert is_list(container.resource_handle["targets"])
+    end
+
+    test "each service carries its own phase1/phase2 and a host-exposure template" do
+      plan = AdoptionPlanner.build_plan([review_fixture()])
+
+      [service] = plan.services
+      assert Enum.map(service.phase1, & &1.type) ==
+               [:backup_verify, :quiesce_old, :migrate_volume, :resume_old]
+
+      assert Enum.map(service.phase2, & &1.type) ==
+               [:adopt_credentials, :adopt_volume, :adopt_container, :verify_integrity]
+
+      assert service.template_attrs.exposure_mode == :host
+      assert service.template_attrs.description =~ "Adopted from existing container"
     end
 
     test "proposes a managed template referencing the permanent-home volume + captured user" do

@@ -32,7 +32,13 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     services = Enum.map(selected_reviews, &plan_service/1)
 
     %{
-      services: Enum.map(services, & &1.service),
+      # Each service carries its own ordered phase1/phase2 so the apply path can
+      # plan one release per service; the top-level flat lists stay for the
+      # preview UI (and existing aggregate tests).
+      services:
+        Enum.map(services, fn s ->
+          Map.merge(s.service, %{phase1: s.phase1, phase2: s.phase2})
+        end),
       phase1: Enum.flat_map(services, & &1.phase1),
       phase2: Enum.flat_map(services, & &1.phase2)
     }
@@ -68,6 +74,10 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       user: review.user,
       source: "adopted",
       source_id: name,
+      description: "Adopted from existing container #{name}",
+      # Host exposure so the cutover container can bind the original's host ports
+      # (spec_builder only binds host ports in :host mode).
+      exposure_mode: :host,
       volumes: Enum.map(review.preserve, &managed_volume(name, &1))
     }
 
@@ -84,10 +94,18 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     phase2 = [
       %{
         type: :adopt_credentials,
-        resource_handle: %{"container" => container, "service" => name}
+        resource_handle: %{"container" => container, "image" => review.image, "service" => name}
       },
       %{type: :adopt_volume, resource_handle: %{"targets" => targets}},
-      %{type: :adopt_container, resource_handle: %{"service" => name}},
+      %{
+        type: :adopt_container,
+        resource_handle: %{
+          "container" => container,
+          "restart_policy" => review.restart_policy,
+          "targets" => targets,
+          "service" => name
+        }
+      },
       %{type: :verify_integrity, resource_handle: %{"service" => name}}
     ]
 
