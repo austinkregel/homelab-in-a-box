@@ -76,6 +76,15 @@ defmodule Homelab.SettingsTest do
   end
 
   describe "setup_completed?/0 and mark_setup_completed/0" do
+    # The ETS settings cache is process-global and not transactional, so a test
+    # that marks setup complete would leak "setup_completed" => "true" into a
+    # later test on an unlucky seed. Evict it around each test here.
+    setup do
+      Settings.evict("setup_completed")
+      on_exit(fn -> Settings.evict("setup_completed") end)
+      :ok
+    end
+
     test "returns false when setup not completed" do
       refute Settings.setup_completed?()
     end
