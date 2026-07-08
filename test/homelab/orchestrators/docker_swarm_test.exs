@@ -24,6 +24,31 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     :ok
   end
 
+  describe "list_networks/0 and list_volumes/0 (mocked daemon)" do
+    test "list_networks maps the response to name/driver/labels" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/networks", _opts ->
+        {:ok, [%{"Name" => "ingress", "Driver" => "overlay", "Labels" => %{}}]}
+      end)
+
+      assert {:ok, [%{name: "ingress", driver: "overlay", labels: %{}}]} =
+               DockerSwarm.list_networks()
+    end
+
+    test "list_volumes maps the response and tolerates a nil list" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok, %{"Volumes" => [%{"Name" => "vol1", "Driver" => "local", "Labels" => %{}}]}}
+      end)
+
+      assert {:ok, [%{name: "vol1", driver: "local", labels: %{}}]} = DockerSwarm.list_volumes()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn "/volumes", _opts ->
+        {:ok, %{"Volumes" => nil}}
+      end)
+
+      assert {:ok, []} = DockerSwarm.list_volumes()
+    end
+  end
+
   # --- Payload Builder Tests (test indirectly through deploy) ---
 
   describe "deploy/1" do

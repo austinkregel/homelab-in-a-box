@@ -64,7 +64,8 @@ defmodule Homelab.Application do
         Homelab.Services.CertManager,
         Homelab.Services.CatalogSyncer,
         Homelab.Services.MetricsCollector,
-        Homelab.Services.RegistrarSyncer
+        Homelab.Services.RegistrarSyncer,
+        Homelab.Services.WorkbenchJanitor
       ]
     else
       []

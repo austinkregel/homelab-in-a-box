@@ -44,6 +44,28 @@ defmodule Homelab.Catalog.ImageBuilderTest do
       assert_received {:event, %{"stream" => _}}
     end
 
+    test "copies %{name:, path:} entries into the context alongside text files" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :build, fn _query, context, _on_event ->
+        send(test_pid, {:context, context})
+        :ok
+      end)
+
+      # A file already on disk (e.g. a Workbench upload) referenced by path.
+      src = Path.join(System.tmp_dir!(), "ib-src-#{System.unique_integer([:positive])}.bin")
+      File.write!(src, "binary-ish payload")
+      on_exit(fn -> File.rm(src) end)
+
+      files = [dockerfile(), %{name: "payload.bin", path: src}]
+
+      assert {:ok, "homelab-built/mixed:latest"} =
+               ImageBuilder.build(files, [tag: "homelab-built/mixed:latest"], fn _ -> :ok end)
+
+      # The tar was produced (gzip magic) — the path entry was staged without error.
+      assert_received {:context, <<0x1F, 0x8B, _::binary>>}
+    end
+
     test "propagates a daemon build failure" do
       stub(Homelab.Mocks.DockerClient, :build, fn _q, _c, _f ->
         {:error, {:build_failed, "no such file"}}

@@ -169,6 +169,47 @@ defmodule Homelab.Orchestrators.DockerEngine do
     end
   end
 
+  @impl true
+  def list_networks do
+    case Client.get("/networks") do
+      {:ok, networks} when is_list(networks) ->
+        {:ok, Enum.map(networks, &parse_network/1)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def list_volumes do
+    case Client.get("/volumes") do
+      {:ok, %{"Volumes" => volumes}} when is_list(volumes) ->
+        {:ok, Enum.map(volumes, &parse_volume/1)}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp parse_network(net) do
+    %{
+      name: net["Name"] || "",
+      driver: net["Driver"] || "",
+      labels: net["Labels"] || %{}
+    }
+  end
+
+  defp parse_volume(vol) do
+    %{
+      name: vol["Name"] || "",
+      driver: vol["Driver"] || "",
+      labels: vol["Labels"] || %{}
+    }
+  end
+
   # Connects the workload container to its internal networks (bridge nets for
   # DB/service dependencies and the shared mesh). It deliberately does NOT connect
   # Traefik to the deployment network — external reachability is granted later,

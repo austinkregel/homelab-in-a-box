@@ -63,6 +63,17 @@ config :homelab,
   start_services: false,
   registries: [Homelab.Registries.DockerHub]
 
+# Point the Workbench workspace at an isolated tmp dir per test partition so
+# tests never touch a real user's scratch space.
+config :homelab, :workbench,
+  root:
+    Path.join(
+      System.tmp_dir!(),
+      "homelab-workbench-test#{System.get_env("MIX_TEST_PARTITION")}"
+    ),
+  quota_bytes: 1_073_741_824,
+  ttl_hours: 24
+
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
