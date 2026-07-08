@@ -57,6 +57,12 @@ defmodule HomelabWeb.Layouts do
             <.sidebar_link
               path={~p"/catalog"}
               icon="hero-rectangle-stack"
+              label="Catalog"
+              active={@page_title == "Catalog"}
+            />
+            <.sidebar_link
+              path={~p"/workbench"}
+              icon="hero-wrench-screwdriver"
               label="Workbench"
               active={@page_title == "Workbench"}
             />

@@ -67,6 +67,14 @@ config :homelab, :release_step_handlers, %{
 # this with the in-process LocalCopyEngine (see config/test.exs).
 config :homelab, :migrate_copy_engine, Homelab.Deployments.Migrate.ContainerCopyEngine
 
+# Workbench scratch workspace (disk-backed, no DB). `root` holds per-user
+# upload dirs joined into build contexts; `quota_bytes` caps each; the janitor
+# purges dirs untouched for `ttl_hours`.
+config :homelab, :workbench,
+  root: Path.join(System.tmp_dir!(), "homelab-workbench"),
+  quota_bytes: 1_073_741_824,
+  ttl_hours: 24
+
 # Configure the mailer
 #
 # By default it uses the "Local" adapter which stores the emails

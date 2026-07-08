@@ -49,6 +49,7 @@ defmodule HomelabWeb.Router do
       ] do
       live "/", DashboardLive, :index
       live "/catalog", CatalogLive, :index
+      live "/workbench", WorkbenchLive, :index
       live "/deploy/new", DeployWizardLive, :new
       live "/tenants/:id", TenantLive, :show
       live "/deployments/:id", DeploymentLive, :show

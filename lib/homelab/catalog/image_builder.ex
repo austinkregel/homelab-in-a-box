@@ -19,8 +19,9 @@ defmodule Homelab.Catalog.ImageBuilder do
   alias Homelab.Docker.RegistryAuth
 
   @doc """
-  Builds an image from `files` (a list of `%{name: String.t(), content: String.t()}`,
-  one of which must be `"Dockerfile"`) tagged as `opts[:tag]`.
+  Builds an image from `files` tagged as `opts[:tag]`. Each entry is either
+  `%{name:, content:}` (text written directly) or `%{name:, path:}` (a file on
+  disk copied in); exactly one entry must be named `"Dockerfile"`.
 
   Forwards every build event to `on_event` and returns `{:ok, tag}` on success
   or `{:error, reason}` on failure.
@@ -120,11 +121,19 @@ defmodule Homelab.Catalog.ImageBuilder do
     end
   end
 
+  # Writes each context entry into the staging dir. Two entry shapes are
+  # supported: `%{name:, content:}` (text authored in the editor, written
+  # directly) and `%{name:, path:}` (a file already on disk — e.g. a Workbench
+  # upload — copied in via `File.cp!`).
   defp write_context(root, files) do
-    Enum.each(files, fn %{name: name, content: content} ->
-      path = Path.join(root, name)
-      File.mkdir_p!(Path.dirname(path))
-      File.write!(path, content || "")
+    Enum.each(files, fn file ->
+      dest = Path.join(root, file.name)
+      File.mkdir_p!(Path.dirname(dest))
+
+      case file do
+        %{path: src} when is_binary(src) -> File.cp!(src, dest)
+        %{content: content} -> File.write!(dest, content || "")
+      end
     end)
   end
 end
