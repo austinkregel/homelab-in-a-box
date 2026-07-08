@@ -53,13 +53,20 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:page_title, deployment.app_template.name)
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
-      |> assign(:releases, Homelab.Deployments.Releases.list_releases_for_deployment(deployment.id))
+      |> assign(
+        :releases,
+        Homelab.Deployments.Releases.list_releases_for_deployment(deployment.id)
+      )
       |> assign_readiness()
 
     socket =
       if connected?(socket) do
         Phoenix.PubSub.subscribe(Homelab.PubSub, "metrics:update")
-        Phoenix.PubSub.subscribe(Homelab.PubSub, Homelab.Deployments.Releases.topic(deployment.id))
+
+        Phoenix.PubSub.subscribe(
+          Homelab.PubSub,
+          Homelab.Deployments.Releases.topic(deployment.id)
+        )
 
         Phoenix.PubSub.subscribe(
           Homelab.PubSub,
@@ -100,7 +107,10 @@ defmodule HomelabWeb.DeploymentLive do
       {:noreply,
        socket
        |> assign(:deployment, deployment)
-       |> assign(:releases, Homelab.Deployments.Releases.list_releases_for_deployment(deployment_id))
+       |> assign(
+         :releases,
+         Homelab.Deployments.Releases.list_releases_for_deployment(deployment_id)
+       )
        |> assign_readiness()}
     else
       {:noreply, socket}

@@ -42,10 +42,12 @@ defmodule Homelab.Workbench do
         names
         |> Enum.map(fn name ->
           path = Path.join(dir, name)
-          size = case File.stat(path) do
-            {:ok, %File.Stat{size: size}} -> size
-            _ -> 0
-          end
+
+          size =
+            case File.stat(path) do
+              {:ok, %File.Stat{size: size}} -> size
+              _ -> 0
+            end
 
           %{name: name, size: size, path: path}
         end)

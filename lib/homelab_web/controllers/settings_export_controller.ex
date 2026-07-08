@@ -9,8 +9,7 @@ defmodule HomelabWeb.SettingsExportController do
     payload = %{
       "exported_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "settings" => Homelab.Settings.export_all(),
-      "enabled_catalogs" =>
-        Enum.map(Homelab.Config.application_catalogs(), & &1.driver_id())
+      "enabled_catalogs" => Enum.map(Homelab.Config.application_catalogs(), & &1.driver_id())
     }
 
     conn

@@ -589,6 +589,7 @@ defmodule HomelabWeb.SettingsLiveTest do
 
       on_exit(fn ->
         restore_docker_client(prev)
+
         if prev_root,
           do: Application.put_env(:homelab, :adoption_root, prev_root),
           else: Application.delete_env(:homelab, :adoption_root)

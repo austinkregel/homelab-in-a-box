@@ -38,8 +38,12 @@ defmodule Homelab.Services.WorkbenchJanitorTest do
 
   defp eventually(fun, retries \\ 50) do
     cond do
-      fun.() -> true
-      retries == 0 -> false
+      fun.() ->
+        true
+
+      retries == 0 ->
+        false
+
       true ->
         Process.sleep(20)
         eventually(fun, retries - 1)

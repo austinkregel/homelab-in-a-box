@@ -85,6 +85,7 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       plan = AdoptionPlanner.build_plan([review_fixture()])
 
       [service] = plan.services
+
       assert Enum.map(service.phase1, & &1.type) ==
                [:backup_verify, :quiesce_old, :migrate_volume, :resume_old]
 

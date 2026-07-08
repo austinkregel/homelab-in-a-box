@@ -90,7 +90,12 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
       )
 
     deployment =
-      insert(:deployment, tenant: tenant, app_template: template, status: :pending, external_id: nil)
+      insert(:deployment,
+        tenant: tenant,
+        app_template: template,
+        status: :pending,
+        external_id: nil
+      )
 
     targets = [
       %{
@@ -152,7 +157,11 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
     deployment: deployment
   } do
     test_pid = self()
-    stub(Homelab.Mocks.Orchestrator, :undeploy, fn id -> send(test_pid, {:undeployed, id}); :ok end)
+
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn id ->
+      send(test_pid, {:undeployed, id})
+      :ok
+    end)
 
     handle = %Homelab.Deployments.ReleaseStep{
       resource_handle: %{

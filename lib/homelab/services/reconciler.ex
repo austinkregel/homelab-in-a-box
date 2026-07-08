@@ -352,10 +352,18 @@ defmodule Homelab.Services.Reconciler do
             case Map.get(prior, container.id) do
               nil ->
                 sever_orphan_route(orchestrator, container)
-                alert(:warning, "Orphaned container detected", detected_body(container, mode), nil)
+
+                alert(
+                  :warning,
+                  "Orphaned container detected",
+                  detected_body(container, mode),
+                  nil
+                )
+
                 Map.put(acc, container.id, orphan_entry(container, now))
 
-              %{first_seen: first_seen} = entry when mode == :armed and now - first_seen >= grace ->
+              %{first_seen: first_seen} = entry
+              when mode == :armed and now - first_seen >= grace ->
                 _ = orchestrator.undeploy(container.id)
 
                 alert(

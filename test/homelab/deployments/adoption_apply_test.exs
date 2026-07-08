@@ -16,7 +16,13 @@ defmodule Homelab.Deployments.AdoptionApplyTest do
       restart_policy: "always",
       container_id: "old-#{name}",
       preserve: [
-        %{type: "bind", source: "/data", target: "/var/lib/postgresql/data", mountpoint: "/data", tier: :preserve}
+        %{
+          type: "bind",
+          source: "/data",
+          target: "/var/lib/postgresql/data",
+          mountpoint: "/data",
+          tier: :preserve
+        }
       ],
       rebuildable: [],
       out_of_scope: []

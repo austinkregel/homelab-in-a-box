@@ -11,7 +11,9 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
     def ensure_volume(service, container_path) do
       name = PermanentHome.volume_name(service, container_path)
       send(test_pid(), {:ensure, name})
-      {:ok, %{name: name, device: PermanentHome.backing_dir(service, container_path), created: true}}
+
+      {:ok,
+       %{name: name, device: PermanentHome.backing_dir(service, container_path), created: true}}
     end
 
     @impl true

@@ -19,13 +19,37 @@ defmodule Homelab.Deployments.AdoptionReleaseTest do
   defmodule StubOps do
     @behaviour Homelab.Deployments.Migrate.ContainerOps
     @impl true
-    def restart_policy(id), do: (send(pid(), {:restart_policy, id}); {:ok, "always"})
+    def restart_policy(id),
+      do:
+        (
+          send(pid(), {:restart_policy, id})
+          {:ok, "always"}
+        )
+
     @impl true
-    def set_restart_policy(id, name), do: (send(pid(), {:set_restart_policy, id, name}); :ok)
+    def set_restart_policy(id, name),
+      do:
+        (
+          send(pid(), {:set_restart_policy, id, name})
+          :ok
+        )
+
     @impl true
-    def stop(id, _t), do: (send(pid(), {:stop, id}); :ok)
+    def stop(id, _t),
+      do:
+        (
+          send(pid(), {:stop, id})
+          :ok
+        )
+
     @impl true
-    def start(id), do: (send(pid(), {:start, id}); :ok)
+    def start(id),
+      do:
+        (
+          send(pid(), {:start, id})
+          :ok
+        )
+
     @impl true
     def env(_id), do: {:ok, %{"POSTGRES_PASSWORD" => "s3cret", "PATH" => "/usr/bin"}}
     @impl true
@@ -39,7 +63,8 @@ defmodule Homelab.Deployments.AdoptionReleaseTest do
     @behaviour Homelab.Deployments.Migrate.VolumeRegistrar
     @impl true
     def ensure_volume(service, container_path) do
-      {:ok, %{name: PermanentHome.volume_name(service, container_path), created: true, device: "x"}}
+      {:ok,
+       %{name: PermanentHome.volume_name(service, container_path), created: true, device: "x"}}
     end
 
     @impl true
@@ -107,12 +132,18 @@ defmodule Homelab.Deployments.AdoptionReleaseTest do
     tenant = insert(:tenant, slug: "acme")
 
     template =
-      insert(:app_template,
+      insert(
+        :app_template,
         Map.to_list(Map.merge(service.template_attrs, %{health_check: %{}, required_env: []}))
       )
 
     deployment =
-      insert(:deployment, tenant: tenant, app_template: template, status: :pending, external_id: nil)
+      insert(:deployment,
+        tenant: tenant,
+        app_template: template,
+        status: :pending,
+        external_id: nil
+      )
 
     {:ok, release} =
       Releases.plan_release(deployment, service.phase1 ++ service.phase2,

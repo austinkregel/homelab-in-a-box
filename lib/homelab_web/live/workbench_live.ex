@@ -567,7 +567,10 @@ defmodule HomelabWeb.WorkbenchLive do
         </div>
 
         <%!-- Run panel --%>
-        <div :if={@built_template} class="mt-4 rounded-lg bg-base-100 border border-base-content/5 p-4 space-y-4">
+        <div
+          :if={@built_template}
+          class="mt-4 rounded-lg bg-base-100 border border-base-content/5 p-4 space-y-4"
+        >
           <h3 class="text-sm font-semibold text-base-content">Quick run</h3>
 
           <form phx-submit="run_image" id="run-form" class="space-y-4">

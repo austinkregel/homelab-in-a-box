@@ -25,8 +25,12 @@ defmodule HomelabWeb.WorkbenchLiveTest do
     html = render(view)
 
     cond do
-      html =~ text -> html
-      retries == 0 -> flunk("timed out waiting for #{inspect(text)}")
+      html =~ text ->
+        html
+
+      retries == 0 ->
+        flunk("timed out waiting for #{inspect(text)}")
+
       true ->
         Process.sleep(20)
         wait_until(view, text, retries - 1)
@@ -49,7 +53,9 @@ defmodule HomelabWeb.WorkbenchLiveTest do
       html = render_click(view, "add_build_file", %{})
       assert html =~ "file1"
 
-      html = render_change(view, "update_build_file", %{"name" => "app.sh", "content" => "echo hi"})
+      html =
+        render_change(view, "update_build_file", %{"name" => "app.sh", "content" => "echo hi"})
+
       assert html =~ "app.sh"
 
       html = render_click(view, "remove_build_file", %{"index" => "1"})

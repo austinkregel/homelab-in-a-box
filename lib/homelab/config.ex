@@ -81,7 +81,8 @@ defmodule Homelab.Config do
   def registries, do: available_drivers(:registries, @registries)
 
   @doc "Every catalog source module, regardless of enabled state (for the settings UI)."
-  def all_application_catalogs, do: Application.get_env(:homelab, :application_catalogs, @application_catalogs)
+  def all_application_catalogs,
+    do: Application.get_env(:homelab, :application_catalogs, @application_catalogs)
 
   @doc """
   The currently-enabled catalog source modules. An `:application_catalogs` app-env
