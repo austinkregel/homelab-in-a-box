@@ -4,6 +4,7 @@ defmodule Homelab.Networking do
   """
 
   import Ecto.Query
+  require Logger
   alias Homelab.Repo
   alias Homelab.Networking.{Domain, DnsZone, DnsRecord}
 
@@ -42,10 +43,6 @@ defmodule Homelab.Networking do
       nil -> {:error, :not_found}
       domain -> {:ok, domain}
     end
-  end
-
-  def get_domain!(id) do
-    Repo.get!(Domain, id) |> Repo.preload(:deployment)
   end
 
   def get_domain_by_fqdn(fqdn) do
@@ -340,22 +337,105 @@ defmodule Homelab.Networking do
     Enum.each(providers, fn provider ->
       zone_ref = zone.provider_zone_id || zone.name
 
-      case provider.create_record(zone_ref, %{
-             name: record.name,
-             type: record.type,
-             value: record.value,
-             ttl: record.ttl
-           }) do
-        {:ok, result} ->
-          if provider_record_id = result[:id] do
-            update_dns_record(record, %{provider_record_id: provider_record_id})
+      payload = %{
+        name: record.name,
+        type: record.type,
+        value: record.value,
+        ttl: record.ttl
+      }
+
+      result =
+        case find_provider_record(provider, zone_ref, record, zone) do
+          {:ok, %{id: existing_id}} -> provider.update_record(zone_ref, existing_id, payload)
+          :not_found -> provider.create_record(zone_ref, payload)
+          {:error, _} -> fallback_create(provider, zone_ref, payload, record)
+        end
+
+      case result do
+        {:ok, %{id: provider_record_id}} when not is_nil(provider_record_id) ->
+          update_dns_record(record, %{provider_record_id: provider_record_id})
+
+        {:error, {:api_error, 404, _}} when not is_nil(record.provider_record_id) ->
+          # Stored id is stale (record removed at the provider) — retry as a create.
+          case provider.create_record(zone_ref, payload) do
+            {:ok, %{id: new_id}} when not is_nil(new_id) ->
+              update_dns_record(record, %{provider_record_id: new_id})
+
+            _ ->
+              :ok
           end
 
-        {:error, _reason} ->
+        _ ->
           :ok
       end
     end)
   end
+
+  # Resolves the provider-side record to update, if any. A stored
+  # `provider_record_id` short-circuits the (potentially paginated) list call;
+  # otherwise we read the provider's records and match on name+type so we update
+  # a pre-existing record instead of blindly creating a duplicate over an FQDN
+  # the user already manages.
+  defp find_provider_record(_provider, _zone_ref, %DnsRecord{provider_record_id: id}, _zone)
+       when is_binary(id) and id != "",
+       do: {:ok, %{id: id}}
+
+  defp find_provider_record(provider, zone_ref, record, zone) do
+    case provider.list_records(zone_ref) do
+      {:ok, records} ->
+        wanted = candidate_names(record.name, zone && zone.name)
+
+        match =
+          Enum.find(records, fn r ->
+            name_in?(r[:name] || r["name"], wanted) and
+              type_matches?(r[:type] || r["type"], record.type)
+          end)
+
+        case match do
+          nil -> :not_found
+          %{} = r -> {:ok, %{id: r[:id] || r["id"]}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A record's name is stored relative to its zone ("www", "@"), but providers
+  # return FQDNs. Build the set of names a provider record could carry.
+  defp candidate_names(name, zone_name) do
+    normalized_zone = zone_name && normalize_name(zone_name)
+
+    fqdn =
+      cond do
+        is_nil(normalized_zone) -> nil
+        name in ["@", "", nil] -> normalized_zone
+        true -> "#{normalize_name(name)}.#{normalized_zone}"
+      end
+
+    [normalize_name(name), fqdn]
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new()
+  end
+
+  defp name_in?(nil, _wanted), do: false
+  defp name_in?(provider_name, wanted), do: MapSet.member?(wanted, normalize_name(provider_name))
+
+  defp normalize_name(nil), do: nil
+
+  defp normalize_name(name),
+    do: name |> to_string() |> String.downcase() |> String.trim_trailing(".")
+
+  defp fallback_create(provider, zone_ref, payload, record) do
+    Logger.warning(
+      "DNS read-back failed for #{record.name}/#{record.type}; creating without dedup check"
+    )
+
+    provider.create_record(zone_ref, payload)
+  end
+
+  defp type_matches?(nil, _wanted), do: false
+  defp type_matches?(a, b), do: String.upcase(to_string(a)) == String.upcase(to_string(b))
 
   defp push_record_deletion(%DnsRecord{} = record) do
     record = Repo.preload(record, :dns_zone)

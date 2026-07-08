@@ -10,6 +10,14 @@ defmodule Homelab.NetworkingTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  # Default: the provider has no pre-existing records, so push falls through to
+  # create. Individual tests override with an explicit `expect(:list_records, ...)`
+  # (expectations are consumed before stubs).
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
   # --- Domains ---
 
   describe "list_domains/0" do
@@ -655,8 +663,9 @@ defmodule Homelab.NetworkingTest do
   end
 
   describe "push_record_to_provider/1" do
-    test "pushes record to DNS provider and stores provider_record_id" do
+    test "creates a record when the provider has no matching one, storing its id" do
       Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone_ref -> {:ok, []} end)
       |> expect(:create_record, fn _zone_ref, record_attrs ->
         assert record_attrs.name == "www"
         assert record_attrs.type == "A"
@@ -672,8 +681,87 @@ defmodule Homelab.NetworkingTest do
       assert updated.provider_record_id == "provider_rec_42"
     end
 
+    test "updates a pre-existing provider record instead of duplicating it" do
+      Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone_ref ->
+        {:ok, [%{id: "existing_99", name: "www.example.com", type: "A", value: "1.1.1.1"}]}
+      end)
+      |> expect(:update_record, fn _zone_ref, "existing_99", _attrs ->
+        {:ok, %{id: "existing_99"}}
+      end)
+
+      zone = insert(:dns_zone, name: "example.com")
+      record = insert(:dns_record, dns_zone: zone, name: "www", type: "A", scope: :public)
+
+      Networking.push_record_to_provider(record)
+
+      assert {:ok, updated} = Networking.get_dns_record(record.id)
+      assert updated.provider_record_id == "existing_99"
+    end
+
+    test "uses a stored provider_record_id directly without listing" do
+      # No list_records expectation => it must not be called.
+      Homelab.Mocks.DnsProvider
+      |> expect(:update_record, fn _zone_ref, "stored_7", _attrs -> {:ok, %{id: "stored_7"}} end)
+
+      zone = insert(:dns_zone, name: "example.com")
+
+      record =
+        insert(:dns_record,
+          dns_zone: zone,
+          name: "www",
+          type: "A",
+          scope: :public,
+          provider_record_id: "stored_7"
+        )
+
+      Networking.push_record_to_provider(record)
+
+      assert {:ok, updated} = Networking.get_dns_record(record.id)
+      assert updated.provider_record_id == "stored_7"
+    end
+
+    test "falls back to create when read-back errors" do
+      Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone_ref -> {:error, :timeout} end)
+      |> expect(:create_record, fn _zone_ref, _attrs -> {:ok, %{id: "created_after_fallback"}} end)
+
+      zone = insert(:dns_zone, name: "example.com")
+      record = insert(:dns_record, dns_zone: zone, name: "www", type: "A", scope: :public)
+
+      Networking.push_record_to_provider(record)
+
+      assert {:ok, updated} = Networking.get_dns_record(record.id)
+      assert updated.provider_record_id == "created_after_fallback"
+    end
+
+    test "retries as create when a stored id is stale (provider 404)" do
+      Homelab.Mocks.DnsProvider
+      |> expect(:update_record, fn _zone_ref, "stale_id", _attrs ->
+        {:error, {:api_error, 404, "not found"}}
+      end)
+      |> expect(:create_record, fn _zone_ref, _attrs -> {:ok, %{id: "fresh_id"}} end)
+
+      zone = insert(:dns_zone, name: "example.com")
+
+      record =
+        insert(:dns_record,
+          dns_zone: zone,
+          name: "www",
+          type: "A",
+          scope: :public,
+          provider_record_id: "stale_id"
+        )
+
+      Networking.push_record_to_provider(record)
+
+      assert {:ok, updated} = Networking.get_dns_record(record.id)
+      assert updated.provider_record_id == "fresh_id"
+    end
+
     test "handles provider error gracefully" do
       Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone -> {:ok, []} end)
       |> expect(:create_record, fn _zone, _record -> {:error, :timeout} end)
 
       zone = insert(:dns_zone)
@@ -726,6 +814,7 @@ defmodule Homelab.NetworkingTest do
   describe "push_record_to_provider/1 edge cases" do
     test "does not update provider_record_id when provider returns no id" do
       Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone -> {:ok, []} end)
       |> expect(:create_record, fn _zone, _record -> {:ok, %{}} end)
 
       zone = insert(:dns_zone, name: "example.com")
@@ -739,6 +828,7 @@ defmodule Homelab.NetworkingTest do
 
     test "pushes record to internal DNS provider" do
       Homelab.Mocks.DnsProvider
+      |> expect(:list_records, fn _zone -> {:ok, []} end)
       |> expect(:create_record, fn _zone, record_attrs ->
         assert record_attrs.name == "internal-host"
         {:ok, %{id: "internal_rec_1"}}
@@ -755,6 +845,7 @@ defmodule Homelab.NetworkingTest do
 
     test "pushes record to both public and internal providers" do
       Homelab.Mocks.DnsProvider
+      |> expect(:list_records, 2, fn _zone -> {:ok, []} end)
       |> expect(:create_record, 2, fn _zone, _record -> {:ok, %{id: "both_rec"}} end)
 
       zone = insert(:dns_zone, name: "example.com")

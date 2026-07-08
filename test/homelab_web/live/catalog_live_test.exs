@@ -10,6 +10,11 @@ defmodule HomelabWeb.CatalogLiveTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
   setup %{conn: conn} do
     tenant = insert(:tenant)
     template = insert(:app_template)
