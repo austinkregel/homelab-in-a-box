@@ -64,13 +64,53 @@ defmodule Homelab.Config do
     Homelab.Registries.ECR
   ]
 
-  # The workbench starts bare — no catalog wall. Sources are opt-in via config
-  # (`config :homelab, :application_catalogs, [...]`); the curated provider
-  # stays in the tree to re-enable.
-  @application_catalogs []
+  # Every available catalog source. None is a "wall of apps" by default — the
+  # user opts in per source from Settings → Catalog. `os_bases` (base OS images
+  # for the Workbench) is enabled by default; the four community catalogs are
+  # opt-in but never removed.
+  @application_catalogs [
+    Homelab.Catalogs.OsBases,
+    Homelab.Catalogs.Curated,
+    Homelab.Catalogs.LinuxServer,
+    Homelab.Catalogs.Hotio,
+    Homelab.Catalogs.AwesomeSelfhosted
+  ]
+
+  @default_enabled_catalogs ["os_bases"]
 
   def registries, do: available_drivers(:registries, @registries)
-  def application_catalogs, do: available_drivers(:application_catalogs, @application_catalogs)
+
+  @doc "Every catalog source module, regardless of enabled state (for the settings UI)."
+  def all_application_catalogs, do: Application.get_env(:homelab, :application_catalogs, @application_catalogs)
+
+  @doc """
+  The currently-enabled catalog source modules. An `:application_catalogs` app-env
+  override (used by tests) wins; otherwise the enabled set comes from the
+  `enabled_catalogs` setting (a JSON list of driver_ids), defaulting to os_bases.
+  """
+  def application_catalogs do
+    case Application.get_env(:homelab, :application_catalogs) do
+      nil ->
+        enabled = enabled_catalog_ids()
+        Enum.filter(@application_catalogs, &(&1.driver_id() in enabled))
+
+      override ->
+        override
+    end
+  end
+
+  defp enabled_catalog_ids do
+    case Homelab.Settings.get("enabled_catalogs") do
+      nil ->
+        @default_enabled_catalogs
+
+      json when is_binary(json) ->
+        case Jason.decode(json) do
+          {:ok, ids} when is_list(ids) -> ids
+          _ -> @default_enabled_catalogs
+        end
+    end
+  end
 
   # -- Registry availability for image refs --
 

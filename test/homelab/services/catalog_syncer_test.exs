@@ -3,6 +3,21 @@ defmodule Homelab.Services.CatalogSyncerTest do
 
   alias Homelab.Services.CatalogSyncer
 
+  # Pin the catalog set via the app-env override so the syncer doesn't read the
+  # Settings-backed enabled list (which would need a DB sandbox this process lacks).
+  setup do
+    original = Application.get_env(:homelab, :application_catalogs)
+    Application.put_env(:homelab, :application_catalogs, [])
+
+    on_exit(fn ->
+      if original,
+        do: Application.put_env(:homelab, :application_catalogs, original),
+        else: Application.delete_env(:homelab, :application_catalogs)
+    end)
+
+    :ok
+  end
+
   describe "start_link/1" do
     test "starts the GenServer" do
       pid = start_supervised!({CatalogSyncer, []})
