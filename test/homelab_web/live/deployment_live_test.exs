@@ -93,6 +93,28 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "Volumes"
     end
 
+    test "releases tab renders steps and reacts to broadcasts", %{conn: conn, deployment: dep} do
+      alias Homelab.Deployments.Releases
+
+      {:ok, release} =
+        Releases.plan_release(dep, [
+          %{type: :backup_verify},
+          %{type: :adopt_container}
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+      assert html =~ "backup verify"
+      assert html =~ "adopt container"
+
+      # A step transition broadcasts and the panel re-renders with the new status.
+      step = Releases.next_pending_step(release)
+      {:ok, _} = Releases.transition_step(step, :completed, [:pending])
+
+      _ = :sys.get_state(view.pid)
+      assert render(view) =~ "Completed"
+    end
+
     test "switch to topology tab", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "topology"})
@@ -1018,6 +1040,29 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "delete", %{})
       assert_redirect(view, ~p"/")
+    end
+
+    test "keeps the deployment and flashes when undeploy fails", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "undeletable_container"
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:undeploy, fn _spec -> {:error, :docker_down} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "delete", %{})
+
+      assert html =~ "the deployment was kept"
+      assert {:ok, _} = Homelab.Deployments.get_deployment(dep.id)
     end
   end
 

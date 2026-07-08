@@ -115,6 +115,18 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       assert by_pos[3] == :failed
       assert by_pos[4] == :pending
     end
+
+    @tag fail_at: 2
+    test "notifies admins with a deployment link on rollback" do
+      admin = insert(:user, role: :admin)
+      release = plan(insert(:deployment))
+
+      assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t1")
+
+      notifications = Homelab.Notifications.list_recent(admin.id, 10)
+      assert Enum.any?(notifications, &(&1.title == "Release rolled back"))
+      assert Enum.any?(notifications, &(&1.link == "/deployments/#{release.deployment_id}"))
+    end
   end
 
   describe "crash resume" do
