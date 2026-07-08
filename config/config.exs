@@ -55,7 +55,11 @@ config :homelab, :release_step_handlers, %{
   backup_verify: Homelab.Deployments.ReleaseSteps.BackupVerify,
   quiesce_old: Homelab.Deployments.ReleaseSteps.QuiesceOld,
   migrate_volume: Homelab.Deployments.ReleaseSteps.MigrateCopy,
-  resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld
+  resume_old: Homelab.Deployments.ReleaseSteps.ResumeOld,
+  adopt_credentials: Homelab.Deployments.ReleaseSteps.AdoptCredentials,
+  adopt_volume: Homelab.Deployments.ReleaseSteps.AdoptVolume,
+  adopt_container: Homelab.Deployments.ReleaseSteps.AdoptContainer,
+  verify_integrity: Homelab.Deployments.ReleaseSteps.VerifyIntegrity
 }
 
 # Real migrations copy through a throwaway helper container so uid:gid is
