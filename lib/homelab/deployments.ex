@@ -182,6 +182,13 @@ defmodule Homelab.Deployments do
     |> Repo.all()
   end
 
+  @doc "All deployment ids, for the reconciler's adoption-protection check."
+  def list_all_ids do
+    Deployment
+    |> select([d], d.id)
+    |> Repo.all()
+  end
+
   defp maybe_set(set, _key, nil), do: set
   defp maybe_set(set, key, value), do: Keyword.put(set, key, value)
 
@@ -262,15 +269,30 @@ defmodule Homelab.Deployments do
     end
   end
 
+  @doc """
+  Removes a deployment's container and then its DB row. The row is deleted *only*
+  if the container removal succeeds, so a failed undeploy can never strand a
+  labeled container with no deployment record (which the orphan sweep would then
+  reap). On failure the row is kept and marked `:failed` with the error, so the
+  user sees it and can retry the delete once Docker is reachable.
+  """
   def destroy_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
 
-    if deployment.external_id do
-      _ = Homelab.Config.orchestrator().undeploy(deployment.external_id)
-    end
+    case undeploy_container(deployment) do
+      :ok ->
+        Repo.delete(deployment)
 
-    Repo.delete(deployment)
+      {:error, reason} ->
+        _ = update_status(deployment, :failed, error: "Undeploy failed: #{inspect(reason)}")
+        {:error, {:undeploy_failed, reason}}
+    end
   end
+
+  defp undeploy_container(%Deployment{external_id: nil}), do: :ok
+
+  defp undeploy_container(%Deployment{external_id: external_id}),
+    do: Homelab.Config.orchestrator().undeploy(external_id)
 
   @doc """
   Recreates a deployment's container so config changes (domain, ports, exposure,

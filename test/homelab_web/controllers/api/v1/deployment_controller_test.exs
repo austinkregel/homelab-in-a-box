@@ -7,6 +7,11 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  setup do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    :ok
+  end
+
   setup %{conn: conn} do
     tenant = insert(:tenant)
     {:ok, conn: put_req_header(conn, "accept", "application/json"), tenant: tenant}
@@ -137,12 +142,25 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
         insert(:deployment, tenant: tenant, status: :running, external_id: "container_xyz")
 
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "container_xyz" -> {:ok, "container_xyz"} end)
+      |> expect(:undeploy, fn "container_xyz" -> :ok end)
 
       conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
       assert response(conn, 204)
 
       assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
+    end
+
+    test "returns 502 and keeps the row when undeploy fails", %{conn: conn, tenant: tenant} do
+      deployment =
+        insert(:deployment, tenant: tenant, status: :running, external_id: "container_down")
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:undeploy, fn "container_down" -> {:error, :docker_down} end)
+
+      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      assert response(conn, 502)
+
+      assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) != nil
     end
   end
 end
