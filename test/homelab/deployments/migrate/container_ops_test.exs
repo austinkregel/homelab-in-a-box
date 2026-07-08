@@ -25,9 +25,18 @@ defmodule Homelab.Deployments.Migrate.ContainerOpsTest do
 
     @impl true
     def start(_id), do: :ok
+
+    @impl true
+    def env(_id), do: {:ok, %{}}
+
+    @impl true
+    def image_env(_image), do: {:ok, %{}}
+
+    @impl true
+    def port_bindings(_id), do: {:ok, []}
   end
 
-  test "defines the four lifecycle callbacks with documented arities" do
+  test "defines the lifecycle + inspection callbacks with documented arities" do
     Code.ensure_loaded!(ContainerOps)
 
     callbacks = MapSet.new(ContainerOps.behaviour_info(:callbacks))
@@ -37,7 +46,10 @@ defmodule Homelab.Deployments.Migrate.ContainerOpsTest do
                restart_policy: 1,
                set_restart_policy: 2,
                stop: 2,
-               start: 1
+               start: 1,
+               env: 1,
+               image_env: 1,
+               port_bindings: 1
              )
   end
 
