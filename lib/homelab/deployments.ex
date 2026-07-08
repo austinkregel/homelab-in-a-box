@@ -13,6 +13,12 @@ defmodule Homelab.Deployments do
   alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
 
+  @doc """
+  Executes an adoption/import plan — adopts existing containers in place as
+  managed deployments. See `Homelab.Deployments.Adoption.apply_plan/2`.
+  """
+  defdelegate apply_adoption_plan(plan, opts), to: Homelab.Deployments.Adoption, as: :apply_plan
+
   def list_deployments do
     Deployment
     |> preload([:tenant, :app_template])
