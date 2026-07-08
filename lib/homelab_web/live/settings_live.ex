@@ -180,12 +180,45 @@ defmodule HomelabWeb.SettingsLive do
   end
 
   def handle_event("preview_plan", _params, socket) do
-    selected =
-      (socket.assigns.import_services || [])
-      |> Enum.filter(&MapSet.member?(socket.assigns.import_selected, &1.name))
-
-    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected)
+    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
     {:noreply, assign(socket, :import_plan, plan)}
+  end
+
+  def handle_event("select_import_tenant", %{"tenant_id" => id}, socket) do
+    {:noreply, assign(socket, :import_tenant_id, String.to_integer(id))}
+  end
+
+  def handle_event("apply_import", _params, socket) do
+    tenant_id = socket.assigns.import_tenant_id
+    # Rebuild the plan from the current selection so a stale assign can't be applied.
+    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
+
+    cond do
+      is_nil(tenant_id) ->
+        {:noreply, put_flash(socket, :error, "Choose a space to import into first.")}
+
+      plan.services == [] ->
+        {:noreply, put_flash(socket, :error, "Select at least one service to import.")}
+
+      true ->
+        case Homelab.Deployments.apply_adoption_plan(plan, tenant_id: tenant_id) do
+          {:ok, results} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Import started — #{length(results)} release(s) running.")
+             |> assign(
+               :import_result,
+               Enum.map(results, fn r ->
+                 %{service: r.service, deployment_id: r.deployment.id, release_id: r.release.id}
+               end)
+             )
+             |> assign(:import_plan, nil)}
+
+          {:error, {service, reason}} ->
+            {:noreply,
+             put_flash(socket, :error, "Import failed for #{service}: #{inspect(reason)}")}
+        end
+    end
   end
 
   def handle_event("save_orchestrator", %{"driver" => driver_id}, socket) do
@@ -430,6 +463,13 @@ defmodule HomelabWeb.SettingsLive do
     |> assign_new(:import_selected, fn -> MapSet.new() end)
     |> assign_new(:import_plan, fn -> nil end)
     |> assign_new(:import_error, fn -> nil end)
+    |> assign_new(:import_result, fn -> nil end)
+    |> assign_new(:import_tenant_id, fn ->
+      case socket.assigns.tenants do
+        [%{id: id} | _] -> id
+        _ -> nil
+      end
+    end)
   end
 
   defp load_section_data(socket, "users") do
@@ -1314,7 +1354,7 @@ defmodule HomelabWeb.SettingsLive do
           <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
           <p class="text-sm text-base-content/50">
             Discover containers under your existing <code>~/homelab</code>
-            stack and migrate them into managed, plane-owned volumes. Preview only — nothing runs yet.
+            stack and migrate them into managed, plane-owned volumes. Preview the plan, then Apply to run it — your original containers are kept and never deleted.
           </p>
         </div>
         <button
@@ -1431,9 +1471,55 @@ defmodule HomelabWeb.SettingsLive do
             </li>
           </ol>
         </div>
+
+        <div class="flex items-end gap-3 pt-2 border-t border-base-content/[0.06]">
+          <label class="text-xs text-base-content/60">
+            Import into space
+            <select
+              name="tenant_id"
+              phx-change="select_import_tenant"
+              class="mt-1 block rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm"
+            >
+              <option
+                :for={tenant <- @tenants}
+                value={tenant.id}
+                selected={tenant.id == @import_tenant_id}
+              >
+                {tenant.name}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            phx-click="apply_import"
+            disabled={is_nil(@import_tenant_id)}
+            data-confirm="This briefly stops each selected service and cuts it over to a managed container. Originals are kept and never deleted. Continue?"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:bg-primary/90 disabled:opacity-40 cursor-pointer"
+          >
+            Apply — run migration
+          </button>
+        </div>
+      </div>
+
+      <div :if={@import_result} class="rounded-lg border border-success/20 bg-success/5 p-4 space-y-1">
+        <h3 class="text-sm font-semibold text-base-content mb-1">Import started</h3>
+        <p :for={r <- @import_result} class="text-xs">
+          <.link
+            navigate={~p"/deployments/#{r.deployment_id}"}
+            class="text-primary hover:underline font-mono"
+          >
+            {r.service}
+          </.link>
+          <span class="text-base-content/50">— follow progress on its Releases tab</span>
+        </p>
       </div>
     </div>
     """
+  end
+
+  defp selected_import_services(socket) do
+    (socket.assigns.import_services || [])
+    |> Enum.filter(&MapSet.member?(socket.assigns.import_selected, &1.name))
   end
 
   # A short human summary of a plan step's resource_handle for the preview.

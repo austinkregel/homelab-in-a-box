@@ -578,6 +578,59 @@ defmodule HomelabWeb.SettingsLiveTest do
       assert html =~ "backup_verify"
       assert html =~ "adopt_container"
     end
+
+    test "apply_import creates a deployment + release and shows the started panel", %{conn: conn} do
+      tenant = insert(:tenant)
+
+      prev = Application.get_env(:homelab, :docker_client)
+      prev_root = Application.get_env(:homelab, :adoption_root)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      Application.put_env(:homelab, :adoption_root, "/srv/appdata")
+
+      on_exit(fn ->
+        restore_docker_client(prev)
+        if prev_root,
+          do: Application.put_env(:homelab, :adoption_root, prev_root),
+          else: Application.delete_env(:homelab, :adoption_root)
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => "999:999"},
+             "HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}},
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+      render_click(view, "run_discovery", %{})
+      render_click(view, "preview_plan", %{})
+      render_click(view, "select_import_tenant", %{"tenant_id" => to_string(tenant.id)})
+
+      html = render_click(view, "apply_import", %{})
+      assert html =~ "Import started"
+
+      deployment = Homelab.Repo.get_by(Homelab.Deployments.Deployment, tenant_id: tenant.id)
+      assert deployment
+      assert deployment.status == :pending
+      assert Homelab.Deployments.Releases.get_active_release(deployment.id)
+    end
   end
 
   defp restore_docker_client(nil), do: Application.delete_env(:homelab, :docker_client)
