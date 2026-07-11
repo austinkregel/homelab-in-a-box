@@ -16,6 +16,72 @@ defmodule Homelab.DeploymentsTest do
     :ok
   end
 
+  describe "redeploy/1" do
+    setup do
+      tenant = insert(:tenant)
+      app = insert(:deployment, tenant: tenant, status: :failed, external_id: "old-app")
+      companion = insert(:deployment, tenant: tenant, status: :pending, external_id: nil)
+
+      {:ok, release} =
+        Homelab.Deployments.Releases.plan_release(app, [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :app_container},
+          %{type: :await_health}
+        ])
+
+      %{app: app, companion: companion, release: release}
+    end
+
+    defp retire(release),
+      do: release |> Ecto.Changeset.change(status: :rolled_back) |> Homelab.Repo.update!()
+
+    test "plans a fresh release and resets the whole stack to pending", %{
+      app: app,
+      companion: companion,
+      release: release
+    } do
+      retire(release)
+
+      assert {:ok, new_release} = Deployments.redeploy(app)
+      assert new_release.id != release.id
+
+      assert Deployments.get_deployment!(app.id).status == :pending
+      assert Deployments.get_deployment!(app.id).external_id == nil
+      assert Deployments.get_deployment!(companion.id).status == :pending
+
+      companion_id = companion.id
+
+      assert companion_id in (new_release.steps
+                              |> Enum.filter(&(&1.type == :dependency_container))
+                              |> Enum.map(& &1.resource_handle["deployment_id"]))
+    end
+
+    test "re-drives from a companion, anchoring the new release on the app", %{
+      app: app,
+      companion: companion,
+      release: release
+    } do
+      retire(release)
+
+      assert {:ok, new_release} = Deployments.redeploy(companion)
+      assert new_release.deployment_id == app.id
+    end
+
+    test "refuses while a release is still in flight", %{app: app} do
+      # The setup release is :planning (active) — re-running would race the saga.
+      assert {:error, :release_active} = Deployments.redeploy(app)
+    end
+
+    test "deploys standalone when there is no prior release" do
+      solo = insert(:deployment, status: :failed, external_id: "x")
+
+      assert {:ok, release} = Deployments.redeploy(solo)
+      assert release.deployment_id == solo.id
+      assert Deployments.get_deployment!(solo.id).status == :pending
+    end
+  end
+
   describe "list_deployments/0" do
     test "returns all deployments with preloaded associations" do
       insert(:deployment)

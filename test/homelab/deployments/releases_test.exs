@@ -45,6 +45,49 @@ defmodule Homelab.Deployments.ReleasesTest do
     end
   end
 
+  describe "driving_release/1" do
+    test "returns the release where the deployment is the app" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+
+      found = Releases.driving_release(deployment.id)
+      assert found.id == release.id
+      assert length(found.steps) == 6
+    end
+
+    test "resolves the app's release from a companion referenced in a step" do
+      tenant = insert(:tenant)
+      app = insert(:deployment, tenant: tenant)
+      companion = insert(:deployment, tenant: tenant)
+
+      {:ok, release} =
+        Releases.plan_release(app, [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :app_container}
+        ])
+
+      # The companion has no release of its own, but its lifecycle is driven here.
+      found = Releases.driving_release(companion.id)
+      assert found.id == release.id
+    end
+
+    test "returns the newest release when several exist for the app" do
+      deployment = insert(:deployment)
+      old = plan(deployment)
+      # Retire it so the one-active-per-deployment constraint permits a second.
+      old |> Ecto.Changeset.change(status: :superseded) |> Repo.update!()
+      new = plan(deployment)
+
+      assert Releases.driving_release(deployment.id).id == new.id
+    end
+
+    test "nil when the deployment has no release" do
+      deployment = insert(:deployment)
+      assert Releases.driving_release(deployment.id) == nil
+    end
+  end
+
   describe "next_pending_step/1 and completed_steps_desc/1" do
     test "returns the lowest pending, and completed in reverse order" do
       deployment = insert(:deployment)

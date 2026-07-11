@@ -115,6 +115,38 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert render(view) =~ "Completed"
     end
 
+    test "companion deployment surfaces the app's driving release", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      alias Homelab.Deployments.Releases
+
+      app = insert(:deployment, tenant: tenant, app_template: template, status: :failed)
+      companion = insert(:deployment, tenant: tenant, status: :pending)
+
+      {:ok, _release} =
+        Releases.plan_release(app, [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :app_container}
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{companion.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      # The companion has no release of its own, but the app's release is shown.
+      assert html =~ "part of another release"
+      assert html =~ "dependency container"
+    end
+
+    test "redeploy re-plans a release and flashes", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "redeploy")
+
+      assert html =~ "Re-running the deployment"
+      assert Homelab.Deployments.Releases.driving_release(dep.id) != nil
+    end
+
     test "switch to topology tab", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "topology"})
