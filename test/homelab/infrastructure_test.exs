@@ -13,26 +13,18 @@ defmodule Homelab.InfrastructureTest do
     :ok
   end
 
-  describe "self_ingress_config/2" do
+  describe "self_ingress_yaml/2" do
     test "builds a websecure router requesting the wildcard cert, and a service" do
-      cfg = Infrastructure.self_ingress_config("homelab.kregel.dev", "http://homelab-iab:4000")
+      yaml = Infrastructure.self_ingress_yaml("homelab.kregel.dev", "http://homelab-iab:4000")
 
-      router = cfg["http"]["routers"]["homelab"]
-      assert router["rule"] == "Host(`homelab.kregel.dev`)"
-      assert router["entryPoints"] == ["websecure"]
-      assert router["service"] == "homelab"
-      assert router["tls"]["certResolver"] == "letsencrypt"
-
-      assert router["tls"]["domains"] == [
-               %{"main" => "homelab.kregel.dev", "sans" => ["*.homelab.kregel.dev"]}
-             ]
-
-      assert cfg["http"]["services"]["homelab"]["loadBalancer"]["servers"] == [
-               %{"url" => "http://homelab-iab:4000"}
-             ]
-
-      # It is written to Traefik as JSON, so it must encode cleanly.
-      assert {:ok, _json} = Jason.encode(cfg)
+      assert yaml =~ "rule: \"Host(`homelab.kregel.dev`)\""
+      assert yaml =~ "entryPoints:"
+      assert yaml =~ "- websecure"
+      assert yaml =~ "certResolver: letsencrypt"
+      assert yaml =~ "- main: \"homelab.kregel.dev\""
+      # The wildcard MUST be quoted — a bare leading `*` is a YAML alias.
+      assert yaml =~ "- \"*.homelab.kregel.dev\""
+      assert yaml =~ "- url: \"http://homelab-iab:4000\""
     end
   end
 

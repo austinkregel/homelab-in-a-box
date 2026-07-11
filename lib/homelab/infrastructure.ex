@@ -138,7 +138,10 @@ defmodule Homelab.Infrastructure do
   end
 
   @self_ingress_router "homelab"
-  @self_ingress_file "homelab.json"
+  # YAML, not JSON: Traefik's file provider parses .yml/.yaml/.toml and SILENTLY
+  # ignores .json — so a JSON route file loads no router, and Traefik never
+  # requests a cert (no error, empty acme.json).
+  @self_ingress_file "homelab.yml"
   @traefik_dynamic_dir "/dynamic"
 
   @doc """
@@ -168,8 +171,7 @@ defmodule Homelab.Infrastructure do
         :ok
 
       true ->
-        tar =
-          dynamic_config_tar(@self_ingress_file, Jason.encode!(self_ingress_config(base, url)))
+        tar = dynamic_config_tar(@self_ingress_file, self_ingress_yaml(base, url))
 
         case Client.upload_archive("homelab-traefik", @traefik_dynamic_dir, tar) do
           :ok ->
@@ -184,29 +186,37 @@ defmodule Homelab.Infrastructure do
   end
 
   @doc """
-  Pure Traefik dynamic-config for the homelab's own route. Public for testing.
+  Pure Traefik dynamic-config (YAML) for the homelab's own route. Public for
+  testing. Built as explicit lines (not a heredoc) to keep indentation exact, and
+  every dynamic value is double-quoted — `*.<domain>` in particular MUST be quoted
+  or YAML reads the leading `*` as an alias.
   """
-  def self_ingress_config(base_domain, service_url) do
-    %{
-      "http" => %{
-        "routers" => %{
-          @self_ingress_router => %{
-            "rule" => "Host(`#{base_domain}`)",
-            "entryPoints" => ["websecure"],
-            "service" => @self_ingress_router,
-            "tls" => %{
-              "certResolver" => "letsencrypt",
-              "domains" => [%{"main" => base_domain, "sans" => ["*.#{base_domain}"]}]
-            }
-          }
-        },
-        "services" => %{
-          @self_ingress_router => %{
-            "loadBalancer" => %{"servers" => [%{"url" => service_url}]}
-          }
-        }
-      }
-    }
+  def self_ingress_yaml(base_domain, service_url) do
+    r = @self_ingress_router
+
+    Enum.join(
+      [
+        "http:",
+        "  routers:",
+        "    #{r}:",
+        "      rule: \"Host(`#{base_domain}`)\"",
+        "      entryPoints:",
+        "        - websecure",
+        "      service: #{r}",
+        "      tls:",
+        "        certResolver: letsencrypt",
+        "        domains:",
+        "          - main: \"#{base_domain}\"",
+        "            sans:",
+        "              - \"*.#{base_domain}\"",
+        "  services:",
+        "    #{r}:",
+        "      loadBalancer:",
+        "        servers:",
+        "          - url: \"#{service_url}\""
+      ],
+      "\n"
+    ) <> "\n"
   end
 
   # The URL Traefik uses to reach THIS container, over the internal network. The
