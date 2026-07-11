@@ -56,6 +56,33 @@ defmodule Homelab.Accounts do
   end
 
   @doc """
+  Gets or creates the local break-glass admin user.
+
+  This is the identity a successful `Homelab.Auth.BreakGlass` login assumes. It
+  is a real `:admin` row, keyed on a synthetic `sub` so it never collides with an
+  OIDC-provisioned user. The `label` only affects the synthetic sub/email, so the
+  same operator always maps to the same row across break-glass logins.
+  """
+  def get_or_create_breakglass_admin(label \\ "breakglass") when is_binary(label) do
+    sub = "breakglass:#{label}"
+
+    case get_user_by_sub(sub) do
+      nil ->
+        %User{}
+        |> User.changeset(%{
+          sub: sub,
+          email: "#{label}@breakglass.local",
+          name: "Break-glass Admin",
+          role: :admin
+        })
+        |> Repo.insert()
+
+      user ->
+        {:ok, user}
+    end
+  end
+
+  @doc """
   Lists all users.
   """
   def list_users do
