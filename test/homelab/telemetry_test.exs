@@ -67,7 +67,9 @@ defmodule Homelab.TelemetryTest do
     test "distinguishes host-wide (nil subject) from a named subject" do
       Telemetry.record_snapshot(@snapshot)
 
-      root = Telemetry.series(source: "host", subject: "disk:/", metric: "disk_percent", minutes: 30)
+      root =
+        Telemetry.series(source: "host", subject: "disk:/", metric: "disk_percent", minutes: 30)
+
       assert Enum.map(root, & &1.value) == [55.0]
 
       # A host-wide query must not pick up subject-scoped disk rows.

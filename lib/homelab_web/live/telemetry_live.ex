@@ -88,7 +88,12 @@ defmodule HomelabWeb.TelemetryLive do
     |> assign(:cpu_series, safe_series(fn -> Telemetry.host_series("cpu_percent", opts) end))
     |> assign(:mem_series, safe_series(fn -> Telemetry.host_series("memory_percent", opts) end))
     |> assign(:disk_series, load_disk_series(opts))
-    |> assign(:docker_series, safe_series(fn -> Telemetry.series([source: "docker", metric: "containers_running"] ++ opts) end))
+    |> assign(
+      :docker_series,
+      safe_series(fn ->
+        Telemetry.series([source: "docker", metric: "containers_running"] ++ opts)
+      end)
+    )
     |> assign(:traefik_series, load_traefik_series(opts))
   end
 
@@ -98,7 +103,12 @@ defmodule HomelabWeb.TelemetryLive do
     safe_series(fn -> Telemetry.subjects("host", "disk_percent", opts) end)
     |> Enum.map(fn subject ->
       mount = String.replace_prefix(subject, "disk:", "")
-      series = safe_series(fn -> Telemetry.series([source: "host", subject: subject, metric: "disk_percent"] ++ opts) end)
+
+      series =
+        safe_series(fn ->
+          Telemetry.series([source: "host", subject: subject, metric: "disk_percent"] ++ opts)
+        end)
+
       %{mount: mount, series: series, current: last_value(series)}
     end)
   end
@@ -106,8 +116,17 @@ defmodule HomelabWeb.TelemetryLive do
   defp load_traefik_series(opts) do
     safe_series(fn -> Telemetry.subjects("traefik", "requests_total", opts) end)
     |> Enum.map(fn service ->
-      requests = safe_series(fn -> Telemetry.series([source: "traefik", subject: service, metric: "requests_total"] ++ opts) end)
-      errors = safe_series(fn -> Telemetry.series([source: "traefik", subject: service, metric: "error_count"] ++ opts) end)
+      requests =
+        safe_series(fn ->
+          Telemetry.series(
+            [source: "traefik", subject: service, metric: "requests_total"] ++ opts
+          )
+        end)
+
+      errors =
+        safe_series(fn ->
+          Telemetry.series([source: "traefik", subject: service, metric: "error_count"] ++ opts)
+        end)
 
       %{
         service: service,
@@ -177,7 +196,12 @@ defmodule HomelabWeb.TelemetryLive do
               Host resources
             </h2>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <.area_chart label="CPU" series={@cpu_series} color="primary" format={&format_percent/1} />
+              <.area_chart
+                label="CPU"
+                series={@cpu_series}
+                color="primary"
+                format={&format_percent/1}
+              />
               <.area_chart
                 label="Memory"
                 series={@mem_series}
@@ -210,7 +234,9 @@ defmodule HomelabWeb.TelemetryLive do
               <h2 class="text-xs font-semibold text-base-content/40 uppercase tracking-wider">
                 Docker host
               </h2>
-              <span class="text-[11px] text-base-content/30">{docker_field(@metrics, "ServerVersion")}</span>
+              <span class="text-[11px] text-base-content/30">
+                {docker_field(@metrics, "ServerVersion")}
+              </span>
             </div>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
               <.mini_stat label="Running" value={docker_field(@metrics, "ContainersRunning")} />
@@ -218,7 +244,12 @@ defmodule HomelabWeb.TelemetryLive do
               <.mini_stat label="Stopped" value={docker_field(@metrics, "ContainersStopped")} />
               <.mini_stat label="Images" value={docker_field(@metrics, "Images")} />
             </div>
-            <.sparkline :if={@docker_series != []} points={@docker_series} color="success" class="w-full h-10" />
+            <.sparkline
+              :if={@docker_series != []}
+              points={@docker_series}
+              color="success"
+              class="w-full h-10"
+            />
           </div>
 
           <%!-- Reverse-proxy traffic --%>
@@ -274,14 +305,18 @@ defmodule HomelabWeb.TelemetryLive do
               class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-base-content/[0.1] text-xs font-medium text-base-content/60 hover:bg-base-200 transition-colors"
               disabled={@docker_disk == :loading}
             >
-              <.icon name="hero-arrow-path" class={["size-3.5", @docker_disk == :loading && "animate-spin"]} />
-              Refresh
+              <.icon
+                name="hero-arrow-path"
+                class={["size-3.5", @docker_disk == :loading && "animate-spin"]}
+              /> Refresh
             </button>
           </div>
 
           <%= case @docker_disk do %>
             <% :loading -> %>
-              <p class="px-4 py-6 text-sm text-base-content/40 text-center">Reading Docker disk usage…</p>
+              <p class="px-4 py-6 text-sm text-base-content/40 text-center">
+                Reading Docker disk usage…
+              </p>
             <% {:ok, df} -> %>
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4">
                 <.mini_stat label="Volumes" value={"#{format_bytes(df.volumes.size)}"} />
@@ -290,8 +325,9 @@ defmodule HomelabWeb.TelemetryLive do
                 <.mini_stat label="Build cache" value={"#{format_bytes(df.build_cache.size)}"} />
               </div>
               <p class="px-4 -mt-1 pb-2 text-[11px] text-base-content/30">
-                {df.volumes.count} volumes · {df.volumes.active} in use ·
-                {format_bytes(df.volumes.reclaimable)} reclaimable (unused)
+                {df.volumes.count} volumes · {df.volumes.active} in use · {format_bytes(
+                  df.volumes.reclaimable
+                )} reclaimable (unused)
               </p>
               <%= if df.volumes.items == [] do %>
                 <p class="px-4 py-4 text-sm text-base-content/40 text-center">No Docker volumes.</p>
@@ -306,7 +342,10 @@ defmodule HomelabWeb.TelemetryLive do
                     <p class="flex-1 min-w-0 text-sm text-base-content truncate" title={vol.name}>
                       {vol.name}
                     </p>
-                    <span :if={!vol.in_use} class="text-[10px] uppercase tracking-wider text-base-content/30">
+                    <span
+                      :if={!vol.in_use}
+                      class="text-[10px] uppercase tracking-wider text-base-content/30"
+                    >
                       unused
                     </span>
                     <span class="text-sm font-medium text-base-content/70 tabular-nums shrink-0">

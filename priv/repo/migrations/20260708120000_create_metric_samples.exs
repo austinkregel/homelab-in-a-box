@@ -44,9 +44,7 @@ defmodule Homelab.Repo.Migrations.CreateMetricSamples do
     if timescaledb_available?() do
       execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE")
 
-      execute(
-        "SELECT create_hypertable('metric_samples', 'recorded_at', if_not_exists => TRUE)"
-      )
+      execute("SELECT create_hypertable('metric_samples', 'recorded_at', if_not_exists => TRUE)")
     end
   end
 

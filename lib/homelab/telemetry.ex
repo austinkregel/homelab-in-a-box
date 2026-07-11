@@ -114,7 +114,10 @@ defmodule Homelab.Telemetry do
 
   # Appends a row only when the value is numeric; keeps insert_all rows uniform.
   defp put_row(rows, now, source, subject, metric, value) when is_number(value) do
-    [%{recorded_at: now, source: source, subject: subject, metric: metric, value: value / 1} | rows]
+    [
+      %{recorded_at: now, source: source, subject: subject, metric: metric, value: value / 1}
+      | rows
+    ]
   end
 
   defp put_row(rows, _now, _source, _subject, _metric, _value), do: rows

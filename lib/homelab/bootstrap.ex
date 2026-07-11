@@ -352,9 +352,7 @@ defmodule Homelab.Bootstrap do
     Logger.info("Bootstrap: pulling #{@postgres_image}...")
 
     _ =
-      Client.post(
-        "/images/create?fromImage=#{@postgres_image_repo}&tag=#{@postgres_image_tag}"
-      )
+      Client.post("/images/create?fromImage=#{@postgres_image_repo}&tag=#{@postgres_image_tag}")
 
     Logger.info("Bootstrap: creating Postgres container")
 

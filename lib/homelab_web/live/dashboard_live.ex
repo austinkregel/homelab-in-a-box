@@ -158,7 +158,10 @@ defmodule HomelabWeb.DashboardLive do
 
     disk =
       if mount,
-        do: Telemetry.series([source: "host", subject: "disk:" <> mount, metric: "disk_percent"] ++ opts),
+        do:
+          Telemetry.series(
+            [source: "host", subject: "disk:" <> mount, metric: "disk_percent"] ++ opts
+          ),
         else: []
 
     socket
@@ -812,7 +815,12 @@ defmodule HomelabWeb.DashboardLive do
         >
         </div>
       </div>
-      <.sparkline :if={@points not in [nil, []]} points={@points} color={@color} class="w-full h-8 mt-2" />
+      <.sparkline
+        :if={@points not in [nil, []]}
+        points={@points}
+        color={@color}
+        class="w-full h-8 mt-2"
+      />
       <p class="text-xs text-base-content/30 mt-2">{@detail}</p>
     </div>
     """
