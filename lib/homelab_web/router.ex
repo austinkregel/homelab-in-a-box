@@ -26,6 +26,12 @@ defmodule HomelabWeb.Router do
     get "/oidc", AuthController, :login
     get "/oidc/callback", AuthController, :callback
     get "/logout", AuthController, :logout
+
+    # Emergency, non-OIDC admin login. 404s unless HOMELAB_BREAKGLASS_TOKEN is set
+    # (see Homelab.Auth.BreakGlass). The way back in when the OIDC provider — which
+    # may itself be hosted here — is down.
+    get "/break-glass", BreakGlassController, :new
+    post "/break-glass", BreakGlassController, :create
   end
 
   # Setup wizard -- blocked once setup is complete
@@ -56,6 +62,7 @@ defmodule HomelabWeb.Router do
       live "/domains", DomainsLive, :index
       live "/backups", BackupsLive, :index
       live "/activity", ActivityLive, :index
+      live "/telemetry", TelemetryLive, :index
       live "/settings", SettingsLive, :index
     end
 
