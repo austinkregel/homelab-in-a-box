@@ -46,27 +46,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Durable secrets (secret_key_base, pg password) — survive restarts.
       - homelab-iab-secrets:/run/secrets
-    labels:
-      # Register the homelab UI itself as Traefik's first service. The moment the
-      # app auto-provisions Traefik (Homelab.Services.GatewayProvisioner), Traefik's
-      # Docker provider reads these and routes https://${HOMELAB_BASE_DOMAIN} to
-      # :4000 over the internal network. The main+wildcard tls.domains make Traefik
-      # request the `*.${HOMELAB_BASE_DOMAIN}` cert via DNS-01 up front, so the
-      # wildcard is provisioned as soon as the gateway comes up.
-      # Requires TRAEFIK_DNS_API_TOKEN in .env.
-      - "traefik.enable=true"
-      - "traefik.http.routers.homelab.rule=Host(`${HOMELAB_BASE_DOMAIN}`)"
-      - "traefik.http.routers.homelab.entrypoints=websecure"
-      - "traefik.http.routers.homelab.tls=true"
-      - "traefik.http.routers.homelab.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.homelab.tls.domains[0].main=${HOMELAB_BASE_DOMAIN}"
-      - "traefik.http.routers.homelab.tls.domains[0].sans=*.${HOMELAB_BASE_DOMAIN}"
-      - "traefik.http.services.homelab.loadbalancer.server.port=4000"
     ports:
-      # Ingress is via the app's own Traefik (labels above), NOT the host network.
-      # Bound to loopback only as a break-glass path — SSH-tunnel to reach
-      # /auth/break-glass if Traefik or cert issuance is down. Remove this line
-      # entirely to make the box strictly Traefik-only.
+      # Ingress is via the app's OWN Traefik, which the app provisions and to which
+      # it registers its own route (Homelab.Services.GatewayProvisioner —
+      # deliberately NOT declared here; the point of HIAB is to automate this away
+      # from static config). This loopback bind is only a break-glass path — SSH-
+      # tunnel to reach /auth/break-glass if Traefik or cert issuance is down.
       - "127.0.0.1:4000:4000"
     networks:
       - homelab-iab-internal

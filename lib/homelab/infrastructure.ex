@@ -36,12 +36,27 @@ defmodule Homelab.Infrastructure do
           "source" => "homelab-traefik-certs",
           "target" => "/letsencrypt",
           "type" => "volume"
+        },
+        # Dynamic-config drop dir. The app writes its OWN ingress route here at
+        # runtime (see `ensure_self_ingress/0`) instead of it being declared as
+        # static container labels — HIAB automates route management, it isn't a
+        # compose file.
+        %{
+          "source" => "homelab-traefik-dynamic",
+          "target" => "/dynamic",
+          "type" => "volume"
         }
       ],
       command: [
         "--api.insecure=true",
+        # INFO so ACME/cert activity is actually observable in `docker logs`
+        # (Traefik defaults to ERROR, which silently hides successful DNS-01 steps).
+        "--log.level=INFO",
         "--providers.docker=true",
         "--providers.docker.exposedbydefault=false",
+        # File provider for app-written dynamic config (the self ingress route).
+        "--providers.file.directory=/dynamic",
+        "--providers.file.watch=true",
         "--entryPoints.web.address=:80",
         "--entryPoints.websecure.address=:443",
         "--entryPoints.web.http.redirections.entryPoint.to=websecure",
@@ -115,7 +130,118 @@ defmodule Homelab.Infrastructure do
          result when result in [{:ok, :already_running}, {:ok, :started}] <-
            ensure_traefik_current(template) do
       sync_traefik_networks()
+      # Register the plane's OWN route + wildcard cert with the proxy it just
+      # ensured. Best-effort: a failure here shouldn't fail the whole ensure.
+      _ = ensure_self_ingress()
       result
+    end
+  end
+
+  @self_ingress_router "homelab"
+  @self_ingress_file "homelab.json"
+  @traefik_dynamic_dir "/dynamic"
+
+  @doc """
+  Registers the homelab UI's own ingress with the running Traefik.
+
+  The plane can't put Traefik labels on its OWN already-running container, so it
+  routes to itself via Traefik's file provider instead: it writes a dynamic-config
+  file into the proxy's `/dynamic` dir defining a router for `Host(base_domain)`
+  that requests the wildcard cert (`main` + `*.base_domain`) — so `*.<domain>` is
+  provisioned up front — and a service pointing back at this container over the
+  internal network. Idempotent (same file each time) and best-effort.
+  """
+  def ensure_self_ingress do
+    base = Homelab.Config.base_domain()
+    url = self_service_url()
+
+    cond do
+      is_nil(base) or base == "" ->
+        Logger.warning("Infrastructure: base_domain unset; skipping self-ingress registration")
+        :ok
+
+      is_nil(url) ->
+        Logger.warning(
+          "Infrastructure: could not determine own container name; skipping self-ingress"
+        )
+
+        :ok
+
+      true ->
+        tar =
+          dynamic_config_tar(@self_ingress_file, Jason.encode!(self_ingress_config(base, url)))
+
+        case Client.upload_archive("homelab-traefik", @traefik_dynamic_dir, tar) do
+          :ok ->
+            Logger.info("Infrastructure: registered self-ingress #{base} -> #{url}")
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Infrastructure: self-ingress upload failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+    end
+  end
+
+  @doc """
+  Pure Traefik dynamic-config for the homelab's own route. Public for testing.
+  """
+  def self_ingress_config(base_domain, service_url) do
+    %{
+      "http" => %{
+        "routers" => %{
+          @self_ingress_router => %{
+            "rule" => "Host(`#{base_domain}`)",
+            "entryPoints" => ["websecure"],
+            "service" => @self_ingress_router,
+            "tls" => %{
+              "certResolver" => "letsencrypt",
+              "domains" => [%{"main" => base_domain, "sans" => ["*.#{base_domain}"]}]
+            }
+          }
+        },
+        "services" => %{
+          @self_ingress_router => %{
+            "loadBalancer" => %{"servers" => [%{"url" => service_url}]}
+          }
+        }
+      }
+    }
+  end
+
+  # The URL Traefik uses to reach THIS container, over the internal network. The
+  # container's own name (resolved by Docker DNS on `homelab-iab-internal`) is
+  # discovered by inspecting self via $HOSTNAME (the short container id).
+  defp self_service_url do
+    with host when is_binary(host) and host != "" <- System.get_env("HOSTNAME"),
+         {:ok, %{"Name" => name}} when is_binary(name) <- Client.get("/containers/#{host}/json") do
+      "http://#{String.trim_leading(name, "/")}:4000"
+    else
+      _ -> nil
+    end
+  end
+
+  # A single-file uncompressed tar for the container archive endpoint (mirrors the
+  # registry htpasswd upload). Extracted at `/dynamic`, so Traefik's file watcher
+  # loads it.
+  defp dynamic_config_tar(filename, content) do
+    dir =
+      Path.join(System.tmp_dir!(), "homelab-traefik-dyn-#{System.unique_integer([:positive])}")
+
+    tar_path = dir <> ".tar"
+
+    try do
+      File.mkdir_p!(dir)
+      file = Path.join(dir, filename)
+      File.write!(file, content)
+
+      :ok =
+        :erl_tar.create(tar_path, [{String.to_charlist(filename), String.to_charlist(file)}], [])
+
+      File.read!(tar_path)
+    after
+      File.rm_rf(dir)
+      File.rm(tar_path)
     end
   end
 
