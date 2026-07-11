@@ -36,6 +36,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:tenants, [])
       |> assign(:siblings, [])
       |> assign(:releases, [])
+      |> assign(:driving_release, nil)
 
     {:ok, socket}
   end
@@ -53,10 +54,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:page_title, deployment.app_template.name)
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
-      |> assign(
-        :releases,
-        Homelab.Deployments.Releases.list_releases_for_deployment(deployment.id)
-      )
+      |> assign_releases()
       |> assign_readiness()
 
     socket =
@@ -67,6 +65,16 @@ defmodule HomelabWeb.DeploymentLive do
           Homelab.PubSub,
           Homelab.Deployments.Releases.topic(deployment.id)
         )
+
+        # Companions have no release of their own — their state lives on the app's
+        # release. Subscribe to that app's topic too so this page updates live.
+        if socket.assigns.driving_release &&
+             socket.assigns.driving_release.deployment_id != deployment.id do
+          Phoenix.PubSub.subscribe(
+            Homelab.PubSub,
+            Homelab.Deployments.Releases.topic(socket.assigns.driving_release.deployment_id)
+          )
+        end
 
         Phoenix.PubSub.subscribe(
           Homelab.PubSub,
@@ -81,6 +89,17 @@ defmodule HomelabWeb.DeploymentLive do
       end
 
     {:noreply, socket}
+  end
+
+  # Loads the release history where this deployment is the app, plus the single
+  # "driving" release that governs its lifecycle (the app's release even when
+  # this deployment is only a companion in it).
+  defp assign_releases(socket) do
+    id = socket.assigns.deployment.id
+
+    socket
+    |> assign(:releases, Homelab.Deployments.Releases.list_releases_for_deployment(id))
+    |> assign(:driving_release, Homelab.Deployments.Releases.driving_release(id))
   end
 
   @impl true
@@ -100,17 +119,17 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  def handle_info({:release_updated, deployment_id}, socket) do
-    if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
-      deployment = Deployments.get_deployment!(deployment_id)
+  def handle_info({:release_updated, _release_deployment_id}, socket) do
+    # We only subscribe to topics for this deployment and its driving release, so
+    # any release update we receive is relevant — refresh the deployment row, the
+    # release history, and the driving release together.
+    if socket.assigns.deployment do
+      deployment = Deployments.get_deployment!(socket.assigns.deployment.id)
 
       {:noreply,
        socket
        |> assign(:deployment, deployment)
-       |> assign(
-         :releases,
-         Homelab.Deployments.Releases.list_releases_for_deployment(deployment_id)
-       )
+       |> assign_releases()
        |> assign_readiness()}
     else
       {:noreply, socket}
@@ -404,6 +423,27 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
+  def handle_event("redeploy", _params, socket) do
+    case Deployments.redeploy(socket.assigns.deployment) do
+      {:ok, _release} ->
+        {:noreply,
+         socket
+         |> assign_releases()
+         |> put_flash(:info, "Re-running the deployment — watch the Releases tab.")}
+
+      {:error, :release_active} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "A release is already in flight for this stack. Wait for it to finish before re-running."
+         )}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Could not start a new release.")}
+    end
+  end
+
   def handle_event("delete", _params, socket) do
     case Deployments.destroy_deployment(socket.assigns.deployment) do
       {:ok, _} ->
@@ -564,6 +604,15 @@ defmodule HomelabWeb.DeploymentLive do
                 Restart
               </button>
               <button
+                :if={can_redeploy?(@driving_release)}
+                type="button"
+                phx-click="redeploy"
+                data-confirm="Re-run the deployment steps for this stack from the start?"
+                class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
+              >
+                Re-run deploy
+              </button>
+              <button
                 type="button"
                 phx-click="delete"
                 data-confirm="Are you sure you want to delete this deployment?"
@@ -582,6 +631,32 @@ defmodule HomelabWeb.DeploymentLive do
             <div>
               <p class="text-sm font-semibold text-error">Deployment failed</p>
               <p class="text-sm text-error/80 mt-0.5 font-mono">{@deployment.error_message}</p>
+            </div>
+          </div>
+
+          <%!-- Why the stack is stuck: a companion's failure lives on the app's
+                release, so surface the failed step here even when this row has no
+                error_message of its own. --%>
+          <div
+            :if={failed_step(@driving_release)}
+            class="rounded-lg bg-error/10 border border-error/20 px-4 py-3 flex items-start gap-3"
+          >
+            <.icon name="hero-exclamation-triangle" class="size-5 text-error flex-shrink-0 mt-0.5" />
+            <div class="min-w-0">
+              <p class="text-sm font-semibold text-error">
+                Deploy stopped at "{failed_step(@driving_release).type
+                |> to_string()
+                |> String.replace("_", " ")}"
+              </p>
+              <p
+                :if={failed_step(@driving_release).error_message}
+                class="text-sm text-error/80 mt-0.5 font-mono break-words"
+              >
+                {failed_step(@driving_release).error_message}
+              </p>
+              <p class="text-xs text-error/60 mt-1">
+                See the Releases tab for every step, or use "Re-run deploy" to try again.
+              </p>
             </div>
           </div>
 
@@ -1250,52 +1325,40 @@ defmodule HomelabWeb.DeploymentLive do
 
         <%!-- Releases tab --%>
         <div :if={@active_tab == "releases"} class="space-y-4">
-          <p :if={@releases == []} class="text-sm text-base-content/50 py-4">
+          <div class="flex items-center justify-between">
+            <p class="text-xs text-base-content/40">
+              Each release runs an ordered set of steps. A failed step stops the deploy — fix the cause and re-run.
+            </p>
+            <button
+              :if={can_redeploy?(@driving_release)}
+              type="button"
+              phx-click="redeploy"
+              data-confirm="Re-run the deployment steps for this stack from the start?"
+              class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-xs font-medium hover:bg-primary/90 transition-colors shrink-0"
+            >
+              Re-run deploy
+            </button>
+          </div>
+
+          <%!-- App deployments have their own release history. --%>
+          <.release_card :for={release <- @releases} release={release} />
+
+          <%!-- Companion deployments (db/redis) have no release of their own —
+                surface the app's release that provisions them, so their state and
+                errors are visible instead of a bare "no releases yet". --%>
+          <div :if={@releases == [] && @driving_release}>
+            <p class="text-xs text-base-content/50 mb-2">
+              This deployment is provisioned as part of another release:
+            </p>
+            <.release_card release={@driving_release} />
+          </div>
+
+          <p
+            :if={@releases == [] && is_nil(@driving_release)}
+            class="text-sm text-base-content/50 py-4"
+          >
             No releases yet. Multi-step deploys and adoptions appear here as they run.
           </p>
-
-          <div
-            :for={release <- @releases}
-            class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
-          >
-            <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
-              <div class="flex items-center gap-3">
-                <.status_pill status={release.status} />
-                <span class="text-xs text-base-content/40">
-                  {Calendar.strftime(release.inserted_at, "%b %d, %Y %H:%M")}
-                </span>
-              </div>
-              <span :if={release.lease_owner} class="text-[11px] text-base-content/40 font-mono">
-                lease: {release.lease_owner}
-              </span>
-            </div>
-
-            <div
-              :if={release.error_message}
-              class="px-4 py-2 bg-error/5 text-error text-xs border-b border-error/10"
-            >
-              {release.error_message}
-            </div>
-
-            <ul class="divide-y divide-base-content/5">
-              <li
-                :for={step <- Enum.sort_by(release.steps, & &1.position)}
-                class="flex items-start gap-3 px-4 py-2.5"
-              >
-                <% {icon, icon_class} = step_icon(step.status) %>
-                <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
-                <div class="min-w-0">
-                  <p class="text-sm text-base-content">
-                    {step.type |> to_string() |> String.replace("_", " ")}
-                    <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
-                  </p>
-                  <p :if={step.error_message} class="text-xs text-error mt-0.5">
-                    {step.error_message}
-                  </p>
-                </div>
-              </li>
-            </ul>
-          </div>
         </div>
       </div>
     </Layouts.app>
@@ -1519,4 +1582,67 @@ defmodule HomelabWeb.DeploymentLive do
   defp step_icon(:compensated), do: {"hero-arrow-uturn-left", "text-base-content/40"}
   defp step_icon(:skipped), do: {"hero-minus-circle", "text-base-content/40"}
   defp step_icon(_pending), do: {"hero-clock", "text-base-content/30"}
+
+  # Re-run is offered only when no release is in flight — a live saga must not be
+  # re-driven, and the one-active-per-deployment constraint would reject the plan.
+  defp can_redeploy?(nil), do: true
+
+  defp can_redeploy?(%Homelab.Deployments.Release{} = r),
+    do: Homelab.Deployments.Release.terminal?(r)
+
+  defp can_redeploy?(_), do: false
+
+  # The first step that failed on a release, if any — the reason the stack stalled.
+  defp failed_step(%Homelab.Deployments.Release{steps: steps}) when is_list(steps),
+    do: Enum.find(Enum.sort_by(steps, & &1.position), &(&1.status == :failed))
+
+  defp failed_step(_), do: nil
+
+  # One release: header (status + time + lease), any release-level error, then the
+  # ordered steps with per-step status and error.
+  attr :release, :map, required: true
+
+  defp release_card(assigns) do
+    ~H"""
+    <div class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+        <div class="flex items-center gap-3">
+          <.status_pill status={@release.status} />
+          <span class="text-xs text-base-content/40">
+            {Calendar.strftime(@release.inserted_at, "%b %d, %Y %H:%M")}
+          </span>
+        </div>
+        <span :if={@release.lease_owner} class="text-[11px] text-base-content/40 font-mono">
+          lease: {@release.lease_owner}
+        </span>
+      </div>
+
+      <div
+        :if={@release.error_message}
+        class="px-4 py-2 bg-error/5 text-error text-xs border-b border-error/10"
+      >
+        {@release.error_message}
+      </div>
+
+      <ul class="divide-y divide-base-content/5">
+        <li
+          :for={step <- Enum.sort_by(@release.steps, & &1.position)}
+          class="flex items-start gap-3 px-4 py-2.5"
+        >
+          <% {icon, icon_class} = step_icon(step.status) %>
+          <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
+          <div class="min-w-0">
+            <p class="text-sm text-base-content">
+              {step.type |> to_string() |> String.replace("_", " ")}
+              <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
+            </p>
+            <p :if={step.error_message} class="text-xs text-error mt-0.5 break-words">
+              {step.error_message}
+            </p>
+          </div>
+        </li>
+      </ul>
+    </div>
+    """
+  end
 end
