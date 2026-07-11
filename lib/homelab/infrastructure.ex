@@ -291,6 +291,14 @@ defmodule Homelab.Infrastructure do
         # pre-check is safe here. Enable with TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK=true.
         disable_check? = System.get_env("TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK") in ~w(true 1)
 
+        # With the active check disabled, lego notifies LE after a FIXED delay
+        # instead of polling. The default is 0s, which rushes LE before Cloudflare
+        # has served the freshly-written TXT — so a base+wildcard cert (both at
+        # _acme-challenge.<domain>) can validate one and 403 the other. A short delay
+        # lets both records propagate to the authoritative NS first. Defaults to 30s
+        # whenever the check is disabled; override with TRAEFIK_DNS_DELAY_BEFORE_CHECK.
+        delay = System.get_env("TRAEFIK_DNS_DELAY_BEFORE_CHECK") || if(disable_check?, do: "30s")
+
         acme_cmd =
           [
             "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
@@ -298,13 +306,18 @@ defmodule Homelab.Infrastructure do
             "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
             "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
           ] ++
-            if disable_check? do
-              [
+            if(disable_check?,
+              do: [
                 "--certificatesresolvers.letsencrypt.acme.dnschallenge.disablepropagationcheck=true"
+              ],
+              else: []
+            ) ++
+            if(delay in [nil, ""],
+              do: [],
+              else: [
+                "--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=#{delay}"
               ]
-            else
-              []
-            end
+            )
 
         template =
           @system_templates
