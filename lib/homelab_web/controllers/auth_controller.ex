@@ -4,6 +4,7 @@ defmodule HomelabWeb.AuthController do
   require Logger
 
   alias Homelab.Accounts
+  alias Homelab.Auth.BreakGlass
   alias Homelab.Auth.OidcDiscovery
   alias Homelab.Settings
 
@@ -28,9 +29,10 @@ defmodule HomelabWeb.AuthController do
           )
 
         {:error, _reason} ->
-          conn
-          |> put_flash(:error, "Failed to discover OIDC provider.")
-          |> redirect(to: "/")
+          # Provider unreachable. Redirecting to "/" would bounce straight back
+          # here (RequireAuth -> /auth/oidc -> discovery fails -> "/"), an infinite
+          # loop — so fail open to break-glass instead.
+          oidc_unavailable(conn, "discovery failed")
       end
     end
   end
@@ -98,10 +100,7 @@ defmodule HomelabWeb.AuthController do
 
         {:error, reason} ->
           Logger.error("OIDC discovery failed for #{issuer}: #{inspect(reason)}")
-
-          conn
-          |> put_flash(:error, "Failed to discover OIDC provider.")
-          |> redirect(to: "/")
+          oidc_unavailable(conn, "discovery failed")
       end
     end
   end
@@ -117,6 +116,25 @@ defmodule HomelabWeb.AuthController do
     |> configure_session(drop: true)
     |> put_flash(:info, "Signed out successfully.")
     |> redirect(to: "/")
+  end
+
+  # The OIDC provider is unreachable. If break-glass is configured, send the
+  # operator there (the only non-looping way back in); otherwise there is no way
+  # to authenticate, so surface that plainly instead of bouncing forever.
+  defp oidc_unavailable(conn, detail) do
+    if BreakGlass.enabled?() do
+      conn
+      |> put_flash(:error, "OIDC provider unavailable (#{detail}). Use break-glass to sign in.")
+      |> redirect(to: "/auth/break-glass")
+    else
+      conn
+      |> put_resp_content_type("text/plain")
+      |> send_resp(
+        503,
+        "OIDC provider is unreachable (#{detail}) and break-glass is not configured. " <>
+          "Set HOMELAB_BREAKGLASS_TOKEN to recover access."
+      )
+    end
   end
 
   defp build_authorization_url(discovery, client_id, redirect_uri, state) do
