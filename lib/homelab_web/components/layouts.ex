@@ -90,6 +90,12 @@ defmodule HomelabWeb.Layouts do
               label="Activity"
               active={@page_title == "Activity"}
             />
+            <.sidebar_link
+              path={~p"/telemetry"}
+              icon="hero-chart-bar"
+              label="Telemetry"
+              active={@page_title == "Telemetry"}
+            />
           </div>
 
           <div class="mt-5">
