@@ -79,6 +79,31 @@ defmodule Homelab.Deployments.Releases do
     |> Enum.map(&preload_steps/1)
   end
 
+  @doc """
+  The latest release that governs a deployment's lifecycle — whether the
+  deployment is the release's app (`deployment_id`) or one of its companions
+  (referenced by a step's `resource_handle["deployment_id"]`).
+
+  Companion deployments (a datastore behind an app, say) have no release of
+  their own; their provisioning lives on the app's release. This resolves that
+  release from either end so every deployment can surface its real state.
+  """
+  def driving_release(deployment_id) do
+    id_str = to_string(deployment_id)
+
+    Release
+    |> join(:left, [r], s in assoc(r, :steps))
+    |> where(
+      [r, s],
+      r.deployment_id == ^deployment_id or
+        fragment("?->>'deployment_id' = ?", s.resource_handle, ^id_str)
+    )
+    |> order_by([r], desc: r.inserted_at, desc: r.id)
+    |> limit(1)
+    |> Repo.one()
+    |> preload_steps()
+  end
+
   @doc "The single active (non-terminal) release for a deployment, if any."
   def get_active_release(deployment_id) do
     Release
