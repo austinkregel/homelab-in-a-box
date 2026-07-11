@@ -18,13 +18,23 @@ defmodule Homelab.Bootstrap do
   @postgres_volume "homelab-iab-postgres-data"
   @secrets_volume "homelab-iab-secrets"
   @network "homelab-internal"
-  @postgres_image "postgres:17-alpine"
+  # The app DB runs TimescaleDB (PostgreSQL 17 + the timescaledb extension) so the
+  # `metric_samples` time-series table can be a hypertable. The migration falls back
+  # to a plain BRIN-indexed table when the extension is absent, so this is an
+  # optimization rather than a hard requirement.
+  @postgres_image "timescale/timescaledb:2.17.2-pg17"
+  @postgres_image_repo "timescale/timescaledb"
+  @postgres_image_tag "2.17.2-pg17"
   @postgres_user "homelab"
   @postgres_db "homelab_prod"
-  # Dedicated Postgres instance for Oban, isolated from the app DB.
+  # Dedicated Postgres instance for Oban, isolated from the app DB. It holds no
+  # time-series data, so it stays on stock Postgres.
   @oban_postgres_container "homelab-iab-oban-postgres"
   @oban_postgres_volume "homelab-iab-oban-postgres-data"
   @oban_postgres_db "homelab_oban_prod"
+  @oban_postgres_image "postgres:17-alpine"
+  @oban_postgres_image_repo "postgres"
+  @oban_postgres_image_tag "17-alpine"
   @secrets_path "/run/secrets"
   @password_file "pg_password"
   @max_wait_attempts 30
@@ -340,12 +350,20 @@ defmodule Homelab.Bootstrap do
 
   defp create_postgres(password) do
     Logger.info("Bootstrap: pulling #{@postgres_image}...")
-    _ = Client.post("/images/create?fromImage=postgres&tag=17-alpine")
+
+    _ =
+      Client.post(
+        "/images/create?fromImage=#{@postgres_image_repo}&tag=#{@postgres_image_tag}"
+      )
 
     Logger.info("Bootstrap: creating Postgres container")
 
     body = %{
       "Image" => @postgres_image,
+      # Load the extension library explicitly: the TimescaleDB entrypoint only
+      # writes `shared_preload_libraries` on a fresh initdb, so a data volume
+      # first created by stock Postgres would otherwise reject CREATE EXTENSION.
+      "Cmd" => ["postgres", "-c", "shared_preload_libraries=timescaledb"],
       "Env" => [
         "POSTGRES_USER=#{@postgres_user}",
         "POSTGRES_PASSWORD=#{password}",
@@ -441,10 +459,19 @@ defmodule Homelab.Bootstrap do
   end
 
   defp create_oban_postgres(password) do
+    # Pull explicitly: the app DB now runs a different image, so this one is no
+    # longer guaranteed to be present from create_postgres/1.
+    Logger.info("Bootstrap: pulling #{@oban_postgres_image}...")
+
+    _ =
+      Client.post(
+        "/images/create?fromImage=#{@oban_postgres_image_repo}&tag=#{@oban_postgres_image_tag}"
+      )
+
     Logger.info("Bootstrap: creating Oban Postgres container")
 
     body = %{
-      "Image" => @postgres_image,
+      "Image" => @oban_postgres_image,
       "Env" => [
         "POSTGRES_USER=#{@postgres_user}",
         "POSTGRES_PASSWORD=#{password}",
