@@ -28,6 +28,19 @@ if managed_root = System.get_env("HOMELAB_MANAGED_ROOT") do
   config :homelab, :managed_root, managed_root
 end
 
+# Emergency, non-OIDC admin login (see Homelab.Auth.BreakGlass). The token is NOT
+# an env var: it lives in a file, and a successful login CONSUMES (deletes) it so
+# it can't be reused. The route 404s until the file holds a >= 24-char token.
+# Arm it by writing that file (defaults into the homelab-iab-secrets volume), e.g.
+#   docker exec homelab bin/homelab rpc 'IO.puts(Homelab.Auth.BreakGlass.arm!())'
+config :homelab, :breakglass,
+  token_file:
+    System.get_env(
+      "HOMELAB_BREAKGLASS_TOKEN_FILE",
+      Path.join(System.get_env("HOMELAB_SECRETS_DIR", "/run/secrets"), "breakglass_token")
+    ),
+  user: System.get_env("HOMELAB_BREAKGLASS_USER", "breakglass")
+
 if bootstrap? do
   config :homelab, :docker_socket, System.get_env("DOCKER_SOCKET", "/var/run/docker.sock")
 
