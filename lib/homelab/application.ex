@@ -58,6 +58,8 @@ defmodule Homelab.Application do
   defp services_children do
     if Application.get_env(:homelab, :start_services, true) do
       [
+        # Stands up Traefik on boot (before deploys need it), then keeps it up.
+        Homelab.Services.GatewayProvisioner,
         Homelab.Services.Reconciler,
         Homelab.Services.DockerEventListener,
         Homelab.Services.BackupScheduler,

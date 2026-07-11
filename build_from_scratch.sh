@@ -111,6 +111,23 @@ if [ "$MODE" = "prod" ]; then
   echo "==> Building production image..."
   docker build -t homelab-in-a-box:latest . --pull --no-cache
 
+  # Register the homelab UI itself as Traefik's first service. Once the app
+  # auto-provisions Traefik (Homelab.Services.GatewayProvisioner), Traefik's Docker
+  # provider reads these labels and routes https://${HOMELAB_BASE_DOMAIN} to :4000
+  # over the internal network. The main+wildcard tls.domains make it request the
+  # `*.${HOMELAB_BASE_DOMAIN}` cert via DNS-01 up front, so the wildcard provisions
+  # as soon as the gateway comes up. Requires TRAEFIK_DNS_API_TOKEN.
+  HOMELAB_LABELS=(
+    --label "traefik.enable=true"
+    --label "traefik.http.routers.homelab.rule=Host(\`${HOMELAB_BASE_DOMAIN}\`)"
+    --label "traefik.http.routers.homelab.entrypoints=websecure"
+    --label "traefik.http.routers.homelab.tls=true"
+    --label "traefik.http.routers.homelab.tls.certresolver=letsencrypt"
+    --label "traefik.http.routers.homelab.tls.domains[0].main=${HOMELAB_BASE_DOMAIN}"
+    --label "traefik.http.routers.homelab.tls.domains[0].sans=*.${HOMELAB_BASE_DOMAIN}"
+    --label "traefik.http.services.homelab.loadbalancer.server.port=4000"
+  )
+
   echo "==> Starting homelab-in-a-box (prod, detached)..."
   docker run -d \
     --name homelab \
@@ -118,6 +135,7 @@ if [ "$MODE" = "prod" ]; then
     --memory "${HOMELAB_MEMORY_LIMIT:-1g}" \
     --cpus "${HOMELAB_CPU_LIMIT:-2}" \
     --network "${NETWORK}" \
+    "${HOMELAB_LABELS[@]}" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v homelab-iab-secrets:/run/secrets \
     ${DISK_MOUNT_ARGS[@]+"${DISK_MOUNT_ARGS[@]}"} \
@@ -133,7 +151,7 @@ if [ "$MODE" = "prod" ]; then
     -e PHX_HOST="${HOMELAB_BASE_DOMAIN}" \
     -e PHX_SCHEME="https" \
     -e PHX_PORT="443" \
-    -p 4000:4000 \
+    -p 127.0.0.1:4000:4000 \
     homelab-in-a-box:latest
 
   echo "==> Started. Follow logs with: docker logs -f homelab"
