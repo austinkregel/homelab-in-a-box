@@ -129,9 +129,12 @@ defmodule Homelab.Infrastructure do
   defp build_traefik_template do
     case System.get_env(@dns_token_env) do
       token when is_binary(token) and token != "" ->
+        # Let's Encrypt rejects a malformed contact, so this must be a real email.
+        # Prefer the operator-set `acme_email`; otherwise default to admin@<domain>
+        # (NOT the bare domain, which isn't an email and fails account registration).
         acme_email =
           Homelab.Settings.get("acme_email") ||
-            Homelab.Settings.get("base_domain", "admin@homelab.local")
+            "admin@#{Homelab.Settings.get("base_domain", "homelab.local")}"
 
         acme_cmd = [
           "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
