@@ -29,8 +29,14 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   @impl true
   def deploy(spec) do
-    with :ok <- ensure_network(spec.network),
-         :ok <- pull_image(spec.image) do
+    # Pull FIRST, then ensure the network immediately before create. The image pull
+    # can take tens of seconds; doing `ensure_network` before it left a wide window
+    # in which the freshly-created (empty) network could be removed — by a racing
+    # cleanup, a sibling deploy's rollback, or a prune — before the container ever
+    # attached, surfacing as "network <name> not found" at create time. Ensuring the
+    # network right before the create closes that window.
+    with :ok <- pull_image(spec.image),
+         :ok <- ensure_network(spec.network) do
       body = build_container_payload(spec)
 
       case Client.post("/containers/create?name=#{spec.service_name}", body) do

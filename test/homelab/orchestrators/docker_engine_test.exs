@@ -244,6 +244,49 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
   end
 
   describe "deploy/1 — routing & bridge networks" do
+    test "ensures the network AFTER pulling the image, immediately before create" do
+      # Regression: doing ensure_network BEFORE the (slow) image pull left a window
+      # where the fresh empty network could be removed before the container attached
+      # ("network <name> not found" at create). Order must be: pull -> ensure_network
+      # -> container create.
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, {:not_found, %{}}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
+        send(test_pid, {:seq, :pull})
+        :ok
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          path == "/networks/create" ->
+            send(test_pid, {:seq, :ensure_network})
+            {:ok, %{"Id" => "net"}}
+
+          String.starts_with?(path, "/containers/create") ->
+            send(test_pid, {:seq, :create})
+            {:ok, %{"Id" => "cid"}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(base_spec())
+
+      seq =
+        for _ <- 1..3 do
+          receive do
+            {:seq, step} -> step
+          after
+            200 -> :none
+          end
+        end
+
+      assert seq == [:pull, :ensure_network, :create]
+    end
+
     test "connects bridge networks and the routing network when traefik enabled" do
       test_pid = self()
 
@@ -370,6 +413,8 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     end
 
     test "fails when ensure_network create fails" do
+      # pull runs first now, so it must succeed for the flow to reach ensure_network
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, {:not_found, %{}}} end)
 
       expect(Homelab.Mocks.DockerClient, :post, fn "/networks/create", _body, _opts ->
@@ -929,6 +974,9 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     end
 
     test "ensure_network propagates a non-404 GET error without creating" do
+      # pull runs first now, so it must succeed for the flow to reach ensure_network
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts ->
         {:error, {:http_error, 500, %{}}}
       end)
