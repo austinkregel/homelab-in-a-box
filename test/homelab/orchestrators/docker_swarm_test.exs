@@ -345,7 +345,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
           get_in(body, ["TaskTemplate", "Networks"]) |> Enum.map(& &1["Target"])
 
         assert spec.network in targets
-        assert "homelab-internal" in targets
+        assert "homelab-iab-internal" in targets
         {:ok, %{"ID" => "svc_net"}}
       end)
 

@@ -4,7 +4,7 @@ defmodule Homelab.System.TraefikMetrics do
   Prometheus text format into structured per-service traffic data.
 
   Traefik exposes metrics at `http://homelab-traefik:8080/metrics`
-  on the `homelab-internal` network.
+  on the `homelab-iab-internal` network.
   """
 
   require Logger

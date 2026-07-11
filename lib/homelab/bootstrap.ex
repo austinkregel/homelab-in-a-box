@@ -17,7 +17,10 @@ defmodule Homelab.Bootstrap do
   @postgres_container "homelab-iab-postgres"
   @postgres_volume "homelab-iab-postgres-data"
   @secrets_volume "homelab-iab-secrets"
-  @network "homelab-internal"
+  # Namespaced `homelab-iab-` like the plane's other resources: a bare
+  # `homelab-internal` would collide with a network an existing stack may already
+  # own — and this module both CREATES and (via build_from_scratch) removes it.
+  @network "homelab-iab-internal"
   # The app DB runs TimescaleDB (PostgreSQL 17 + the timescaledb extension) so the
   # `metric_samples` time-series table can be a hypertable. The migration falls back
   # to a plain BRIN-indexed table when the extension is absent, so this is an

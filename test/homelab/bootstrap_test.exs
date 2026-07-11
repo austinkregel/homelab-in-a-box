@@ -61,7 +61,7 @@ defmodule Homelab.BootstrapTest do
 
     test "when everything already exists, returns :ok and configures the repo hostname" do
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/networks/homelab-internal", _ ->
+        "/networks/homelab-iab-internal", _ ->
           {:ok, %{"Containers" => %{}}}
 
         "/volumes/" <> _, _ ->
@@ -79,7 +79,7 @@ defmodule Homelab.BootstrapTest do
       test_pid = self()
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/networks/homelab-internal", _ -> {:error, {:not_found, ""}}
+        "/networks/homelab-iab-internal", _ -> {:error, {:not_found, ""}}
         "/volumes/" <> _, _ -> {:error, {:not_found, ""}}
         "/containers/" <> _, _ -> {:error, {:not_found, ""}}
       end)
@@ -100,7 +100,7 @@ defmodule Homelab.BootstrapTest do
       # we only care that the create requests were shaped correctly.
       assert {:error, :postgres_timeout} = Bootstrap.ensure_infrastructure()
 
-      assert_received {:post, "/networks/create", %{"Name" => "homelab-internal"}}
+      assert_received {:post, "/networks/create", %{"Name" => "homelab-iab-internal"}}
       assert_received {:post, "/volumes/create", %{"Name" => "homelab-iab-postgres-data"}}
 
       assert_received {:post, "/containers/create?name=homelab-iab-postgres", create_body}
@@ -109,7 +109,7 @@ defmodule Homelab.BootstrapTest do
 
     test "maps a network check failure to {:network_check_failed, _}" do
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/networks/homelab-internal", _ -> {:error, :econnrefused}
+        "/networks/homelab-iab-internal", _ -> {:error, :econnrefused}
       end)
 
       assert {:error, {:network_check_failed, :econnrefused}} =
@@ -120,7 +120,7 @@ defmodule Homelab.BootstrapTest do
       Application.put_env(:homelab, :bootstrap_wait, attempts: 1, interval_ms: 0)
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/networks/homelab-internal", _ -> {:ok, %{"Containers" => %{}}}
+        "/networks/homelab-iab-internal", _ -> {:ok, %{"Containers" => %{}}}
         "/volumes/" <> _, _ -> {:ok, %{}}
         # Running but never healthy.
         "/containers/" <> _, _ -> {:ok, %{"State" => %{"Running" => true}}}

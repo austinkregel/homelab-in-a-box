@@ -23,7 +23,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
   @impl true
   def description, do: "Standalone containers — no Swarm required"
 
-  @routing_network "homelab-internal"
+  # Must match Homelab.Infrastructure's backbone network (namespaced to avoid
+  # colliding with an existing stack's `homelab-internal`).
+  @routing_network "homelab-iab-internal"
 
   @impl true
   def deploy(spec) do

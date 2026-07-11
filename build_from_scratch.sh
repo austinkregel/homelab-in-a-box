@@ -54,7 +54,7 @@ for pair in ${HOMELAB_DISKS:-}; do
   echo "==> Exposing disk: ${pair} (read-only)"
 done
 
-NETWORK="homelab-internal"
+NETWORK="homelab-iab-internal"
 
 # Anything carrying `homelab.adopted=true` is an ADOPTED user service — e.g. a
 # self-hosted OIDC server and its database — whose real data lives on this host.

@@ -13,7 +13,7 @@ mounted Docker socket to create and manage its **own** Postgres:
 | DB container    | `homelab-iab-postgres`     | `postgres:17-alpine`, user `homelab`         |
 | DB data volume  | `homelab-iab-postgres-data`| Survives restarts                            |
 | Secrets volume  | `homelab-iab-secrets`      | Holds the pg password + `secret_key_base`    |
-| Network         | `homelab-internal`         | Shared with app containers it manages         |
+| Network         | `homelab-iab-internal`         | Shared with app containers it manages         |
 
 These are namespaced `homelab-iab-*` specifically so they never collide with a
 shared `homelab-postgres` that may already exist on the host (e.g. your main

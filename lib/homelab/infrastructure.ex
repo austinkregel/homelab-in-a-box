@@ -8,7 +8,10 @@ defmodule Homelab.Infrastructure do
   alias Homelab.Docker.Client
 
   @system_label "homelab.system"
-  @network "homelab-internal"
+  # The plane's own backbone (system services + the Traefik<->deployment routing
+  # fabric). Namespaced `homelab-iab-` so it never collides with an existing
+  # stack's `homelab-internal`. Keep in sync with the orchestrators' routing net.
+  @network "homelab-iab-internal"
 
   @system_templates %{
     "traefik" => %{

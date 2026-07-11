@@ -120,7 +120,7 @@ defmodule Homelab.InfrastructureTest do
     test "no-op when the container is already running (network exists)" do
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
-          "/networks/homelab-internal" -> {:ok, %{"Name" => "homelab-internal"}}
+          "/networks/homelab-iab-internal" -> {:ok, %{"Name" => "homelab-iab-internal"}}
           "/containers/homelab-pihole/json" -> {:ok, %{"State" => %{"Running" => true}}}
         end
       end)
@@ -132,13 +132,13 @@ defmodule Homelab.InfrastructureTest do
       # Network 404 -> create; container already running afterwards.
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
-          "/networks/homelab-internal" -> {:error, {:not_found, %{}}}
+          "/networks/homelab-iab-internal" -> {:error, {:not_found, %{}}}
           "/containers/homelab-pihole/json" -> {:ok, %{"State" => %{"Running" => true}}}
         end
       end)
 
       expect(Homelab.Mocks.DockerClient, :post, fn "/networks/create", body, _opts ->
-        assert body == %{"Name" => "homelab-internal", "Driver" => "bridge"}
+        assert body == %{"Name" => "homelab-iab-internal", "Driver" => "bridge"}
         {:ok, %{"Id" => "net1"}}
       end)
 
@@ -146,7 +146,7 @@ defmodule Homelab.InfrastructureTest do
     end
 
     test "propagates a network creation failure as :network_create_failed" do
-      expect(Homelab.Mocks.DockerClient, :get, fn "/networks/homelab-internal", _opts ->
+      expect(Homelab.Mocks.DockerClient, :get, fn "/networks/homelab-iab-internal", _opts ->
         {:error, {:not_found, %{}}}
       end)
 
@@ -161,7 +161,7 @@ defmodule Homelab.InfrastructureTest do
     test "404 on container inspect -> pulls image, creates and starts the container" do
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
-          "/networks/homelab-internal" -> {:ok, %{}}
+          "/networks/homelab-iab-internal" -> {:ok, %{}}
           "/containers/homelab-pihole/json" -> {:error, {:not_found, %{}}}
         end
       end)
@@ -175,7 +175,7 @@ defmodule Homelab.InfrastructureTest do
         case path do
           "/containers/create?name=homelab-pihole" ->
             assert body["Image"] == "pihole/pihole:latest"
-            assert body["HostConfig"]["NetworkMode"] == "homelab-internal"
+            assert body["HostConfig"]["NetworkMode"] == "homelab-iab-internal"
             assert body["HostConfig"]["RestartPolicy"] == %{"Name" => "unless-stopped"}
             {:ok, %{"Id" => "newid"}}
 
@@ -190,7 +190,7 @@ defmodule Homelab.InfrastructureTest do
     test "existing-but-stopped container is started in place" do
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
-          "/networks/homelab-internal" -> {:ok, %{}}
+          "/networks/homelab-iab-internal" -> {:ok, %{}}
           "/containers/homelab-pihole/json" -> {:ok, %{"State" => %{"Running" => false}}}
         end
       end)
@@ -207,7 +207,7 @@ defmodule Homelab.InfrastructureTest do
     test "start failure on a stale container -> force-delete then recreate" do
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
-          "/networks/homelab-internal" -> {:ok, %{}}
+          "/networks/homelab-iab-internal" -> {:ok, %{}}
           "/containers/homelab-pihole/json" -> {:ok, %{"State" => %{"Running" => false}}}
         end
       end)
@@ -241,7 +241,7 @@ defmodule Homelab.InfrastructureTest do
         {:ok,
          %{
            "Id" => "traefik-id",
-           "NetworkSettings" => %{"Networks" => %{"homelab-internal" => %{}}}
+           "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}
          }}
       end)
 
@@ -306,7 +306,7 @@ defmodule Homelab.InfrastructureTest do
         {:ok,
          %{
            "Id" => "traefik-id",
-           "NetworkSettings" => %{"Networks" => %{"homelab-internal" => %{}}}
+           "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}
          }}
       end)
 
@@ -328,13 +328,13 @@ defmodule Homelab.InfrastructureTest do
         {:ok,
          %{
            "NetworkSettings" => %{
-             "Networks" => %{"homelab-internal" => %{}, "app-net" => %{}}
+             "Networks" => %{"homelab-iab-internal" => %{}, "app-net" => %{}}
            }
          }}
       end)
 
       networks = Infrastructure.traefik_networks()
-      assert Enum.sort(networks) == ["app-net", "homelab-internal"]
+      assert Enum.sort(networks) == ["app-net", "homelab-iab-internal"]
     end
 
     test "returns [] on error" do

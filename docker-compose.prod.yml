@@ -50,7 +50,7 @@ services:
       # Point your reverse proxy (nginx-proxy-manager) at this.
       - "4000:4000"
     networks:
-      - homelab-internal
+      - homelab-iab-internal
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:4000/api/v1/health"]
       interval: 30s
@@ -72,7 +72,7 @@ services:
     # drop the `ports:` mapping above.
     #
     #   networks:
-    #     - homelab-internal
+    #     - homelab-iab-internal
     #     - stack-internal
 
 volumes:
@@ -80,10 +80,10 @@ volumes:
     name: homelab-iab-secrets
 
 networks:
-  # Named exactly so the app's bootstrap (which expects `homelab-internal`)
+  # Named exactly so the app's bootstrap (which expects `homelab-iab-internal`)
   # and its managed apps share one network.
-  homelab-internal:
-    name: homelab-internal
+  homelab-iab-internal:
+    name: homelab-iab-internal
 
   # Your existing compose stack's internal network (project-prefixed). Uncomment
   # to let NPM/Prometheus reach this app without publishing ports to the host.
