@@ -160,7 +160,10 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
 
           "/containers/homelab-traefik/json", _opts ->
             {:ok,
-             %{"Id" => "tid", "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}}}
+             %{
+               "Id" => "tid",
+               "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}
+             }}
 
           path, _opts ->
             if path =~ "/logs?stdout=true", do: {:ok, framed}, else: {:ok, %{}}
@@ -215,7 +218,10 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
         stub(Homelab.Mocks.DockerClient, :get, fn
           "/containers/homelab-traefik/json", _opts ->
             {:ok,
-             %{"Id" => "tid", "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}}}
+             %{
+               "Id" => "tid",
+               "NetworkSettings" => %{"Networks" => %{"homelab-iab-internal" => %{}}}
+             }}
 
           _path, _opts ->
             {:ok, %{}}

@@ -273,7 +273,9 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
 
       assert_received {:connect, "/networks/shared_net/connect", %{"Container" => "cid"}}
-      assert_received {:connect, "/networks/homelab-iab-internal/connect", %{"Container" => "cid"}}
+
+      assert_received {:connect, "/networks/homelab-iab-internal/connect",
+                       %{"Container" => "cid"}}
     end
 
     test "connects the routing network when service_mode is true (no traefik label)" do
@@ -300,7 +302,8 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
 
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
 
-      assert_received {:connect, "/networks/homelab-iab-internal/connect", %{"Container" => "cid"}}
+      assert_received {:connect, "/networks/homelab-iab-internal/connect",
+                       %{"Container" => "cid"}}
     end
 
     test "does NOT connect the routing network when neither traefik nor service_mode set" do
