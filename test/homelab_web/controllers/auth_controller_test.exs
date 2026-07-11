@@ -6,6 +6,19 @@ defmodule HomelabWeb.AuthControllerTest do
 
   setup :verify_on_exit!
 
+  # Arms break-glass for the duration of one test (reset on exit) by writing a
+  # token file long enough to clear Homelab.Auth.BreakGlass's minimum-entropy gate.
+  defp enable_breakglass do
+    path = Path.join(System.tmp_dir!(), "bg-token-#{System.unique_integer([:positive])}")
+    File.write!(path, String.duplicate("b", 32))
+    Application.put_env(:homelab, :breakglass, token_file: path)
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :breakglass)
+      File.rm(path)
+    end)
+  end
+
   defp setup_oidc_bypass(_context) do
     bypass = Bypass.open()
     url = "http://localhost:#{bypass.port}"
@@ -86,14 +99,32 @@ defmodule HomelabWeb.AuthControllerTest do
       assert get_session(conn, :oidc_state) != nil
     end
 
-    test "redirects to / when OIDC discovery fails", %{conn: conn, bypass: bypass} do
+    test "503s when OIDC discovery fails and break-glass is disabled", %{
+      conn: conn,
+      bypass: bypass
+    } do
       Bypass.stub(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
         Plug.Conn.resp(conn, 500, "Internal Server Error")
       end)
 
       conn = get(conn, "/auth/oidc")
-      assert redirected_to(conn) == "/"
-      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "Failed to discover"
+      assert conn.status == 503
+      assert conn.resp_body =~ "break-glass is not configured"
+    end
+
+    test "fails open to break-glass when discovery fails and break-glass is enabled", %{
+      conn: conn,
+      bypass: bypass
+    } do
+      enable_breakglass()
+
+      Bypass.stub(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
+        Plug.Conn.resp(conn, 500, "Internal Server Error")
+      end)
+
+      conn = get(conn, "/auth/oidc")
+      assert redirected_to(conn) == "/auth/break-glass"
+      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "break-glass"
     end
   end
 
@@ -190,8 +221,9 @@ defmodule HomelabWeb.AuthControllerTest do
             |> put_session(:oidc_state, state)
             |> get("/auth/oidc/callback", %{"code" => "auth-code", "state" => state})
 
-          assert redirected_to(conn) == "/"
-          assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "Failed to discover"
+          # Break-glass disabled by default in tests → fail closed with a 503.
+          assert conn.status == 503
+          assert conn.resp_body =~ "break-glass is not configured"
         end)
 
       assert log =~
