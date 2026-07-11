@@ -282,12 +282,29 @@ defmodule Homelab.Infrastructure do
         #   TRAEFIK_DNS_RESOLVERS=sid.ns.cloudflare.com:53,elle.ns.cloudflare.com:53
         resolvers = System.get_env("TRAEFIK_DNS_RESOLVERS", "1.1.1.1:53")
 
-        acme_cmd = [
-          "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
-          "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
-          "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
-          "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
-        ]
+        # lego does a LOCAL "has the TXT propagated?" pre-check before telling LE to
+        # validate. On a host with a caching/intercepting resolver (Pi-hole,
+        # systemd-resolved — common in a homelab) that pre-check reads stale/negative
+        # answers and times out, even though the record is live at the authoritative
+        # NS. The REAL validation is done by Let's Encrypt's servers against the
+        # authoritative NS directly (never the local cache), so skipping the local
+        # pre-check is safe here. Enable with TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK=true.
+        disable_check? = System.get_env("TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK") in ~w(true 1)
+
+        acme_cmd =
+          [
+            "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
+            "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
+            "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
+            "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
+          ] ++
+            if disable_check? do
+              [
+                "--certificatesresolvers.letsencrypt.acme.dnschallenge.disablepropagationcheck=true"
+              ]
+            else
+              []
+            end
 
         template =
           @system_templates
