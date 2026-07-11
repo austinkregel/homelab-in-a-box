@@ -1104,7 +1104,7 @@ defmodule HomelabWeb.DashboardLiveTest do
   end
 
   describe "system health gauges" do
-    test "renders CPU, Memory, and Docker gauges when metrics present", %{conn: conn} do
+    test "renders CPU, Memory, and Disk gauges when metrics present", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
 
       metrics = %{
@@ -1112,6 +1112,7 @@ defmodule HomelabWeb.DashboardLiveTest do
         memory_percent: 72.3,
         memory_used: 6_174_015_488,
         memory_total: 8_589_934_592,
+        disk: [%{mount: "/", total: 100, used: 80, percent: 80.0}],
         docker: %{"Containers" => 10, "ContainersRunning" => 7}
       }
 
@@ -1123,9 +1124,11 @@ defmodule HomelabWeb.DashboardLiveTest do
       assert html =~ "35.5%"
       assert html =~ "Memory"
       assert html =~ "72.3%"
-      assert html =~ "Docker"
+      # The third gauge is now Disk (busiest mount), replacing the old
+      # hardcoded-0 Docker gauge; container counts move to the CPU gauge detail.
+      assert html =~ "Disk"
+      assert html =~ "80.0%"
       assert html =~ "7/10"
-      assert html =~ "containers running"
     end
 
     test "formats memory in GB correctly", %{conn: conn} do
@@ -1146,7 +1149,7 @@ defmodule HomelabWeb.DashboardLiveTest do
       assert html =~ "16.0 GB"
     end
 
-    test "docker dash shown when no docker key in metrics", %{conn: conn} do
+    test "disk gauge shows a no-data state when disk metrics are absent", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
 
       metrics = %{
@@ -1159,7 +1162,8 @@ defmodule HomelabWeb.DashboardLiveTest do
       send(view.pid, {:metrics, metrics})
       _ = :sys.get_state(view.pid)
       html = render(view)
-      assert html =~ "Docker"
+      assert html =~ "Disk"
+      assert html =~ "No disk data"
     end
   end
 end
