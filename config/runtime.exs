@@ -28,6 +28,14 @@ if managed_root = System.get_env("HOMELAB_MANAGED_ROOT") do
   config :homelab, :managed_root, managed_root
 end
 
+# The public base domain (e.g. homelab.kregel.dev). Config.base_domain/0 reads
+# this app-env; without it the value was permanently the "homelab.local" default,
+# regardless of HOMELAB_BASE_DOMAIN — which then flowed into deployment domains,
+# the registry hostnames, and the Traefik self-ingress route + wildcard cert.
+if base_domain = System.get_env("HOMELAB_BASE_DOMAIN") do
+  config :homelab, :base_domain, base_domain
+end
+
 # Emergency, non-OIDC admin login (see Homelab.Auth.BreakGlass). The token is NOT
 # an env var: it lives in a file, and a successful login CONSUMES (deletes) it so
 # it can't be reused. The route 404s until the file holds a >= 24-char token.

@@ -183,7 +183,15 @@ defmodule Homelab.Config do
   # -- Other settings --
 
   def base_domain do
-    Application.get_env(:homelab, :base_domain, "homelab.local")
+    # Precedence mirrors the driver settings above: an explicit app-env override
+    # (set from HOMELAB_BASE_DOMAIN in runtime.exs) wins, then the operator's
+    # `base_domain` Setting (from the setup wizard / Settings UI), then the
+    # placeholder default. Previously this read ONLY the app-env, which nothing
+    # set — so it was permanently "homelab.local" regardless of configuration,
+    # breaking every deployment domain, the registry, and the self-ingress route.
+    Application.get_env(:homelab, :base_domain) ||
+      Homelab.Settings.get("base_domain") ||
+      "homelab.local"
   end
 
   # -- Self-hosted registry --
