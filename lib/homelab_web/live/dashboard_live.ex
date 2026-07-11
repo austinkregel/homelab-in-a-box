@@ -5,7 +5,13 @@ defmodule HomelabWeb.DashboardLive do
   alias Homelab.Tenants.Tenant
   alias Homelab.Deployments
   alias Homelab.Catalog
+  alias Homelab.Telemetry
   alias Homelab.Services.ActivityLog
+
+  # Trend window for the overview sparklines: seeded from persisted samples on
+  # mount, then appended live from the "metrics:update" broadcast.
+  @series_window_minutes 30
+  @series_cap 120
 
   @impl true
   def mount(_params, _session, socket) do
@@ -22,8 +28,13 @@ defmodule HomelabWeb.DashboardLive do
       |> assign(:space_form, to_form(Tenants.change_tenant(%Tenant{})))
       |> assign(:metrics, nil)
       |> assign(:activity_events, ActivityLog.recent(15))
+      |> assign(:cpu_series, [])
+      |> assign(:mem_series, [])
+      |> assign(:disk_series, [])
+      |> assign(:disk_mount, nil)
       |> load_dashboard_data()
       |> load_metrics()
+      |> load_metric_series()
 
     {:ok, socket}
   end
@@ -36,11 +47,11 @@ defmodule HomelabWeb.DashboardLive do
   end
 
   def handle_info({:metrics, metrics}, socket) do
-    {:noreply, assign(socket, :metrics, metrics)}
+    {:noreply, socket |> assign(:metrics, metrics) |> append_series(metrics)}
   end
 
   def handle_info({:metrics_update, metrics}, socket) do
-    {:noreply, assign(socket, :metrics, metrics)}
+    {:noreply, socket |> assign(:metrics, metrics) |> append_series(metrics)}
   end
 
   def handle_info({:activity_event, event}, socket) do
@@ -138,6 +149,70 @@ defmodule HomelabWeb.DashboardLive do
     assign(socket, :metrics, metrics)
   end
 
+  # Seeds the three overview sparklines from persisted samples. Disk tracks the
+  # busiest mount at load time (stored in :disk_mount so live appends stay on the
+  # same series).
+  defp load_metric_series(socket) do
+    mount = busiest_mount(socket.assigns.metrics)
+    opts = [minutes: @series_window_minutes, limit: @series_cap]
+
+    disk =
+      if mount,
+        do: Telemetry.series([source: "host", subject: "disk:" <> mount, metric: "disk_percent"] ++ opts),
+        else: []
+
+    socket
+    |> assign(:cpu_series, Telemetry.host_series("cpu_percent", opts))
+    |> assign(:mem_series, Telemetry.host_series("memory_percent", opts))
+    |> assign(:disk_series, disk)
+    |> assign(:disk_mount, mount)
+  rescue
+    # DB unavailable (e.g. collector never ran in a test) — leave series empty.
+    _ -> socket
+  end
+
+  # Appends the latest broadcast values to the in-memory sparkline buffers. The
+  # first tick that carries disk data (when we had none at mount) re-seeds from
+  # the DB so the chart starts with history rather than a single point.
+  defp append_series(socket, metrics) do
+    if is_nil(socket.assigns.disk_mount) and not is_nil(busiest_mount(metrics)) do
+      load_metric_series(socket)
+    else
+      socket
+      |> assign(:cpu_series, push_point(socket.assigns.cpu_series, num(metrics[:cpu_percent])))
+      |> assign(:mem_series, push_point(socket.assigns.mem_series, num(metrics[:memory_percent])))
+      |> assign(
+        :disk_series,
+        push_point(socket.assigns.disk_series, mount_percent(metrics, socket.assigns.disk_mount))
+      )
+    end
+  end
+
+  defp push_point(series, nil), do: series
+
+  defp push_point(series, value) do
+    (series ++ [%{value: value}]) |> Enum.take(-@series_cap)
+  end
+
+  # The mount under the most pressure — the one worth surfacing in the overview.
+  defp busiest_mount(%{disk: disk}) when is_list(disk) and disk != [] do
+    disk |> Enum.max_by(& &1.percent, fn -> nil end) |> then(&(&1 && &1.mount))
+  end
+
+  defp busiest_mount(_), do: nil
+
+  defp mount_percent(%{disk: disk}, mount) when is_list(disk) and is_binary(mount) do
+    case Enum.find(disk, &(&1.mount == mount)) do
+      %{percent: p} -> num(p)
+      _ -> nil
+    end
+  end
+
+  defp mount_percent(_, _), do: nil
+
+  defp num(v) when is_number(v), do: v
+  defp num(_), do: nil
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -158,13 +233,22 @@ defmodule HomelabWeb.DashboardLive do
               Your self-hosted infrastructure at a glance.
             </p>
           </div>
-          <.link
-            navigate={~p"/catalog"}
-            class="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-          >
-            <.icon name="hero-plus-mini" class="size-4" />
-            <span>Deploy App</span>
-          </.link>
+          <div class="flex items-center gap-2">
+            <.link
+              navigate={~p"/telemetry"}
+              class="flex items-center gap-2 px-4 py-2 rounded-lg border border-base-content/[0.1] text-base-content/70 text-sm font-medium hover:bg-base-200 transition-colors"
+            >
+              <.icon name="hero-chart-bar-mini" class="size-4" />
+              <span>Telemetry</span>
+            </.link>
+            <.link
+              navigate={~p"/catalog"}
+              class="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <.icon name="hero-plus-mini" class="size-4" />
+              <span>Deploy App</span>
+            </.link>
+          </div>
         </div>
 
         <%!-- System health --%>
@@ -173,20 +257,23 @@ defmodule HomelabWeb.DashboardLive do
             <.resource_gauge
               label="CPU"
               percent={@metrics[:cpu_percent] || 0}
-              detail={format_percent(@metrics[:cpu_percent])}
+              detail={"#{docker_containers_running(@metrics)} containers · last 30m"}
               color="primary"
+              points={@cpu_series}
             />
             <.resource_gauge
               label="Memory"
               percent={@metrics[:memory_percent] || 0}
               detail={"#{format_bytes(@metrics[:memory_used] || 0)} / #{format_bytes(@metrics[:memory_total] || 0)}"}
               color="info"
+              points={@mem_series}
             />
             <.resource_gauge
-              label="Docker"
-              percent={0}
-              detail={"#{docker_containers_running(@metrics)} containers running"}
-              color="success"
+              label="Disk"
+              percent={disk_gauge_percent(@metrics)}
+              detail={disk_gauge_detail(@metrics)}
+              color="warning"
+              points={@disk_series}
             />
           </div>
         <% end %>
@@ -703,6 +790,7 @@ defmodule HomelabWeb.DashboardLive do
   attr :percent, :any, required: true
   attr :detail, :string, required: true
   attr :color, :string, required: true
+  attr :points, :list, default: nil
 
   defp resource_gauge(assigns) do
     clamped = min(max(assigns.percent, 0), 100)
@@ -724,6 +812,7 @@ defmodule HomelabWeb.DashboardLive do
         >
         </div>
       </div>
+      <.sparkline :if={@points not in [nil, []]} points={@points} color={@color} class="w-full h-8 mt-2" />
       <p class="text-xs text-base-content/30 mt-2">{@detail}</p>
     </div>
     """
@@ -732,6 +821,7 @@ defmodule HomelabWeb.DashboardLive do
   defp gauge_color("primary"), do: "bg-primary"
   defp gauge_color("info"), do: "bg-info"
   defp gauge_color("success"), do: "bg-success"
+  defp gauge_color("warning"), do: "bg-warning"
   defp gauge_color("error"), do: "bg-error"
   defp gauge_color(_), do: "bg-base-content/30"
 
@@ -761,6 +851,7 @@ defmodule HomelabWeb.DashboardLive do
   defp value_color("primary"), do: "text-base-content"
   defp value_color("info"), do: "text-base-content"
   defp value_color("success"), do: "text-success"
+  defp value_color("warning"), do: "text-warning"
   defp value_color("error"), do: "text-error"
   defp value_color(_), do: "text-base-content"
 
@@ -840,6 +931,21 @@ defmodule HomelabWeb.DashboardLive do
         "—"
     end
   end
+
+  # Overview disk gauge tracks the busiest mount so the most-at-risk volume is
+  # what's on screen.
+  defp disk_gauge_percent(%{disk: disk}) when is_list(disk) and disk != [] do
+    disk |> Enum.map(& &1.percent) |> Enum.max()
+  end
+
+  defp disk_gauge_percent(_), do: 0
+
+  defp disk_gauge_detail(%{disk: disk}) when is_list(disk) and disk != [] do
+    busiest = Enum.max_by(disk, & &1.percent)
+    "#{format_bytes(busiest.used)} / #{format_bytes(busiest.total)} · #{busiest.mount}"
+  end
+
+  defp disk_gauge_detail(_), do: "No disk data"
 
   defp slugify(name) do
     name
