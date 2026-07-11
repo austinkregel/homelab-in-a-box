@@ -19,6 +19,10 @@ jobs:
       # config/test.exs reads these to reach the Postgres service below.
       DB_HOST: localhost
       DB_PORT: "5432"
+      # CI runs a single stock Postgres, so the Oban repo shares it (locally it
+      # defaults to the dedicated oban-postgres on 5434). Safe here because this
+      # server has no TimescaleDB planner hooks to slow the small Oban pool.
+      DB_OBAN_PORT: "5432"
 
     services:
       postgres:

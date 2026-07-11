@@ -14,20 +14,32 @@ config :homelab, Homelab.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
-# In test, the Oban repo shares the test Postgres server (separate database) and
-# uses the SQL sandbox. Oban itself runs in manual testing mode (no queues,
-# plugins, or notifier) so jobs only run when a test drains them.
+# In test, the Oban repo uses the SQL sandbox. Oban itself runs in manual testing
+# mode (no queues, plugins, or notifier) so jobs only run when a test drains them.
+#
+# The Oban repo points at its own Postgres server (docker-compose: oban-postgres,
+# port 5434), mirroring dev/prod topology. Keep it off the app DB's server when
+# that server runs TimescaleDB: `shared_preload_libraries=timescaledb` installs
+# planner hooks for *every* database on the server, and the added overhead makes
+# this deliberately tiny pool time out under the parallel suite.
+#
+# A single-Postgres setup (CI) shares one server by pointing DB_OBAN_PORT at it.
 config :homelab, Homelab.ObanRepo,
   username: "homelab",
   password: "homelab",
-  hostname: System.get_env("DB_HOST", "localhost"),
-  port: String.to_integer(System.get_env("DB_PORT", "5433")),
+  hostname: System.get_env("DB_OBAN_HOST", System.get_env("DB_HOST", "localhost")),
+  port: String.to_integer(System.get_env("DB_OBAN_PORT", "5434")),
   database: "homelab_oban_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
-  # Oban runs in manual testing mode and barely touches its repo, so keep this
-  # pool small — both test repos share one Postgres server and a large pool here
-  # would exhaust max_connections.
-  pool_size: 2
+  # Oban runs in manual testing mode and barely touches its repo, so this pool
+  # stays small — when both test repos share one Postgres server (CI), a large
+  # pool here would exhaust max_connections. It is not 2, though: every ConnCase
+  # test checks out a sandbox owner here, so a 2-connection pool queue-times-out
+  # under the parallel suite whenever the machine is loaded.
+  pool_size: 6,
+  # Wait out a busy moment instead of dropping the request (default 50ms/1000ms).
+  queue_target: 500,
+  queue_interval: 5_000
 
 config :homelab, Oban, testing: :manual
 

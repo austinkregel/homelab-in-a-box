@@ -1,6 +1,13 @@
 services:
+  # TimescaleDB (PostgreSQL 17 + the timescaledb extension) backs the app DB so
+  # the metric_samples time-series table can be a hypertable. The migration
+  # degrades to a plain table when the extension is absent, so vanilla Postgres
+  # still works (e.g. CI) — this just unlocks chunked storage locally.
+  # `shared_preload_libraries` is set explicitly so `CREATE EXTENSION timescaledb`
+  # succeeds even on a pgdata volume first initialized by stock Postgres.
   postgres:
-    image: postgres:17-alpine
+    image: timescale/timescaledb:2.17.2-pg17
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
     environment:
       POSTGRES_USER: homelab
       POSTGRES_PASSWORD: homelab
