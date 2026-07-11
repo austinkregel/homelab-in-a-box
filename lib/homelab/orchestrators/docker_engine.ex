@@ -212,10 +212,12 @@ defmodule Homelab.Orchestrators.DockerEngine do
     }
   end
 
-  # Connects the workload container to its internal networks (bridge nets for
-  # DB/service dependencies and the shared mesh). It deliberately does NOT connect
-  # Traefik to the deployment network — external reachability is granted later,
-  # only after the deployment is verified ready, via `publish/1`. Fail-closed.
+  # Connects the workload container to its extra networks. Only a ROUTED tier
+  # (`traefik.enable=true`, i.e. the web) is attached to the shared INGRESS network
+  # so Traefik can reach it; `:service` datastores are deliberately NOT joined to
+  # ingress — they live on the private app network only and are never publicly
+  # reachable. (Cross-app sharing of a datastore is done by multi-homing it onto
+  # the consuming app's network, not by parking it on the ingress mesh.)
   defp maybe_connect_routing_network(container_id, spec) do
     bridge_networks = Map.get(spec, :bridge_networks, [])
 
@@ -224,10 +226,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
       Client.post("/networks/#{net}/connect", %{"Container" => container_id})
     end)
 
-    needs_routing? =
-      spec.labels["traefik.enable"] == "true" or Map.get(spec, :service_mode, false)
-
-    if needs_routing? do
+    if spec.labels["traefik.enable"] == "true" do
       ensure_network(@routing_network)
       Client.post("/networks/#{@routing_network}/connect", %{"Container" => container_id})
     end

@@ -278,7 +278,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                        %{"Container" => "cid"}}
     end
 
-    test "connects the routing network when service_mode is true (no traefik label)" do
+    test "does NOT connect the ingress network for a service_mode datastore (only the routed web joins ingress)" do
       test_pid = self()
 
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
@@ -302,7 +302,9 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
 
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
 
-      assert_received {:connect, "/networks/homelab-iab-internal/connect",
+      # A :service datastore stays on the private app network only — it must never
+      # be attached to the shared ingress network where Traefik lives.
+      refute_received {:connect, "/networks/homelab-iab-internal/connect",
                        %{"Container" => "cid"}}
     end
 

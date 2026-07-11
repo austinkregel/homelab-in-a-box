@@ -64,7 +64,9 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.service_name == "homelab_friends_nextcloud"
       assert spec.image == "nextcloud:28.0"
-      assert spec.network == "homelab_friends_nextcloud_net"
+      # Primary network is the tenant-scoped PRIVATE app network (web ↔ datastores),
+      # never joined by Traefik.
+      assert spec.network == "homelab_tenant_friends"
       assert spec.replicas == 1
       assert spec.tenant_id == "1"
       assert spec.deployment_id == "1"
@@ -387,14 +389,16 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   end
 
   describe "routing labels" do
-    test "ingress route targets the per-deployment network (the Traefik-connection lever)" do
+    test "ingress route targets the shared ingress network (where Traefik reaches the web)" do
       tenant = build_tenant()
       template = build_template()
       deployment = build_deployment(tenant, template)
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.labels["traefik.enable"] == "true"
-      assert spec.labels["traefik.docker.network"] == "homelab_friends_nextcloud_net"
+      # The route resolves the backend over the ingress network, NOT the private
+      # app network — Traefik never joins the app net (where the datastores live).
+      assert spec.labels["traefik.docker.network"] == "homelab-iab-internal"
     end
   end
 

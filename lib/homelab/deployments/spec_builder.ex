@@ -8,6 +8,31 @@ defmodule Homelab.Deployments.SpecBuilder do
   - Networks are scoped to the tenant slug
   - OIDC env vars are injected when auth_integration is true
   - Required env vars are validated
+
+  ## Network model
+
+  Two networks, by role:
+
+    * **App network** (`homelab_tenant_<tenant>`) — a PRIVATE, tenant-scoped network
+      that every container in the tenant sits on. This is where a web tier reaches
+      its datastores. **Traefik never joins it**, so a datastore on it is not
+      publicly reachable. It is each container's primary `NetworkMode`.
+    * **Ingress network** (`Infrastructure.internal_network/0`, `homelab-iab-internal`)
+      — the shared network Traefik lives on. Only a ROUTED tier (a proxy
+      `exposure_mode` WITH a domain, i.e. `traefik.enable=true`) is additionally
+      attached to it, by the orchestrator. The routing label
+      `traefik.docker.network` points here so Traefik resolves the backend over
+      ingress.
+
+  So: `web` is dual-homed (app net + ingress); `:service` datastores stay on the app
+  net only. Sharing a datastore across apps is done by multi-homing it onto the
+  consuming app's network — never by exposing it publicly.
+
+  NOTE: the older per-deployment network (`deployment_network/2`) is retained only
+  for the vestigial `publish`/`unpublish` calls (Traefik was never actually on those
+  nets); routing is now enforced by Traefik's Docker provider over the shared
+  ingress. Gating a route on deployment *status* (vs container-running) is a
+  follow-up: it should toggle the web's ingress membership, not a Traefik-per-net.
   """
 
   alias Homelab.Deployments.Deployment
@@ -39,11 +64,17 @@ defmodule Homelab.Deployments.SpecBuilder do
       service_mode? = Access.effective_exposure(deployment) == :service
       ports = build_ports(deployment)
 
-      primary_network = deployment_network(tenant, template)
-      bridge_networks = build_bridge_networks(template, tenant)
+      # Network model (see moduledoc): the PRIMARY network is the tenant-scoped
+      # PRIVATE app network — web ↔ its datastores talk here, and Traefik never
+      # joins it. A routed web tier is *additionally* attached to the shared INGRESS
+      # network by the orchestrator (on `traefik.enable`); a `:service` datastore
+      # stays on the app network only, so it is never publicly reachable. Traefik
+      # reaches the web over the ingress network, named in the routing label below.
+      primary_network = tenant_network(tenant)
+      bridge_networks = []
 
       base_labels = build_labels(template, tenant, deployment)
-      routing_labels = build_routing_labels(deployment, primary_network)
+      routing_labels = build_routing_labels(deployment, Homelab.Infrastructure.internal_network())
 
       spec = %{
         service_name: service_name(tenant, template),
@@ -164,44 +195,6 @@ defmodule Homelab.Deployments.SpecBuilder do
   """
   def tenant_network(tenant) do
     "homelab_tenant_#{sanitize(tenant.slug)}"
-  end
-
-  @bridge_env_prefixes ~w(DB_ MYSQL_ POSTGRES_ MONGO_ REDIS_ DATABASE_ MARIADB_)
-
-  defp build_bridge_networks(template, tenant) do
-    has_dependencies? = (template.depends_on || []) != []
-
-    has_bridgeable_env? =
-      Enum.any?(Map.keys(template.default_env || %{}), fn k ->
-        up = String.upcase(k)
-        Enum.any?(@bridge_env_prefixes, &String.starts_with?(up, &1))
-      end)
-
-    is_infra_image? =
-      case classify_image(template.image || "") do
-        :service -> false
-        _ -> true
-      end
-
-    if has_dependencies? or has_bridgeable_env? or is_infra_image? do
-      [tenant_network(tenant)]
-    else
-      []
-    end
-  end
-
-  defp classify_image(image) do
-    name = image |> String.split("/") |> List.last() |> String.split(":") |> List.first() || ""
-    downcased = String.downcase(name)
-
-    cond do
-      String.contains?(downcased, "mysql") or String.contains?(downcased, "mariadb") -> :database
-      String.contains?(downcased, "postgres") -> :database
-      String.contains?(downcased, "mongo") -> :database
-      String.contains?(downcased, "redis") or String.contains?(downcased, "valkey") -> :cache
-      String.contains?(downcased, "minio") or String.contains?(downcased, "s3") -> :storage
-      true -> :service
-    end
   end
 
   defp sanitize(slug) do
