@@ -41,6 +41,12 @@ defmodule Homelab.DataCase do
     # (e.g. ReleaseRunner.enqueue/1) is testable.
     oban_pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Homelab.ObanRepo, shared: not tags[:async])
 
+    # The settings cache is a global ETS table the SQL sandbox can't roll back, so
+    # a prior test's cached values (base_domain, registry creds, setup_completed,
+    # driver selections, …) leak and cause seed-dependent failures. Clear it so
+    # each test reads the clean, sandboxed DB via get/2.
+    Homelab.Settings.reset_cache()
+
     on_exit(fn ->
       Ecto.Adapters.SQL.Sandbox.stop_owner(pid)
       Ecto.Adapters.SQL.Sandbox.stop_owner(oban_pid)

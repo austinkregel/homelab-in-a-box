@@ -41,6 +41,20 @@ defmodule Homelab.Settings do
     end)
   end
 
+  @doc """
+  Clears the settings cache (creating the table if needed).
+
+  Primarily for test isolation: the SQL sandbox rolls back the DB per test, but
+  this ETS cache is a global table that does NOT roll back, so a prior test's
+  cached values leak into the next one. After a reset, `get/2` falls through to
+  the (sandboxed, clean) DB, making settings-derived config deterministic.
+  """
+  def reset_cache do
+    init_cache()
+    :ets.delete_all_objects(@cache_table)
+    :ok
+  end
+
   # --- Public API ---
 
   def get(key, default \\ nil) do
