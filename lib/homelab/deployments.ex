@@ -368,6 +368,68 @@ defmodule Homelab.Deployments do
 
   defp ingress_steps(_app), do: []
 
+  @doc """
+  Re-drives the stack that governs `deployment` by planning a FRESH release and
+  enqueuing it. Works from any member of the stack — the app or one of its
+  companions: it resolves the driving release, rebuilds the app + companion set
+  from that release's steps, resets them to `:pending`, and re-runs
+  `deploy_release/2`.
+
+  Refuses with `{:error, :release_active}` while a release is still in flight —
+  the one-active-per-deployment constraint would reject a new plan, and
+  re-driving a live release would race the running saga. When there is no prior
+  release, deploys the single deployment standalone.
+  """
+  def redeploy(%Deployment{} = deployment) do
+    case Releases.driving_release(deployment.id) do
+      nil ->
+        with {:ok, app} <- reset_to_pending(deployment) do
+          deploy_release(app)
+        end
+
+      %{__struct__: Homelab.Deployments.Release} = release ->
+        if Homelab.Deployments.Release.terminal?(release) do
+          app = get_deployment!(release.deployment_id)
+
+          companions =
+            release.steps
+            |> Enum.filter(&(&1.type == :dependency_container))
+            |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
+            |> Enum.reject(&is_nil/1)
+            |> Enum.uniq()
+            |> Enum.map(&get_deployment!/1)
+
+          with {:ok, app} <- reset_to_pending(app),
+               {:ok, companions} <- reset_all_to_pending(companions) do
+            deploy_release(app, companions)
+          end
+        else
+          {:error, :release_active}
+        end
+    end
+  end
+
+  # Resets a deployment to `:pending` and clears the stale container id so the
+  # re-driven release provisions it fresh; returns a fully-preloaded struct.
+  defp reset_to_pending(%Deployment{} = deployment) do
+    with {:ok, _} <- update_deployment(deployment, %{status: :pending, external_id: nil}) do
+      {:ok, get_deployment!(deployment.id)}
+    end
+  end
+
+  defp reset_all_to_pending(deployments) do
+    Enum.reduce_while(deployments, {:ok, []}, fn deployment, {:ok, acc} ->
+      case reset_to_pending(deployment) do
+        {:ok, reset} -> {:cont, {:ok, [reset | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, reset} -> {:ok, Enum.reverse(reset)}
+      error -> error
+    end
+  end
+
   defp do_deploy(deployment) do
     ensure_traefik_if_needed(deployment)
 
