@@ -128,4 +128,78 @@ defmodule Homelab.System.MetricsTest do
       assert Metrics.collect().docker == %{}
     end
   end
+
+  describe "parse_disk_output/1" do
+    test "keeps root + operator-passed disks from Linux container df output" do
+      # Captured from `df -Pk` inside the app's Alpine container: overlay root,
+      # the dev source bind-mounts (/app/*), Docker-injected /etc files, pseudo-fs,
+      # and a physical disk the operator passed in via HOMELAB_DISKS (-> /mnt/tank).
+      output = """
+      Filesystem           1024-blocks      Used Available Capacity Mounted on
+      overlay                 73734136  40000000  33734136      55% /
+      tmpfs                      65536         0     65536       0% /dev
+      shm                        65536         0     65536       0% /dev/shm
+      /run/host_mark/Users   971350180 480000000 491350180      50% /app/lib
+      /run/host_mark/Users   971350180 480000000 491350180      50% /app/config
+      /dev/sdb1             3906899456 1600000000 2306899456      41% /mnt/tank
+      /dev/vda1               73734136  40000000  33734136      55% /etc/resolv.conf
+      /dev/vda1               73734136  40000000  33734136      55% /etc/hostname
+      /dev/vda1               73734136  40000000  33734136      55% /etc/hosts
+      proc                           0         0         0       0% /proc/scsi
+      sysfs                          0         0         0       0% /sys/firmware
+      """
+
+      mounts = Metrics.parse_disk_output(output) |> Enum.map(& &1.mount)
+
+      # overlay '/' (the host root disk) plus the passed-in physical disk; the
+      # dev-only /app/* source mounts, /etc files, and pseudo-fs are dropped.
+      assert mounts == ["/", "/mnt/tank"]
+    end
+
+    test "keeps only real disks from macOS df output" do
+      # Captured from `df -Pk` on macOS (APFS): every /System/Volumes/* is a
+      # distinct device sharing the physical disk, plus devfs and a NAS mount.
+      output = """
+      Filesystem            1024-blocks       Used Available Capacity  Mounted on
+      /dev/disk3s1s1          971350180   17000000 453000000     4%    /
+      devfs                         208        208         0   100%    /dev
+      /dev/disk3s6            971350180    2000000 453000000     1%    /System/Volumes/VM
+      /dev/disk3s2            971350180     500000 453000000     1%    /System/Volumes/Preboot
+      /dev/disk3s5            971350180  480000000 453000000    52%    /System/Volumes/Data
+      /dev/disk7s1              2252800     100000   2152800     5%    /private/var/run/x
+      //user@nas/Archives   37479965000 20000000000 17479965000  54%   /Volumes/Archives
+      """
+
+      mounts = Metrics.parse_disk_output(output) |> Enum.map(& &1.mount)
+
+      # Only the real root and the network share survive.
+      assert mounts == ["/", "/Volumes/Archives"]
+    end
+
+    test "computes percent and converts 1K-blocks to bytes" do
+      output = """
+      Filesystem 1024-blocks    Used Available Capacity Mounted on
+      /dev/sda1     1000000  250000    750000      25% /
+      """
+
+      assert [disk] = Metrics.parse_disk_output(output)
+      assert disk.mount == "/"
+      assert disk.total == 1_000_000 * 1024
+      assert disk.used == 250_000 * 1024
+      assert_in_delta disk.percent, 25.0, 0.01
+      refute Map.has_key?(disk, :fs)
+    end
+
+    test "drops zero-capacity rows and survives malformed lines" do
+      output = """
+      Filesystem 1024-blocks Used Available Capacity Mounted on
+      map auto_home                                  100% /System/Volumes/Data/home
+      tmpfs                0    0        0    0% /run/lock
+      garbage line without enough columns
+      /dev/sda1      1000000 500000  500000   50% /data
+      """
+
+      assert Metrics.parse_disk_output(output) |> Enum.map(& &1.mount) == ["/data"]
+    end
+  end
 end
