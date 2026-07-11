@@ -136,16 +136,18 @@ defmodule Homelab.BootstrapTest do
       assert Bootstrap.maybe_seed_from_env() in [:ok, nil]
     end
 
-    test "seeds settings from environment variables" do
+    test "seeds settings and marks setup complete when OIDC is provided" do
       Homelab.Settings.init_cache()
       System.put_env("HOMELAB_SEED_SETUP", "true")
       System.put_env("HOMELAB_INSTANCE_NAME", "TestLab")
       System.put_env("HOMELAB_BASE_DOMAIN", "test.local")
+      System.put_env("HOMELAB_OIDC_ISSUER", "https://id.test.local")
+      System.put_env("HOMELAB_OIDC_CLIENT_ID", "test-client")
 
       on_exit(fn ->
-        System.delete_env("HOMELAB_SEED_SETUP")
-        System.delete_env("HOMELAB_INSTANCE_NAME")
-        System.delete_env("HOMELAB_BASE_DOMAIN")
+        for k <- ~w(HOMELAB_SEED_SETUP HOMELAB_INSTANCE_NAME HOMELAB_BASE_DOMAIN
+                    HOMELAB_OIDC_ISSUER HOMELAB_OIDC_CLIENT_ID),
+            do: System.delete_env(k)
       end)
 
       Bootstrap.maybe_seed_from_env()
@@ -153,6 +155,28 @@ defmodule Homelab.BootstrapTest do
       assert Homelab.Settings.get("instance_name") == "TestLab"
       assert Homelab.Settings.get("base_domain") == "test.local"
       assert Homelab.Settings.setup_completed?()
+    end
+
+    test "seeds settings but leaves setup INCOMPLETE when OIDC is missing" do
+      Homelab.Settings.init_cache()
+      # The ETS cache leaks across tests (DB rolls back, cache doesn't), so a prior
+      # test's seeded oidc_issuer/setup_completed would fool the guard. Clear them.
+      Enum.each(~w(setup_completed oidc_issuer oidc_client_id), &Homelab.Settings.evict/1)
+      System.put_env("HOMELAB_SEED_SETUP", "true")
+      System.put_env("HOMELAB_INSTANCE_NAME", "TestLab")
+      # No HOMELAB_OIDC_ISSUER / CLIENT_ID.
+
+      on_exit(fn ->
+        System.delete_env("HOMELAB_SEED_SETUP")
+        System.delete_env("HOMELAB_INSTANCE_NAME")
+      end)
+
+      Bootstrap.maybe_seed_from_env()
+
+      # Settings still seed, but marking complete without OIDC would trap the UI in
+      # the / -> /auth/oidc -> /setup -> / redirect loop, so it must stay incomplete.
+      assert Homelab.Settings.get("instance_name") == "TestLab"
+      refute Homelab.Settings.setup_completed?()
     end
 
     test "skips seeding when setup is already completed" do

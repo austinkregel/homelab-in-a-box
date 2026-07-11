@@ -132,9 +132,25 @@ defmodule Homelab.Bootstrap do
       end)
 
       seed_default_tenant()
-      Homelab.Settings.mark_setup_completed()
-      Logger.info("Bootstrap: setup seeded and marked complete")
+
+      # Only mark setup complete if OIDC actually got configured. Marking it
+      # complete without an issuer/client_id turns on auth enforcement with
+      # nowhere to send the user: / -> /auth/oidc -> /setup -> / forever. Leaving
+      # it incomplete lets the setup wizard (or break-glass) resolve it instead.
+      if oidc_configured?() do
+        Homelab.Settings.mark_setup_completed()
+        Logger.info("Bootstrap: setup seeded and marked complete")
+      else
+        Logger.warning(
+          "Bootstrap: OIDC issuer/client_id not provided — leaving setup incomplete so the wizard runs (set HOMELAB_OIDC_ISSUER + HOMELAB_OIDC_CLIENT_ID, or use break-glass)."
+        )
+      end
     end
+  end
+
+  defp oidc_configured? do
+    present? = fn key -> Homelab.Settings.get(key) not in [nil, ""] end
+    present?.("oidc_issuer") and present?.("oidc_client_id")
   end
 
   defp seed_default_tenant do

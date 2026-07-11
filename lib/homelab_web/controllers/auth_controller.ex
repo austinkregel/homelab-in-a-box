@@ -13,9 +13,21 @@ defmodule HomelabWeb.AuthController do
     client_id = Settings.get("oidc_client_id")
 
     if is_nil(issuer) or is_nil(client_id) do
-      conn
-      |> put_flash(:error, "OIDC is not configured. Please complete setup.")
-      |> redirect(to: "/setup")
+      # OIDC isn't configured. Normally this means setup isn't done and /setup
+      # handles it — but if setup was (wrongly) marked complete, "/setup" bounces
+      # back to "/" and we loop. Break out to break-glass when it's armed.
+      if BreakGlass.enabled?() do
+        conn
+        |> put_flash(
+          :error,
+          "OIDC is not configured. Use break-glass to sign in and finish setup."
+        )
+        |> redirect(to: "/auth/break-glass")
+      else
+        conn
+        |> put_flash(:error, "OIDC is not configured. Please complete setup.")
+        |> redirect(to: "/setup")
+      end
     else
       case OidcDiscovery.discover(issuer) do
         {:ok, discovery} ->
