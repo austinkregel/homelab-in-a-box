@@ -272,11 +272,21 @@ defmodule Homelab.Infrastructure do
           Homelab.Settings.get("acme_email") ||
             "admin@#{Homelab.Settings.get("base_domain", "homelab.local")}"
 
+        # The recursive resolver(s) lego uses for its DNS-01 propagation pre-check.
+        # On a DNSSEC-signed zone (e.g. any Cloudflare zone) the provider returns a
+        # SIGNED "no-TXT" NSEC for the challenge name, which validating resolvers
+        # like 1.1.1.1 cache for the SOA-minimum TTL (often 1800s) — far longer than
+        # the pre-check timeout — so the check never sees the freshly-created TXT and
+        # issuance stalls. Point this at the zone's AUTHORITATIVE nameservers, which
+        # never serve a stale negative for their own records, e.g.
+        #   TRAEFIK_DNS_RESOLVERS=sid.ns.cloudflare.com:53,elle.ns.cloudflare.com:53
+        resolvers = System.get_env("TRAEFIK_DNS_RESOLVERS", "1.1.1.1:53")
+
         acme_cmd = [
           "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
           "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
           "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
-          "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53"
+          "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
         ]
 
         template =
