@@ -4,8 +4,9 @@ name: Release
 # published (which also creates the version tag). `workflow_dispatch` allows a
 # manual rebuild/push of the current ref.
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
