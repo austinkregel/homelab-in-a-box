@@ -41,7 +41,17 @@ defmodule Homelab.Config do
     Homelab.DnsProviders.Pihole
   ]
 
-  def orchestrator, do: active_driver(:orchestrator, @orchestrators)
+  @doc """
+  The active orchestrator: an application-env override (tests), else the operator's
+  choice in Settings, else one inferred from the daemon.
+
+  Never `nil` — every deploy path depends on it, so a host with no recorded selection
+  yet (first boot, before `Bootstrap.backfill_orchestrator/0` runs) falls back to what
+  the daemon actually is rather than to a constant. Guessing "Docker Engine" on a
+  Swarm host would treat its running services as absent.
+  """
+  def orchestrator, do: active_driver(:orchestrator, @orchestrators) || inferred_orchestrator()
+
   def gateway, do: active_driver(:gateway, @gateways)
   def backup_provider, do: active_driver(:backup_provider, @backup_providers)
   def identity_broker, do: active_driver(:identity_broker, @identity_brokers)
@@ -259,8 +269,13 @@ defmodule Homelab.Config do
             nil
 
           selected_id ->
+            # `Code.ensure_loaded?/1` first: in a release, modules load lazily, and
+            # `function_exported?/3` reports FALSE for a module that simply has not been
+            # loaded yet. Without this, a driver the operator selected in Settings can
+            # silently fail to resolve — the selection looks ignored.
             Enum.find(modules, fn mod ->
-              function_exported?(mod, :driver_id, 0) and mod.driver_id() == selected_id
+              Code.ensure_loaded?(mod) and function_exported?(mod, :driver_id, 0) and
+                mod.driver_id() == selected_id
             end)
         end
 
@@ -269,8 +284,41 @@ defmodule Homelab.Config do
     end
   end
 
+  # `category` is the plural key for a driver catalogue (a list), but `active_driver/2`
+  # also passes the SINGULAR key, which may hold a single module override — or an
+  # explicit nil. Only a real list overrides the defaults; anything else leaves the
+  # catalogue intact, so we never hand `Enum.find/2` a module or a nil.
   defp available_drivers(category, defaults) do
-    Application.get_env(:homelab, category, defaults)
+    case Application.get_env(:homelab, category) do
+      list when is_list(list) -> list
+      _ -> defaults
+    end
+  end
+
+  @doc "Clears the inferred-orchestrator memo (for tests/ops)."
+  def reset_inferred_orchestrator do
+    :persistent_term.erase({__MODULE__, :inferred_orchestrator})
+    :ok
+  end
+
+  # Memoized: this is a boot-time gap (no selection recorded yet), and `orchestrator/0`
+  # is called per-deployment on hot paths — it must not hit the daemon every time. Once
+  # a selection exists in Settings it wins outright, so leaving Swarm never needs this
+  # cache invalidated.
+  defp inferred_orchestrator do
+    case :persistent_term.get({__MODULE__, :inferred_orchestrator}, nil) do
+      nil ->
+        module =
+          if Homelab.Docker.Network.swarm_active?(),
+            do: Homelab.Orchestrators.DockerSwarm,
+            else: Homelab.Orchestrators.DockerEngine
+
+        :persistent_term.put({__MODULE__, :inferred_orchestrator}, module)
+        module
+
+      module ->
+        module
+    end
   end
 
   defp platform_default("max_apps", default), do: default || 5
