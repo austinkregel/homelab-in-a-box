@@ -86,6 +86,12 @@ volumes:
 networks:
   # Named exactly so the app's bootstrap (which expects `homelab-iab-internal`)
   # and its managed apps share one network.
+  #
+  # Defaults to a bridge, which is correct for the Docker Engine orchestrator. If
+  # you run the Swarm orchestrator, this must instead be an ATTACHABLE OVERLAY —
+  # Swarm cannot attach a service to a node-local bridge, and routed deployments
+  # join this network. Compose cannot pick the driver based on the daemon, so add
+  # `driver: overlay` + `attachable: true` here when running under Swarm.
   homelab-iab-internal:
     name: homelab-iab-internal
 
