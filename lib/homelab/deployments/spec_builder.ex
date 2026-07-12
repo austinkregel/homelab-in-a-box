@@ -351,12 +351,70 @@ defmodule Homelab.Deployments.SpecBuilder do
       "traefik.http.routers.#{router}.entrypoints" => "web,websecure",
       "traefik.http.routers.#{router}.tls" => "true",
       "traefik.http.routers.#{router}.tls.certresolver" => "letsencrypt",
+      # Named explicitly, ALWAYS -- not only when extra routes exist. Traefik auto-links
+      # a router to a same-named service only while the workload defines exactly one.
+      # The moment a second appears, every router must name its service or Traefik
+      # rejects the whole workload and the app loses its WORKING route too. Emitting it
+      # unconditionally means adding a route can never break the route that already
+      # worked.
+      "traefik.http.routers.#{router}.service" => router,
       "traefik.http.services.#{router}.loadbalancer.server.port" => to_string(port)
     }
 
     base
     |> Map.merge(exposure_middleware_labels(router, exposure))
     |> Map.merge(sticky_labels(router, deployment))
+    |> Map.merge(extra_route_labels(deployment, router, domain))
+  end
+
+  @doc """
+  Routers + services for a deployment's `extra_routes` — a path on the same host that
+  must reach a DIFFERENT container port.
+
+  One backend port per workload holds until an app serves a second protocol from a
+  second port. aut.hair does: Laravel on 8000, Reverb (websockets) on 6001, and the
+  browser opens `wss://aut.hair/app` — port 443, path `/app`. The HTTP server does not
+  speak the websocket protocol, so without a second route every handshake died on 8000.
+
+  No priority label is set, deliberately. Traefik's default priority is the RULE LENGTH,
+  and `Host(...) && PathPrefix(...)` is strictly longer than the bare `Host(...)` it
+  extends — so the specific route always outranks the catch-all, by construction. An
+  explicit number would have to be kept above whatever the base rule's length happens to
+  be, which is a trap waiting for a longer domain.
+  """
+  def extra_route_labels(deployment, router, domain) do
+    deployment
+    |> Map.get(:extra_routes)
+    |> List.wrap()
+    |> Enum.flat_map(fn route ->
+      path = route["path_prefix"]
+      port = route["port"]
+
+      if is_binary(path) and is_integer(port) do
+        name = "#{router}-#{sanitize_path(path)}"
+
+        [
+          {"traefik.http.routers.#{name}.rule", "Host(`#{domain}`) && PathPrefix(`#{path}`)"},
+          {"traefik.http.routers.#{name}.entrypoints", "web,websecure"},
+          {"traefik.http.routers.#{name}.tls", "true"},
+          {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
+          {"traefik.http.routers.#{name}.service", name},
+          {"traefik.http.services.#{name}.loadbalancer.server.port", to_string(port)}
+        ]
+      else
+        []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # A router name is part of a label KEY, so it has to be a plain token: "/app" ->
+  # "app", "/apps/events" -> "apps-events".
+  defp sanitize_path(path) do
+    path
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/, "-")
+    |> String.trim("-")
   end
 
   # Websockets need no Traefik label — the HTTP upgrade is proxied transparently.
