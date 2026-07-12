@@ -23,6 +23,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:log_timer, nil)
       |> assign(:env_edit_mode, false)
       |> assign(:env_form, nil)
+      |> assign(:env_rows, [])
       |> assign(:settings_edit_mode, false)
       |> assign(:settings_domain, "")
       |> assign(:settings_access, "proxy")
@@ -258,26 +259,47 @@ defmodule HomelabWeb.DeploymentLive do
 
   def handle_event("start_env_edit", _params, socket) do
     deployment = socket.assigns.deployment
-    merged = merged_env(deployment)
-    form = to_form(%{"env" => merged})
 
     {:noreply,
      socket
      |> assign(:env_edit_mode, true)
-     |> assign(:env_form, form)}
+     |> assign(:env_form, to_form(%{}))
+     |> assign(:env_rows, env_rows(merged_env(deployment)))}
   end
 
   def handle_event("cancel_env_edit", _params, socket) do
     {:noreply,
      socket
      |> assign(:env_edit_mode, false)
-     |> assign(:env_form, nil)}
+     |> assign(:env_form, nil)
+     |> assign(:env_rows, [])}
+  end
+
+  # Keep the rows in assigns as the user types, so add/remove don't discard edits.
+  def handle_event("env_change", %{"env" => env}, socket) do
+    {:noreply, assign(socket, :env_rows, rows_from_params(env))}
+  end
+
+  def handle_event("env_change", _params, socket), do: {:noreply, socket}
+
+  def handle_event("add_env_var", _params, socket) do
+    rows = socket.assigns.env_rows ++ [%{"key" => "", "value" => ""}]
+    {:noreply, assign(socket, :env_rows, rows)}
+  end
+
+  def handle_event("remove_env_var", %{"index" => idx}, socket) do
+    rows = List.delete_at(socket.assigns.env_rows, String.to_integer(idx))
+    {:noreply, assign(socket, :env_rows, rows)}
   end
 
   def handle_event("save_env", params, socket) do
     deployment = socket.assigns.deployment
-    env_overrides = params["env"] || params || %{}
-    env_overrides = Map.reject(env_overrides, fn {_k, v} -> v == "" or v == nil end)
+
+    env_overrides =
+      params["env"]
+      |> rows_from_params()
+      |> Enum.reject(fn row -> String.trim(row["key"] || "") == "" end)
+      |> Map.new(fn row -> {String.trim(row["key"]), row["value"] || ""} end)
 
     case apply_config(deployment, %{env_overrides: env_overrides}) do
       {:ok, updated} ->
@@ -287,6 +309,7 @@ defmodule HomelabWeb.DeploymentLive do
          |> assign_readiness()
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
+         |> assign(:env_rows, [])
          |> put_flash(:info, "Environment updated — recreating the container.")}
 
       {:error, message} ->
@@ -1076,8 +1099,10 @@ defmodule HomelabWeb.DeploymentLive do
                           type="radio"
                           name="settings[routed_port]"
                           value={port["internal"]}
-                          checked={checked_routed_port(@deployment, @settings_ports) ==
-                            to_string(port["internal"])}
+                          checked={
+                            checked_routed_port(@deployment, @settings_ports) ==
+                              to_string(port["internal"])
+                          }
                           class="radio radio-xs radio-primary"
                         />
                         <span class="text-[10px] text-base-content/40 w-10">route</span>
@@ -1314,21 +1339,52 @@ defmodule HomelabWeb.DeploymentLive do
           </div>
           <div class="p-4">
             <%= if @env_edit_mode && @env_form do %>
-              <.form for={@env_form} id="env-form" phx-submit="save_env" class="space-y-4">
-                <div :for={{key, val} <- merged_env(@deployment)} class="flex flex-col gap-1">
-                  <label class="text-xs font-medium text-base-content/50 font-mono">{key}</label>
+              <.form
+                for={@env_form}
+                id="env-form"
+                phx-change="env_change"
+                phx-submit="save_env"
+                class="space-y-3"
+              >
+                <div :for={{row, idx} <- Enum.with_index(@env_rows)} class="flex items-center gap-2">
                   <input
-                    type={
-                      if String.contains?(String.upcase(key), "PASSWORD") or
-                           String.contains?(String.upcase(key), "SECRET"),
-                         do: "password",
-                         else: "text"
-                    }
-                    name={"env[#{key}]"}
-                    value={val}
-                    class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    type="text"
+                    name={"env[#{idx}][key]"}
+                    value={row["key"]}
+                    placeholder="VARIABLE"
+                    class="w-2/5 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
+                  <input
+                    type={if secret_key?(row["key"]), do: "password", else: "text"}
+                    name={"env[#{idx}][value]"}
+                    value={row["value"]}
+                    placeholder="value"
+                    class="flex-1 rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                  />
+                  <button
+                    type="button"
+                    phx-click="remove_env_var"
+                    phx-value-index={idx}
+                    class="p-2 text-base-content/40 hover:text-error cursor-pointer"
+                    aria-label={"Remove #{row["key"]}"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
                 </div>
+
+                <button
+                  type="button"
+                  phx-click="add_env_var"
+                  class="text-xs text-primary hover:underline cursor-pointer"
+                >
+                  + Add variable
+                </button>
+
+                <p class="text-[11px] text-base-content/40">
+                  Saving recreates the container. A variable compiled into a frontend
+                  bundle at build time (e.g. <code>VITE_*</code>) cannot be changed here.
+                </p>
+
                 <.button
                   type="submit"
                   label="Save"
@@ -1492,6 +1548,40 @@ defmodule HomelabWeb.DeploymentLive do
     base = template.default_env || %{}
     overrides = deployment.env_overrides || %{}
     Map.merge(base, overrides)
+  end
+
+  # The env editor edits KEYS as well as values. It used to render one input per
+  # existing key, so a variable the template never declared could not be added at all
+  # -- and an app whose requirements changed after packaging (aut.hair gaining REVERB_*)
+  # had no way in short of rebuilding the catalog entry.
+  defp env_rows(env) do
+    env
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, value} -> %{"key" => key, "value" => to_string(value)} end)
+  end
+
+  # The editor posts indexed rows (%{"0" => %{"key" =>, "value" =>}}) because the key
+  # is editable. A flat %{"KEY" => "value"} map is still accepted so a caller that
+  # only wants to set values doesn't have to know about row indices.
+  defp rows_from_params(nil), do: []
+
+  defp rows_from_params(params) when is_map(params) do
+    if Enum.all?(params, fn {_k, value} -> is_map(value) end) do
+      params
+      |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+      |> Enum.map(fn {_idx, row} ->
+        %{"key" => row["key"] || "", "value" => row["value"] || ""}
+      end)
+    else
+      params
+      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.map(fn {key, value} -> %{"key" => key, "value" => to_string(value)} end)
+    end
+  end
+
+  defp secret_key?(key) do
+    upper = String.upcase(key)
+    String.contains?(upper, "PASSWORD") or String.contains?(upper, "SECRET")
   end
 
   # Persists config attrs then recreates the container so the changes take effect.
