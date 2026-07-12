@@ -41,6 +41,7 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           state: String.t() | nil,
           user: String.t() | nil,
           restart_policy: String.t() | nil,
+          managed: boolean(),
           in_scope: boolean(),
           mounts: [mount()]
         }
@@ -85,12 +86,19 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
     config = Map.get(inspect, "Config", %{}) || %{}
     host_config = Map.get(inspect, "HostConfig", %{}) || %{}
 
+    # An ADOPTED container keeps the original's name and the original's binds, so the
+    # only thing separating it from the container it replaced is the label we stamped
+    # on it. Without reading these, every adopted service would be offered for adoption
+    # again on the next scan -- and re-adopting it would quiesce and cut over a container
+    # the plane is itself running.
+    labels = Map.get(config, "Labels") || %{}
+
     mounts = inspect |> Map.get("Mounts", []) |> Enum.map(&normalize_mount/1)
-    in_scope = AdoptionPolicy.service_in_scope?(name, mounts)
+    in_scope = AdoptionPolicy.service_in_scope?(name, mounts, labels)
 
     classified =
       Enum.map(mounts, fn m ->
-        Map.merge(m, AdoptionPolicy.classify_mount(name, m, mounts))
+        Map.merge(m, AdoptionPolicy.classify_mount(name, m, mounts, labels))
       end)
 
     %{
@@ -100,6 +108,7 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       state: inspect |> Map.get("State", %{}) |> Map.get("Status"),
       user: blank_to_nil(Map.get(config, "User")),
       restart_policy: host_config |> Map.get("RestartPolicy", %{}) |> Map.get("Name"),
+      managed: AdoptionPolicy.already_managed?(labels),
       in_scope: in_scope,
       mounts: classified
     }

@@ -447,5 +447,75 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
       assert {:ok, [cap]} = AdoptionDiscovery.discover_in_scope()
       assert cap.name == "homelab-postgres"
     end
+
+    # The regression: adopt a service, re-scan, and it is offered for adoption AGAIN.
+    # An adopted container keeps the original's name and mounts the original's bind under
+    # the adoption root, so it passes every scope check. Only the label we stamped on it
+    # says otherwise — and discovery did not read labels at all.
+    test "a container we already adopted does not come back in the import list" do
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        case path do
+          "/containers/json?all=true" ->
+            {:ok, [%{"Id" => "adopted"}, %{"Id" => "fresh"}]}
+
+          # Post-cutover: same name, same bind, but it is OURS now.
+          "/containers/adopted/json" ->
+            {:ok,
+             inspect_json(%{
+               "Id" => "adopted",
+               "Name" => "/homelab-postgres",
+               "Config" => %{
+                 "Image" => "postgres:16.2",
+                 "User" => "",
+                 "Labels" => %{
+                   "homelab.managed" => "true",
+                   "homelab.adopted" => "true"
+                 }
+               },
+               "Mounts" => [
+                 %{
+                   "Type" => "bind",
+                   "Source" => "/srv/homelab/appdata/pg",
+                   "Destination" => "/var/lib/postgresql/data",
+                   "RW" => true
+                 }
+               ]
+             })}
+
+          # An unadopted neighbour, still on the old stack.
+          "/containers/fresh/json" ->
+            {:ok,
+             inspect_json(%{
+               "Id" => "fresh",
+               "Name" => "/homelab-sonarr",
+               "Mounts" => [
+                 %{
+                   "Type" => "bind",
+                   "Source" => "/srv/homelab/appdata/sonarr",
+                   "Destination" => "/config",
+                   "RW" => true
+                 }
+               ]
+             })}
+        end
+      end)
+
+      assert {:ok, [cap]} = AdoptionDiscovery.discover_in_scope()
+      assert cap.name == "homelab-sonarr"
+    end
+
+    test "capture records whether a container is already ours" do
+      body =
+        inspect_json(%{
+          "Config" => %{
+            "Image" => "postgres:16.2",
+            "User" => "",
+            "Labels" => %{"homelab.managed" => "true"}
+          }
+        })
+
+      assert AdoptionDiscovery.capture(body).managed
+      refute AdoptionDiscovery.capture(inspect_json(%{})).managed
+    end
   end
 end
