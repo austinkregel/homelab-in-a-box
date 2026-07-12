@@ -30,7 +30,7 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     {registry_url, auth_url, repo, tag} = parse_image_ref(full_ref)
     Logger.info("[ImageInspector] Inspecting #{full_ref} → #{registry_url}/#{repo}:#{tag}")
 
-    with {:ok, token} <- fetch_auth_token(auth_url, repo),
+    with {:ok, token} <- fetch_auth_token(auth_url, repo, full_ref),
          {:ok, config_digest} <- fetch_manifest(registry_url, repo, tag, token),
          {:ok, config} <- fetch_config_blob(registry_url, repo, config_digest, token) do
       result = extract_metadata(config)
@@ -88,9 +88,9 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
     {registry_url, auth_url, repo, tag}
   end
 
-  defp fetch_auth_token(nil, _repo), do: {:ok, nil}
+  defp fetch_auth_token(nil, _repo, _full_ref), do: {:ok, nil}
 
-  defp fetch_auth_token(auth_url, repo) do
+  defp fetch_auth_token(auth_url, repo, full_ref) do
     token_url =
       cond do
         auth_url == @docker_hub_auth ->
@@ -103,7 +103,9 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
           "#{auth_url}/token?scope=repository:#{repo}:pull"
       end
 
-    case Req.get(token_url, receive_timeout: 10_000) do
+    opts = [receive_timeout: 10_000] ++ basic_auth(full_ref)
+
+    case Req.get(token_url, opts) do
       {:ok, %{status: 200, body: %{"token" => token}}} ->
         {:ok, token}
 
@@ -112,6 +114,20 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
 
       {:error, reason} ->
         {:error, {:auth_request_failed, reason}}
+    end
+  end
+
+  # The token endpoint hands out an ANONYMOUS token to an unauthenticated request
+  # even for a private repo — it just isn't valid for it, so the failure only shows
+  # up later as a 401/403 ("invalid token") on the manifest. Present the registry
+  # credentials here so the token comes back scoped to the private repo.
+  defp basic_auth(full_ref) do
+    case Homelab.Docker.RegistryAuth.auth_config_for_ref(full_ref) do
+      %{"username" => username, "password" => password} ->
+        [auth: {:basic, "#{username}:#{password}"}]
+
+      _ ->
+        []
     end
   end
 
