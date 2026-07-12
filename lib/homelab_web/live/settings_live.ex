@@ -5,6 +5,8 @@ defmodule HomelabWeb.SettingsLive do
   alias Homelab.Settings
   alias Homelab.Accounts
   alias Homelab.Docker.Client, as: DockerClient
+  alias Homelab.Infrastructure.DaemonFacts
+  alias Homelab.Infrastructure.SwarmSettings
 
   @sections [
     {"general", "General", "hero-cog-6-tooth"},
@@ -242,6 +244,34 @@ defmodule HomelabWeb.SettingsLive do
      |> put_flash(:info, "Gateway updated!")}
   end
 
+  def handle_event("save_swarm_settings", %{"swarm" => params}, socket) do
+    case SwarmSettings.update(params) do
+      {:ok, state} ->
+        {:noreply,
+         socket
+         |> assign(:swarm_state, {:ok, state})
+         |> assign(:swarm_values, state.values)
+         |> assign(:swarm_errors, %{})
+         |> put_flash(:info, "Swarm cluster settings saved.")}
+
+      # Field errors come back as a map keyed by field. Keep what the user typed on
+      # screen next to the error — re-rendering the saved values would silently
+      # discard the edit they were told to fix.
+      {:error, errors} when is_map(errors) ->
+        {:noreply,
+         socket
+         |> assign(:swarm_values, params)
+         |> assign(:swarm_errors, errors)
+         |> put_flash(:error, "Nothing was changed — check the highlighted fields.")}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:swarm_errors, %{})
+         |> put_flash(:error, "Could not update the swarm: #{swarm_error_message(reason)}")}
+    end
+  end
+
   def handle_event("save_storage_roots", %{"storage" => params}, socket) do
     # Persist to Settings AND put_env for immediate effect this run (the modules
     # read the ETS-cached setting first, which set/3 populates).
@@ -432,14 +462,39 @@ defmodule HomelabWeb.SettingsLive do
         do: current_gateway.driver_id(),
         else: nil
 
-    assign(socket, :docker_socket_path, socket_path)
-    |> assign(:docker_version_info, version_info)
-    |> assign(:orchestrators, Homelab.Config.orchestrators())
-    |> assign(:selected_orchestrator, current_id)
-    |> assign(:gateways, Homelab.Config.gateways())
-    |> assign(:selected_gateway, current_gateway_id)
-    |> assign(:adoption_root, Homelab.Deployments.AdoptionPolicy.adoption_root())
-    |> assign(:managed_root, Homelab.Deployments.PermanentHome.managed_root())
+    # The cluster panel follows the *selected* orchestrator, not the daemon: if the
+    # operator has chosen Swarm we owe them the Swarm levers even when the daemon
+    # says it is not in a swarm — that mismatch is itself the thing to show them.
+    swarm_mode? = current_id == Homelab.Orchestrators.DockerSwarm.driver_id()
+
+    socket =
+      assign(socket, :docker_socket_path, socket_path)
+      |> assign(:docker_version_info, version_info)
+      |> assign(:orchestrators, Homelab.Config.orchestrators())
+      |> assign(:selected_orchestrator, current_id)
+      |> assign(:gateways, Homelab.Config.gateways())
+      |> assign(:selected_gateway, current_gateway_id)
+      |> assign(:adoption_root, Homelab.Deployments.AdoptionPolicy.adoption_root())
+      |> assign(:managed_root, Homelab.Deployments.PermanentHome.managed_root())
+      |> assign(:swarm_mode?, swarm_mode?)
+      |> assign(:swarm_fields, SwarmSettings.fields())
+      |> assign(:swarm_errors, %{})
+
+    if swarm_mode? do
+      swarm_state = SwarmSettings.load()
+
+      values =
+        case swarm_state do
+          {:ok, state} -> state.values
+          _ -> %{}
+        end
+
+      socket
+      |> assign(:swarm_state, swarm_state)
+      |> assign(:swarm_values, values)
+    else
+      assign(socket, :daemon_facts, DaemonFacts.load())
+    end
   end
 
   defp load_section_data(socket, "dns") do
@@ -732,6 +787,12 @@ defmodule HomelabWeb.SettingsLive do
         </div>
       </div>
 
+      <hr class="border-base-content/[0.06]" />
+
+      {if @swarm_mode?, do: render_swarm_cluster(assigns), else: render_engine_daemon(assigns)}
+
+      <hr class="border-base-content/[0.06]" />
+
       <div>
         <h2 class="text-lg font-semibold text-base-content mb-2">Container Orchestrator</h2>
         <p class="text-sm text-base-content/50 mb-4">
@@ -872,6 +933,346 @@ defmodule HomelabWeb.SettingsLive do
     </div>
     """
   end
+
+  defp render_swarm_cluster(assigns) do
+    ~H"""
+    <div>
+      <h2 class="text-lg font-semibold text-base-content mb-2">Swarm cluster</h2>
+      <p class="text-sm text-base-content/50 mb-4">
+        Settings that apply to the whole cluster — every node and every service — rather than to
+        one deployment. They are stored by Swarm itself, not by this app.
+      </p>
+
+      <%= case @swarm_state do %>
+        <% {:ok, state} -> %>
+          <div class="space-y-5">
+            <%!-- What the cluster actually is right now --%>
+            <div class="rounded-lg border border-base-content/[0.06] p-4">
+              <h3 class="text-sm font-semibold text-base-content mb-3">Cluster facts</h3>
+              <dl class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 text-xs">
+                <div>
+                  <dt class="text-base-content/50">Nodes</dt>
+                  <dd class="font-medium text-base-content">{state.facts.nodes || "—"}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Managers</dt>
+                  <dd class="font-medium text-base-content">{state.facts.managers || "—"}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Workers</dt>
+                  <dd class="font-medium text-base-content">
+                    {worker_count(state.facts)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">This node</dt>
+                  <dd class="font-medium text-base-content">
+                    {if state.facts.is_manager, do: "Manager", else: "Worker"}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Docker version</dt>
+                  <dd class="font-medium text-base-content">
+                    {state.facts.server_version || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Cluster name</dt>
+                  <dd class="font-medium text-base-content">{state.facts.name || "—"}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Created</dt>
+                  <dd class="font-medium text-base-content">
+                    {format_timestamp(state.facts.created_at)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Last changed</dt>
+                  <dd class="font-medium text-base-content">
+                    {format_timestamp(state.facts.updated_at)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Spec version</dt>
+                  <dd class="font-medium text-base-content font-mono">
+                    {state.facts.version_index || "—"}
+                  </dd>
+                </div>
+                <div class="col-span-2 sm:col-span-3">
+                  <dt class="text-base-content/50">Swarm ID</dt>
+                  <dd class="font-mono text-base-content/70 break-all">
+                    {state.facts.swarm_id || "—"}
+                  </dd>
+                </div>
+              </dl>
+              <p
+                :if={state.facts.root_rotation_in_progress}
+                class="mt-3 text-xs text-warning"
+              >
+                A root CA rotation is in progress. Wait for it to finish before changing
+                certificate settings.
+              </p>
+            </div>
+
+            <%!-- The safe levers --%>
+            <div class="rounded-lg border border-base-content/[0.06] p-4">
+              <h3 class="text-sm font-semibold text-base-content mb-1">Safe to change</h3>
+              <p class="text-xs text-base-content/50 mb-4">
+                Each of these has a sane default, takes effect without restarting anything, and can
+                be set back if you don't like it.
+              </p>
+              <.form for={%{}} id="swarm-settings-form" phx-submit="save_swarm_settings">
+                <div class="space-y-5">
+                  <div :for={field <- @swarm_fields}>
+                    <label class="block text-sm font-medium text-base-content/80 mb-1">
+                      {field.label}
+                    </label>
+                    <p class="text-xs text-base-content/60 mb-1">{field.what}</p>
+                    <p class="text-xs text-base-content/40 mb-2">{field.tradeoff}</p>
+                    <div class="flex items-center gap-2 max-w-xs">
+                      <input
+                        type="number"
+                        name={"swarm[#{field.param}]"}
+                        value={Map.get(@swarm_values, field.param)}
+                        min={field.min}
+                        max={field.max}
+                        step="1"
+                        class={[
+                          "w-32 rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50",
+                          Map.has_key?(@swarm_errors, field.key) && "ring-2 ring-error"
+                        ]}
+                      />
+                      <span class="text-xs text-base-content/50">{field.unit}</span>
+                    </div>
+                    <p class="text-xs text-base-content/40 mt-1">
+                      Docker's default: {field.default}
+                    </p>
+                    <p
+                      :if={Map.has_key?(@swarm_errors, field.key)}
+                      class="text-xs text-error mt-1"
+                    >
+                      {Map.get(@swarm_errors, field.key)}
+                    </p>
+                  </div>
+                  <button
+                    type="submit"
+                    class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:bg-primary/90 cursor-pointer"
+                  >
+                    Save cluster settings
+                  </button>
+                </div>
+              </.form>
+            </div>
+
+            <%!-- The levers we refuse to hand over, and why --%>
+            <div class="rounded-lg border border-warning/20 bg-warning/5 p-4">
+              <h3 class="text-sm font-semibold text-base-content mb-1">
+                Not editable here — and why
+              </h3>
+              <p class="text-xs text-base-content/60 mb-4">
+                These exist, and they are shown so you know what they are set to. Getting any of
+                them wrong can take the cluster down in a way a web form cannot help you undo, so
+                they are read-only on purpose.
+              </p>
+              <div class="space-y-3">
+                <div :for={locked <- state.locked} class="text-xs">
+                  <div class="flex items-baseline justify-between gap-3">
+                    <span class="font-semibold text-base-content">{locked.label}</span>
+                    <span class="font-mono text-base-content/70 shrink-0">{locked.value}</span>
+                  </div>
+                  <p class="text-base-content/50 mt-0.5">{locked.why}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        <% {:error, :not_in_swarm} -> %>
+          <div class="rounded-lg border border-warning/20 bg-warning/5 p-4 text-sm">
+            <p class="font-medium text-base-content mb-1">This node is not in a swarm.</p>
+            <p class="text-xs text-base-content/60">
+              Docker Swarm is selected as the orchestrator, but the daemon has not joined a swarm,
+              so there are no cluster settings to show. Run <code>docker swarm init</code>
+              on this host, or switch the orchestrator below to Docker Engine.
+            </p>
+          </div>
+        <% {:error, :not_a_manager} -> %>
+          <div class="rounded-lg border border-warning/20 bg-warning/5 p-4 text-sm">
+            <p class="font-medium text-base-content mb-1">This node is a worker.</p>
+            <p class="text-xs text-base-content/60">
+              Only manager nodes can read or change cluster settings. Open this page on a manager,
+              or promote this node.
+            </p>
+          </div>
+        <% {:error, reason} -> %>
+          <div class="rounded-lg border border-error/20 bg-error/5 p-4 text-sm">
+            <p class="font-medium text-base-content mb-1">Could not read the cluster.</p>
+            <p class="text-xs text-base-content/60">{swarm_error_message(reason)}</p>
+          </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp render_engine_daemon(assigns) do
+    ~H"""
+    <div>
+      <h2 class="text-lg font-semibold text-base-content mb-2">Docker Engine daemon</h2>
+      <p class="text-sm text-base-content/50 mb-4">
+        Standalone Docker Engine, so there is no cluster to configure. The daemon's own settings
+        are not changeable over the Docker API at all — they live in
+        <code>/etc/docker/daemon.json</code>
+        on the host and only take effect when the daemon restarts. Everything below is read-only
+        for that reason; there is nothing here we could honestly offer you a form for.
+      </p>
+
+      <%= case @daemon_facts do %>
+        <% {:ok, facts} -> %>
+          <div class="space-y-5">
+            <div class="rounded-lg border border-base-content/[0.06] p-4">
+              <h3 class="text-sm font-semibold text-base-content mb-3">Daemon facts</h3>
+              <dl class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 text-xs">
+                <div>
+                  <dt class="text-base-content/50">Version</dt>
+                  <dd class="font-medium text-base-content">{facts.server_version || "—"}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Storage driver</dt>
+                  <dd class="font-medium text-base-content font-mono">
+                    {facts.storage_driver || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Logging driver</dt>
+                  <dd class="font-medium text-base-content font-mono">
+                    {facts.logging_driver || "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Cgroup driver</dt>
+                  <dd class="font-medium text-base-content font-mono">
+                    {facts.cgroup_driver || "—"} (v{facts.cgroup_version || "?"})
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">CPUs</dt>
+                  <dd class="font-medium text-base-content">{facts.cpus || "—"}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Total memory</dt>
+                  <dd class="font-medium text-base-content">
+                    {DaemonFacts.format_memory(facts.memory_bytes)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Containers</dt>
+                  <dd class="font-medium text-base-content">
+                    {facts.containers_running || 0} running / {facts.containers || 0} total
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Images</dt>
+                  <dd class="font-medium text-base-content">{facts.images || 0}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50">Operating system</dt>
+                  <dd class="font-medium text-base-content">{facts.operating_system || "—"}</dd>
+                </div>
+                <div class="col-span-2 sm:col-span-3">
+                  <dt class="text-base-content/50">Docker root directory</dt>
+                  <dd class="font-mono text-base-content/70 break-all">
+                    {facts.docker_root_dir || "—"}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div class={[
+              "rounded-lg border p-4 text-xs",
+              if(facts.live_restore,
+                do: "border-success/20 bg-success/5",
+                else: "border-warning/20 bg-warning/5"
+              )
+            ]}>
+              <p class="text-sm font-semibold text-base-content mb-1">
+                Live restore: {if facts.live_restore, do: "on", else: "off"}
+              </p>
+              <p :if={facts.live_restore} class="text-base-content/60">
+                Containers keep running when the Docker daemon restarts — an upgrade or a daemon
+                crash will not take your services down with it.
+              </p>
+              <p :if={!facts.live_restore} class="text-base-content/60">
+                Every container on this host stops when the Docker daemon restarts, including for a
+                routine <code>apt upgrade</code>
+                of Docker itself. Turn it on by adding <code>{"{\"live-restore\": true}"}</code>
+                to <code>/etc/docker/daemon.json</code>
+                and restarting the daemon once. (Not settable from here — the API has no endpoint
+                for it.)
+              </p>
+            </div>
+
+            <div
+              :if={facts.warnings != []}
+              class="rounded-lg border border-warning/20 bg-warning/5 p-4"
+            >
+              <h3 class="text-sm font-semibold text-base-content mb-2">Daemon warnings</h3>
+              <p class="text-xs text-base-content/50 mb-2">
+                Reported by Docker itself. Usually about kernel features it wanted and did not find.
+              </p>
+              <ul class="list-disc list-inside space-y-1">
+                <li :for={warning <- facts.warnings} class="text-xs text-base-content/70">
+                  {warning}
+                </li>
+              </ul>
+            </div>
+          </div>
+        <% {:error, reason} -> %>
+          <div class="rounded-lg border border-error/20 bg-error/5 p-4 text-sm">
+            <p class="font-medium text-base-content mb-1">Could not read the daemon.</p>
+            <p class="text-xs text-base-content/60">{swarm_error_message(reason)}</p>
+          </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp worker_count(%{nodes: nodes, managers: managers})
+       when is_integer(nodes) and is_integer(managers),
+       do: nodes - managers
+
+  defp worker_count(_), do: "—"
+
+  # Docker timestamps are RFC3339 with nanosecond precision, which DateTime.from_iso8601/1
+  # parses fine but nobody wants to read. Show the minute and drop the rest.
+  defp format_timestamp(nil), do: "—"
+
+  defp format_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%Y-%m-%d %H:%M")
+      _ -> value
+    end
+  end
+
+  defp format_timestamp(_), do: "—"
+
+  defp swarm_error_message({:docker_unavailable, reason}),
+    do: "The Docker daemon could not be reached (#{inspect(reason)})."
+
+  defp swarm_error_message(:not_in_swarm), do: "This node is not part of a swarm."
+  defp swarm_error_message(:not_a_manager), do: "This node is not a swarm manager."
+
+  defp swarm_error_message(:missing_swarm_version),
+    do: "Docker did not report a spec version, so the change could not be applied safely."
+
+  defp swarm_error_message({:http_error, status, body}),
+    do: "Docker rejected the change (HTTP #{status}): #{docker_message(body)}"
+
+  defp swarm_error_message({:connection_error, reason}),
+    do: "The Docker daemon could not be reached (#{inspect(reason)})."
+
+  defp swarm_error_message(other), do: inspect(other)
+
+  defp docker_message(%{"message" => message}) when is_binary(message), do: message
+  defp docker_message(body) when is_binary(body), do: body
+  defp docker_message(body), do: inspect(body)
 
   defp render_dns(assigns) do
     ~H"""

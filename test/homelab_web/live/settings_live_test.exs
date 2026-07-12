@@ -673,6 +673,298 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "infrastructure: swarm cluster panel" do
+    setup do
+      # The LiveView runs in its own process, so the process-scoped :docker_client
+      # override does not reach it — route the mock through app env instead, the way
+      # the import tests above do.
+      prev = Application.get_env(:homelab, :docker_client)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      on_exit(fn -> restore_docker_client(prev) end)
+      :ok
+    end
+
+    defp select_swarm_orchestrator do
+      stub(Homelab.Mocks.Orchestrator, :driver_id, fn -> "docker_swarm" end)
+    end
+
+    defp swarm_spec do
+      %{
+        "Name" => "default",
+        "Labels" => %{},
+        "Orchestration" => %{"TaskHistoryRetentionLimit" => 5},
+        "Raft" => %{
+          "ElectionTick" => 10,
+          "HeartbeatTick" => 1,
+          "SnapshotInterval" => 10_000,
+          "LogEntriesForSlowFollowers" => 500
+        },
+        "Dispatcher" => %{"HeartbeatPeriod" => 5_000_000_000},
+        "CAConfig" => %{"NodeCertExpiry" => 7_776_000_000_000_000},
+        "EncryptionConfig" => %{"AutoLockManagers" => false},
+        "TaskDefaults" => %{}
+      }
+    end
+
+    defp active_swarm_info do
+      %{
+        "ServerVersion" => "26.1.4",
+        "Swarm" => %{
+          "LocalNodeState" => "active",
+          "ControlAvailable" => true,
+          "NodeID" => "node-1",
+          "Nodes" => 3,
+          "Managers" => 1
+        }
+      }
+    end
+
+    defp stub_active_swarm do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _ ->
+          {:ok, active_swarm_info()}
+
+        "/swarm", _ ->
+          {:ok,
+           %{
+             "ID" => "swarm-abc",
+             "CreatedAt" => "2024-03-01T10:00:00.000000000Z",
+             "UpdatedAt" => "2024-06-01T12:30:00.000000000Z",
+             "Version" => %{"Index" => 42},
+             "Spec" => swarm_spec()
+           }}
+
+        "/version", _ ->
+          {:ok, %{"Version" => "26.1.4"}}
+
+        _, _ ->
+          {:error, {:not_found, %{}}}
+      end)
+    end
+
+    test "renders cluster facts, editable levers and their explanations", %{conn: conn} do
+      select_swarm_orchestrator()
+      stub_active_swarm()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "Swarm cluster"
+      # Read-only cluster facts.
+      assert html =~ "Nodes"
+      assert html =~ "Managers"
+      assert html =~ "swarm-abc"
+      assert html =~ "26.1.4"
+
+      # Editable levers, in human units rather than the API's nanoseconds.
+      assert html =~ "Task history retention limit"
+      assert html =~ "Agent heartbeat period"
+      assert html =~ "Node certificate expiry"
+      assert has_element?(view, "input[name='swarm[dispatcher_heartbeat_seconds]'][value='5']")
+      assert has_element?(view, "input[name='swarm[node_cert_expiry_days]'][value='90']")
+
+      # A bare label is a failure — every lever must say what it does.
+      assert html =~ "docker service ps"
+      assert html =~ "Docker&#39;s default: 5"
+    end
+
+    test "shows the dangerous levers read-only, with the reason they are not editable",
+         %{conn: conn} do
+      select_swarm_orchestrator()
+      stub_active_swarm()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "Not editable here"
+      assert html =~ "Auto-lock managers"
+      assert html =~ "unrecoverable"
+      assert html =~ "Raft election tick"
+
+      # The danger is explained, not offered: no input exists for either of them.
+      refute has_element?(view, "input[name='swarm[auto_lock_managers]']")
+      refute has_element?(view, "input[name='swarm[election_tick]']")
+    end
+
+    test "saving valid values posts the full merged spec back to the daemon", %{conn: conn} do
+      select_swarm_orchestrator()
+      stub_active_swarm()
+
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _ ->
+        send(test_pid, {:swarm_update, path, body})
+        {:ok, %{}}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      html =
+        view
+        |> form("#swarm-settings-form", %{
+          "swarm" => %{
+            "task_history_retention_limit" => "25",
+            "dispatcher_heartbeat_seconds" => "10",
+            "node_cert_expiry_days" => "30"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "Swarm cluster settings saved"
+
+      assert_received {:swarm_update, path, body}
+      assert path =~ "version=42"
+      assert get_in(body, ["Orchestration", "TaskHistoryRetentionLimit"]) == 25
+      assert get_in(body, ["Dispatcher", "HeartbeatPeriod"]) == 10_000_000_000
+      # The fields we never touch are still in the posted spec.
+      assert get_in(body, ["Raft", "ElectionTick"]) == 10
+      assert Map.has_key?(body, "EncryptionConfig")
+    end
+
+    test "an out-of-range value shows a field error and writes nothing", %{conn: conn} do
+      select_swarm_orchestrator()
+      stub_active_swarm()
+
+      stub(Homelab.Mocks.DockerClient, :post, fn _, _, _ ->
+        flunk("a rejected value must never reach the daemon")
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      html =
+        view
+        |> form("#swarm-settings-form", %{
+          "swarm" => %{
+            "task_history_retention_limit" => "999999",
+            "dispatcher_heartbeat_seconds" => "10",
+            "node_cert_expiry_days" => "30"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "must be between 0 and 1000"
+      assert html =~ "Nothing was changed"
+    end
+
+    test "explains itself instead of crashing when the node is not in a swarm", %{conn: conn} do
+      select_swarm_orchestrator()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _ ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive", "ControlAvailable" => false}}}
+
+        "/version", _ ->
+          {:ok, %{"Version" => "26.1.4"}}
+
+        _, _ ->
+          {:error, {:not_found, %{}}}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "This node is not in a swarm"
+      assert html =~ "docker swarm init"
+      refute has_element?(view, "#swarm-settings-form")
+    end
+
+    test "says the node is a worker when it cannot read the cluster spec", %{conn: conn} do
+      select_swarm_orchestrator()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _ ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => false}}}
+
+        "/version", _ ->
+          {:ok, %{"Version" => "26.1.4"}}
+
+        _, _ ->
+          {:error, {:not_found, %{}}}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "This node is a worker"
+      refute has_element?(view, "#swarm-settings-form")
+    end
+  end
+
+  describe "infrastructure: docker engine panel" do
+    setup do
+      prev = Application.get_env(:homelab, :docker_client)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      on_exit(fn -> restore_docker_client(prev) end)
+      :ok
+    end
+
+    test "shows read-only daemon facts and points at daemon.json for the real levers",
+         %{conn: conn} do
+      stub(Homelab.Mocks.Orchestrator, :driver_id, fn -> "docker_engine" end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _ ->
+          {:ok,
+           %{
+             "ServerVersion" => "26.1.4",
+             "Driver" => "overlay2",
+             "CgroupDriver" => "systemd",
+             "CgroupVersion" => "2",
+             "LoggingDriver" => "json-file",
+             "LiveRestoreEnabled" => false,
+             "DockerRootDir" => "/var/lib/docker",
+             "NCPU" => 8,
+             "MemTotal" => 33_567_182_848,
+             "Containers" => 12,
+             "ContainersRunning" => 9,
+             "Images" => 30,
+             "OperatingSystem" => "Debian GNU/Linux 12",
+             "Warnings" => ["WARNING: No swap limit support"],
+             "Swarm" => %{"LocalNodeState" => "inactive"}
+           }}
+
+        "/version", _ ->
+          {:ok, %{"Version" => "26.1.4"}}
+
+        _, _ ->
+          {:error, {:not_found, %{}}}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "Docker Engine daemon"
+      assert html =~ "overlay2"
+      assert html =~ "systemd"
+      assert html =~ "31.3 GB"
+      assert html =~ "Debian GNU/Linux 12"
+      assert html =~ "No swap limit support"
+
+      # Honesty: no fabricated editable settings, and it says where the real ones live.
+      assert html =~ "daemon.json"
+      assert html =~ "Live restore: off"
+      refute has_element?(view, "#swarm-settings-form")
+      refute html =~ "Swarm cluster"
+    end
+
+    test "renders an error panel rather than crashing when the daemon is unreachable",
+         %{conn: conn} do
+      stub(Homelab.Mocks.Orchestrator, :driver_id, fn -> "docker_engine" end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _, _ ->
+        {:error, {:connection_error, :econnrefused}}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "infrastructure"})
+
+      assert html =~ "Could not read the daemon"
+      assert html =~ "econnrefused"
+    end
+  end
+
   defp restore_docker_client(nil), do: Application.delete_env(:homelab, :docker_client)
   defp restore_docker_client(val), do: Application.put_env(:homelab, :docker_client, val)
 end
