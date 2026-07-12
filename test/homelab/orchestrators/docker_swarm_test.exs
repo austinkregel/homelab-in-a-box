@@ -240,6 +240,19 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
   # --- Mocked daemon tests (no Docker required) ---
 
   describe "deploy/1 (mocked daemon)" do
+    # deploy/1 now ensures every network in the payload exists before
+    # /services/create: Swarm never creates one implicitly, and it rejects a local
+    # bridge outright. Default the daemon to swarm-active with the networks already
+    # present as overlays; the tests below that care re-stub :get themselves.
+    setup do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+      end)
+
+      :ok
+    end
+
     test "pulls the image, POSTs /services/create, and returns the new ID" do
       spec = build_spec()
 
@@ -350,6 +363,97 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       end)
 
       assert {:ok, "svc_net"} = DockerSwarm.deploy(spec)
+    end
+
+    test "creates every missing network as an ATTACHABLE OVERLAY before creating the service" do
+      test_pid = self()
+
+      spec = build_spec() |> put_in([:labels, "traefik.enable"], "true")
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+        "/networks/" <> _, _opts -> {:error, {:not_found, %{}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/networks/create", body, _opts ->
+          send(test_pid, {:created, body})
+          {:ok, %{"Id" => "net"}}
+
+        "/services/create", _body, _opts ->
+          send(test_pid, :service_created)
+          {:ok, %{"ID" => "svc"}}
+      end)
+
+      assert {:ok, "svc"} = DockerSwarm.deploy(spec)
+
+      # A bridge here is exactly what the daemon rejects with
+      # "cannot be used with services"; attachable is what lets the standalone
+      # Traefik container /networks/connect to it afterwards.
+      for network <- [spec.network, "homelab-iab-internal"] do
+        assert_received {:created,
+                         %{"Name" => ^network, "Driver" => "overlay", "Attachable" => true}}
+      end
+
+      assert_received :service_created
+    end
+
+    test "refuses to deploy onto a pre-existing BRIDGE network that still has containers on it" do
+      spec = build_spec()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "bridge", "Containers" => %{"abc" => %{"Name" => "legacy-app"}}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      # Recreating would disconnect a running container, so the deploy stops instead.
+      stub(Homelab.Mocks.DockerClient, :delete, fn path, _opts ->
+        flunk("must not remove a network in use: #{path}")
+      end)
+
+      assert {:error, {:network_driver_mismatch, network, "bridge", "overlay", ["legacy-app"]}} =
+               DockerSwarm.deploy(spec)
+
+      assert network == spec.network
+    end
+
+    test "recreates a leftover EMPTY bridge network as an overlay" do
+      test_pid = self()
+      spec = build_spec()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "bridge", "Containers" => %{}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :delete, fn path, _opts ->
+        send(test_pid, {:deleted, path})
+        {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/networks/create", body, _opts ->
+          send(test_pid, {:created, body})
+          {:ok, %{"Id" => "net"}}
+
+        "/services/create", _body, _opts ->
+          {:ok, %{"ID" => "svc"}}
+      end)
+
+      assert {:ok, "svc"} = DockerSwarm.deploy(spec)
+
+      network = spec.network
+      assert_received {:deleted, "/networks/" <> ^network}
+      assert_received {:created, %{"Name" => ^network, "Driver" => "overlay"}}
     end
   end
 
