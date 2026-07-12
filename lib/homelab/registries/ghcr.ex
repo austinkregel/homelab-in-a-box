@@ -60,8 +60,16 @@ defmodule Homelab.Registries.GHCR do
   @impl true
   def pull_auth_config do
     case Homelab.Settings.get("ghcr_token") do
-      nil -> {:error, :not_configured}
-      token -> {:ok, %{"username" => "token", "password" => token, "serveraddress" => "ghcr.io"}}
+      nil ->
+        {:error, :not_configured}
+
+      token ->
+        # GitHub documents `docker login ghcr.io -u <your GitHub username>` with the
+        # PAT as the password, so the username is configurable. It defaults to
+        # "token", which GHCR also accepts for PAT auth.
+        username = Homelab.Settings.get("ghcr_username") || "token"
+
+        {:ok, %{"username" => username, "password" => token, "serveraddress" => "ghcr.io"}}
     end
   end
 
