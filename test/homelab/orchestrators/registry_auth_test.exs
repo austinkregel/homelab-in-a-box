@@ -66,6 +66,17 @@ defmodule Homelab.Orchestrators.RegistryAuthTest do
   end
 
   describe "DockerSwarm" do
+    # deploy/1 ensures its overlay networks before /services/create; these tests are
+    # about the auth header, so let the networks already exist.
+    setup do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+      end)
+
+      :ok
+    end
+
     test "attaches X-Registry-Auth on pull and service-create for registry images" do
       test_pid = self()
 
