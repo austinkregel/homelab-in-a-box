@@ -308,8 +308,11 @@ defmodule Homelab.Config do
   defp inferred_orchestrator do
     case :persistent_term.get({__MODULE__, :inferred_orchestrator}, nil) do
       nil ->
+        # Manager, not merely "in a swarm": a WORKER reports LocalNodeState "active"
+        # but has no control plane, so choosing DockerSwarm there would fail every
+        # deploy with "This node is not a swarm manager".
         module =
-          if Homelab.Docker.Network.swarm_active?(),
+          if Homelab.Docker.Network.swarm_manager?(),
             do: Homelab.Orchestrators.DockerSwarm,
             else: Homelab.Orchestrators.DockerEngine
 
