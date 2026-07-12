@@ -10,6 +10,8 @@ defmodule Homelab.Docker.RegistryAuth do
   equivalent of `docker service create --with-registry-auth`.
   """
 
+  require Logger
+
   alias Homelab.Config
 
   @doc """
@@ -31,6 +33,30 @@ defmodule Homelab.Docker.RegistryAuth do
     case auth_config_for_ref(image_ref) do
       nil -> nil
       auth_config -> encode(auth_config)
+    end
+  end
+
+  @doc """
+  Request options carrying the `X-Registry-Auth` header for `image_ref`, or `[]` when
+  it needs no auth.
+
+  Logs what was resolved (never the password). A registry 401 is otherwise mute
+  about *why* — an image pulled with no header and one pulled with a bad password
+  fail identically — so say up front whether credentials were attached, and for whom.
+  """
+  @spec request_opts(String.t()) :: keyword()
+  def request_opts(image_ref) do
+    case auth_config_for_ref(image_ref) do
+      nil ->
+        Logger.info("[RegistryAuth] #{image_ref}: no credentials configured, pulling anonymously")
+        []
+
+      %{"username" => username, "serveraddress" => host} = auth_config ->
+        Logger.info(
+          "[RegistryAuth] #{image_ref}: authenticating to #{host} as #{inspect(username)}"
+        )
+
+        [headers: [encode(auth_config)]]
     end
   end
 
