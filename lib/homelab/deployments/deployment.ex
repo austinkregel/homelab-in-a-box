@@ -22,6 +22,10 @@ defmodule Homelab.Deployments.Deployment do
     # The container port the proxy forwards to. An explicit DECISION, never
     # inferred -- see SpecBuilder.routed_port/1. nil = fall back to the heuristic.
     field :routed_port, :integer
+    # Additional path -> port routes, for an app serving a second protocol from a
+    # second port (aut.hair: Laravel on 8000, Reverb websockets on 6001 at /app).
+    # Each: %{"path_prefix" => "/app", "port" => 6001}.
+    field :extra_routes, {:array, :map}, default: []
     field :computed_spec, :map
     field :last_reconciled_at, :utc_datetime
     field :error_message, :string
@@ -39,8 +43,8 @@ defmodule Homelab.Deployments.Deployment do
   @required_fields ~w(tenant_id app_template_id)a
   @optional_fields ~w(status external_id domain env_overrides ports_override
                       exposure_mode_override resource_limits_override
-                      health_check_override proxy_options routed_port computed_spec
-                      last_reconciled_at error_message)a
+                      health_check_override proxy_options routed_port extra_routes
+                      computed_spec last_reconciled_at error_message)a
 
   def changeset(deployment, attrs) do
     deployment
@@ -49,10 +53,55 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:exposure_mode_override, @exposure_modes)
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
+    |> validate_extra_routes()
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
     |> unique_constraint([:tenant_id, :app_template_id])
   end
+
+  # An extra route becomes a Traefik router rule and a load-balancer port. A malformed
+  # one does not fail loudly -- Traefik silently declines to route it, and the app looks
+  # broken in a browser with nothing in the logs. So reject it here, where the operator
+  # is still looking at the form.
+  defp validate_extra_routes(changeset) do
+    case get_change(changeset, :extra_routes) do
+      nil ->
+        changeset
+
+      routes when is_list(routes) ->
+        Enum.reduce(routes, changeset, fn route, acc ->
+          cond do
+            not valid_path_prefix?(route["path_prefix"]) ->
+              add_error(
+                acc,
+                :extra_routes,
+                "path must start with / (got #{inspect(route["path_prefix"])})"
+              )
+
+            not valid_port?(route["port"]) ->
+              add_error(
+                acc,
+                :extra_routes,
+                "port must be 1-65535 (got #{inspect(route["port"])})"
+              )
+
+            true ->
+              acc
+          end
+        end)
+
+      _ ->
+        add_error(changeset, :extra_routes, "must be a list")
+    end
+  end
+
+  defp valid_path_prefix?(path) when is_binary(path),
+    do: String.starts_with?(path, "/") and String.trim(path) != "/"
+
+  defp valid_path_prefix?(_path), do: false
+
+  defp valid_port?(port) when is_integer(port), do: port > 0 and port < 65_536
+  defp valid_port?(_port), do: false
 
   @doc "All valid exposure-mode override values (strings)."
   def exposure_modes, do: @exposure_modes
