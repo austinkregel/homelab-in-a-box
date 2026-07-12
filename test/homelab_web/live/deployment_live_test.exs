@@ -1264,8 +1264,55 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
   end
 
+  # The gateway calls a domain "active" whenever a ROUTER exists — true even while
+  # Traefik serves its self-signed default because ACME never issued. The card reports
+  # the certificate actually being served instead.
+  describe "TLS certificate card" do
+    setup do
+      on_exit(fn -> Application.delete_env(:homelab, :tls_probe_result) end)
+      :ok
+    end
+
+    test "shows the issuer and real expiry of a valid certificate", %{conn: conn, deployment: dep} do
+      Application.put_env(:homelab, :tls_probe_result, :healthy)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render(view)
+
+      assert html =~ "TLS certificate"
+      assert html =~ "Valid"
+      assert html =~ "Let&#39;s Encrypt R3"
+      assert html =~ "60d"
+    end
+
+    test "calls out Traefik's self-signed default certificate", %{conn: conn, deployment: dep} do
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render(view)
+
+      # The whole point: a custom domain silently falling back to the default cert must
+      # not look healthy.
+      assert html =~ "Self-signed"
+      assert html =~ "ACME never issued a real one"
+    end
+
+    test "reports a failed handshake rather than claiming health", %{conn: conn, deployment: dep} do
+      Application.put_env(
+        :homelab,
+        :tls_probe_result,
+        {:error, {:handshake_failed, :econnrefused}}
+      )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render(view)
+
+      assert html =~ "Could not complete a TLS handshake"
+    end
+  end
+
   describe "settings reconfiguration" do
-    test "saving proxy settings persists domain + auth and drops any host ports",
+    test "saving proxy settings persists domain + auth and never publishes host ports",
          %{conn: conn, deployment: dep} do
       # The recreate path: undeploy the old container, deploy a fresh one.
       Homelab.Mocks.Orchestrator
@@ -1290,8 +1337,22 @@ defmodule HomelabWeb.DeploymentLiveTest do
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.domain == "dashy.example.com"
       assert updated.exposure_mode_override == "public"
-      # Proxy access never binds host ports.
-      assert updated.ports_override == []
+
+      # Proxy access never BINDS host ports — but it still has to know the port the app
+      # listens on inside the container, because that is where Traefik forwards. This
+      # used to save `[]`, which is not "inherit the template": effective_ports/1 only
+      # inherits on nil, so the empty override won and the proxy fell back to port 80.
+      refute updated.ports_override == [],
+             "an empty override repoints Traefik at port 80; nil inherits the template"
+
+      assert is_nil(updated.ports_override)
+
+      # And the app's port survives — inherited from the template — so the route still
+      # lands on it instead of on the port-80 fallback.
+      reloaded = Homelab.Deployments.get_deployment!(dep.id)
+
+      assert Homelab.Deployments.Access.effective_ports(reloaded) ==
+               reloaded.app_template.ports
     end
 
     test "switching to Host ports persists the container->host binding and recreates",
