@@ -303,4 +303,99 @@ defmodule Homelab.Catalog.Enrichers.ComposeParserTest do
       assert {:error, _} = ComposeParser.parse_all("{{invalid")
     end
   end
+
+  # The HOST side of a compose volume is where the data ALREADY IS. Dropping it (as this
+  # parser used to) turns every folder mount in an imported stack into a fresh, empty
+  # named volume — the app comes up with none of its data, and nothing says why.
+  describe "volume host paths" do
+    @compose_binds """
+    services:
+      app:
+        image: app:latest
+        volumes:
+          - /srv/homelab/app/storage:/var/www/html/storage
+          - ./data:/var/lib/app
+          - pgdata:/var/lib/postgresql/data
+          - /srv/homelab/app/conf:/etc/app:ro
+    """
+
+    test "an absolute host path is kept as a folder mount" do
+      {:ok, result} = ComposeParser.parse(@compose_binds)
+      vol = Enum.find(result.volumes, &(&1["path"] == "/var/www/html/storage"))
+
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/homelab/app/storage"
+    end
+
+    test "a :ro mode suffix does not eat the host path" do
+      {:ok, result} = ComposeParser.parse(@compose_binds)
+      vol = Enum.find(result.volumes, &(&1["path"] == "/etc/app"))
+
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/homelab/app/conf"
+    end
+
+    test "a relative host path resolves against the project dir, as compose does" do
+      {:ok, result} = ComposeParser.parse(@compose_binds, project_dir: "/home/me/homelab")
+      vol = Enum.find(result.volumes, &(&1["path"] == "/var/lib/app"))
+
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/home/me/homelab/data"
+    end
+
+    test "without a project dir a relative path is carried through, NOT guessed" do
+      {:ok, result} = ComposeParser.parse(@compose_binds)
+      vol = Enum.find(result.volumes, &(&1["path"] == "/var/lib/app"))
+
+      # It stays "./data" and fails validation downstream, which is the point: resolving
+      # it against some arbitrary directory would mount a real folder holding nothing.
+      assert vol["source"] == "./data"
+    end
+
+    test "a named volume is prefixed with the compose project name" do
+      # `docker compose` names volumes <project>_<name>, and defaults <project> to the
+      # basename of the project directory. Referencing the bare name would point at a
+      # DIFFERENT, empty volume than the one the old stack has been writing to.
+      {:ok, result} = ComposeParser.parse(@compose_binds, project_dir: "/home/me/homelab")
+      vol = Enum.find(result.volumes, &(&1["path"] == "/var/lib/postgresql/data"))
+
+      assert vol["type"] == "volume"
+      assert vol["source"] == "homelab_pgdata"
+    end
+
+    test "long-form bind syntax keeps its source too" do
+      compose = """
+      services:
+        app:
+          image: app:latest
+          volumes:
+            - type: bind
+              source: /srv/data
+              target: /data
+      """
+
+      {:ok, result} = ComposeParser.parse(compose)
+      vol = hd(result.volumes)
+
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/data"
+      assert vol["path"] == "/data"
+    end
+
+    test "a bare container path stays an anonymous managed volume" do
+      compose = """
+      services:
+        app:
+          image: app:latest
+          volumes:
+            - /var/cache
+      """
+
+      {:ok, result} = ComposeParser.parse(compose)
+      vol = hd(result.volumes)
+
+      assert vol["type"] == "volume"
+      assert vol["source"] == nil
+    end
+  end
 end
