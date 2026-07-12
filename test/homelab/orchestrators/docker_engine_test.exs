@@ -219,10 +219,14 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "creates the deployment network when it does not yet exist" do
       test_pid = self()
 
-      # Network missing -> create it.
-      stub(Homelab.Mocks.DockerClient, :get, fn "/networks/" <> _ = path, _opts ->
-        send(test_pid, {:get, path})
-        {:error, {:not_found, %{}}}
+      # Network missing -> create it. A daemon with swarm inactive gets a bridge.
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive"}}}
+
+        "/networks/" <> _ = path, _opts ->
+          send(test_pid, {:get, path})
+          {:error, {:not_found, %{}}}
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
@@ -929,8 +933,9 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "ensure_network treats an existing network (200) as :ok and skips create" do
       test_pid = self()
 
-      stub(Homelab.Mocks.DockerClient, :get, fn "/networks/myapp_net", _opts ->
-        {:ok, %{"Name" => "myapp_net"}}
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive"}}}
+        "/networks/myapp_net", _opts -> {:ok, %{"Name" => "myapp_net", "Driver" => "bridge"}}
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
