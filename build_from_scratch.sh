@@ -104,8 +104,16 @@ done
 echo "==> Removing network..."
 docker network rm "${NETWORK}" 2>/dev/null || true
 
+# On a swarm-enabled daemon the backbone MUST be an overlay: Swarm refuses to
+# attach a service to a node-local bridge ("cannot be used with services"), and
+# routed deployments join this network so Traefik can reach them. `attachable` is
+# what still lets plain containers — the app itself, Traefik, Postgres — join it.
 echo "==> Creating shared network..."
-docker network create "${NETWORK}" 2>/dev/null || true
+if [ "$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)" = "active" ]; then
+  docker network create --driver overlay --attachable "${NETWORK}" 2>/dev/null || true
+else
+  docker network create "${NETWORK}" 2>/dev/null || true
+fi
 
 if [ "$MODE" = "prod" ]; then
   echo "==> Building production image..."
@@ -170,3 +178,4 @@ else
     -p 4000:4000 \
     homelab-in-a-box:dev
 fi
+
