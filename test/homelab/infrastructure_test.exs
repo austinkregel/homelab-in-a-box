@@ -147,6 +147,7 @@ defmodule Homelab.InfrastructureTest do
       # Network 404 -> create; container already running afterwards.
       stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
         case path do
+          "/info" -> {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive"}}}
           "/networks/homelab-iab-internal" -> {:error, {:not_found, %{}}}
           "/containers/homelab-pihole/json" -> {:ok, %{"State" => %{"Running" => true}}}
         end
@@ -161,8 +162,9 @@ defmodule Homelab.InfrastructureTest do
     end
 
     test "propagates a network creation failure as :network_create_failed" do
-      expect(Homelab.Mocks.DockerClient, :get, fn "/networks/homelab-iab-internal", _opts ->
-        {:error, {:not_found, %{}}}
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive"}}}
+        "/networks/homelab-iab-internal", _opts -> {:error, {:not_found, %{}}}
       end)
 
       expect(Homelab.Mocks.DockerClient, :post, fn "/networks/create", _body, _opts ->
