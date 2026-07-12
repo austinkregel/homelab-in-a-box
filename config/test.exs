@@ -72,6 +72,8 @@ config :homelab,
   # they did with no daemon. Docker-focused tests opt in per process with
   # `Process.put(:docker_client, Homelab.Mocks.DockerClient)`.
   docker_client: Homelab.Docker.UnavailableClient,
+  # Never open a real TLS connection from a test that merely mounts a page.
+  tls_probe: Homelab.Networking.TlsProbeStub,
   start_services: false,
   registries: [Homelab.Registries.DockerHub],
   # In-process copy (no helper container) so migration steps run against temp dirs.
