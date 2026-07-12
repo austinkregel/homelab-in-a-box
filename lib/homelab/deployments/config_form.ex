@@ -21,8 +21,10 @@ defmodule Homelab.Deployments.ConfigForm do
   end
 
   defp normalize_port(port) do
+    # Infer only when the form carried NO role. "other" is an explicit answer, and
+    # re-inferring it silently promoted demoted ports back to "web" on every save.
     role = port["role"]
-    role = if role in [nil, "", "other"], do: PortRoles.infer(port["internal"]), else: role
+    role = if role in [nil, ""], do: PortRoles.infer(port["internal"]), else: role
 
     %{
       "internal" => port["internal"],
