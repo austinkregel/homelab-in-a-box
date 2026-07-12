@@ -16,12 +16,27 @@ defmodule Homelab.MigrationRunner do
       Homelab.Bootstrap.maybe_seed_from_env()
     end
 
+    # Tables now exist — record which orchestrator this host is actually running if
+    # nothing is stored yet, BEFORE any service reads it. Same guard as below: a
+    # fresh/unavailable DB must not break boot.
+    _ = ensure_orchestrator_recorded()
+
     # Tables now exist — warm the settings ETS cache so cache-only reads
     # (e.g. storage roots) see DB-persisted overrides after a restart. Guarded:
     # a fresh/unavailable DB (or the test sandbox at boot) must not break boot.
     _ = warm_settings_cache()
 
     :ignore
+  end
+
+  # An explicit application-env orchestrator (tests inject a mock) is authoritative
+  # and takes precedence over Settings anyway, so there is nothing to record.
+  defp ensure_orchestrator_recorded do
+    if is_nil(Application.get_env(:homelab, :orchestrator)) do
+      Homelab.Bootstrap.backfill_orchestrator()
+    end
+  rescue
+    _ -> :ok
   end
 
   defp warm_settings_cache do
