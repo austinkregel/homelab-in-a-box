@@ -10,6 +10,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   @behaviour Homelab.Behaviours.Orchestrator
 
   alias Homelab.Docker.Client
+  alias Homelab.Docker.Network
   alias Homelab.Docker.RegistryAuth
 
   # Must match Homelab.Infrastructure's backbone network (namespaced to avoid
@@ -27,7 +28,12 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
   @impl true
   def deploy(spec) do
-    with :ok <- pull_image(spec.image) do
+    # Pull FIRST, then ensure the networks immediately before create — same race
+    # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
+    # which a freshly-created (empty) network can be swept by a racing cleanup or
+    # prune before anything attaches to it.
+    with :ok <- pull_image(spec.image),
+         :ok <- ensure_networks(spec) do
       body = build_service_create_payload(spec)
 
       case Client.post("/services/create", body, registry_auth_opts(spec.image)) do
@@ -37,6 +43,22 @@ defmodule Homelab.Orchestrators.DockerSwarm do
         {:error, reason} -> {:error, reason}
       end
     end
+  end
+
+  # Every network named in the service payload must already exist as an overlay:
+  # Swarm will not create one implicitly, and it rejects a local bridge outright
+  # ("cannot be used with services"). `build_networks/1` decides which ones the
+  # service attaches to, so ensure exactly that set.
+  defp ensure_networks(spec) do
+    spec
+    |> build_networks()
+    |> Enum.map(& &1["Target"])
+    |> Enum.reduce_while(:ok, fn network, :ok ->
+      case Network.ensure_for_workload(network) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   # For private (self-hosted registry) images, attach X-Registry-Auth so Swarm
