@@ -28,11 +28,16 @@ defmodule Homelab.Docker.Network do
   @overlay %{"Driver" => "overlay", "Attachable" => true}
 
   @doc """
-  The `/networks/create` attributes this daemon needs: an attachable overlay when
-  swarm is active, otherwise a bridge.
+  The `/networks/create` attributes this daemon needs: an attachable overlay when this
+  node can drive Swarm, otherwise a bridge.
+
+  Keyed off `swarm_manager?/0`, not `swarm_active?/0`. Creating an overlay is a
+  control-plane call, so a WORKER — which is "active" in the swarm but has no control
+  plane — cannot make one. It must agree with the orchestrator choice, which is keyed
+  off the same question: a node that runs plain containers needs plain bridges.
   """
   @spec attrs() :: map()
-  def attrs, do: if(swarm_active?(), do: @overlay, else: @bridge)
+  def attrs, do: if(swarm_manager?(), do: @overlay, else: @bridge)
 
   @doc """
   Ensures a system network exists (the backbone, Bootstrap's). An existing network
@@ -89,6 +94,27 @@ defmodule Homelab.Docker.Network do
   def swarm_active? do
     case Client.get("/info") do
       {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}} -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  Whether this daemon can DRIVE Swarm — i.e. it is a manager.
+
+  `swarm_active?/0` is not the same question. `LocalNodeState` is `"active"` on a
+  WORKER too: the node is in the swarm, but the control plane lives on the managers,
+  so `/services/create`, `/swarm` and overlay-network creation all come back with
+  "This node is not a swarm manager."
+
+  Every capability decision (which orchestrator to run, whether a network can be an
+  overlay) has to key off manager-ness, not membership — otherwise homelab running on
+  a worker would confidently choose the Swarm orchestrator and then fail every single
+  deploy. `ControlAvailable` is the daemon's own word for "I am a manager".
+  """
+  @spec swarm_manager?() :: boolean()
+  def swarm_manager? do
+    case Client.get("/info") do
+      {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}} -> true
       _ -> false
     end
   end
