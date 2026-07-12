@@ -101,8 +101,13 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainer do
 
   # --- internals ------------------------------------------------------------
 
+  # An in-place target was never copied anywhere: the managed container mounts the
+  # ORIGINAL directory. There is no permanent home to re-sync into, and "migrating" it
+  # would copy the directory onto itself.
   defp delta_resync(targets) do
-    Enum.reduce_while(targets, :ok, fn target, :ok ->
+    targets
+    |> Enum.reject(&(to_string(&1["strategy"]) == "in_place"))
+    |> Enum.reduce_while(:ok, fn target, :ok ->
       dest = PermanentHome.backing_dir(target["name"], target["container_path"])
 
       case engine().migrate(target["source"], dest, []) do

@@ -183,4 +183,40 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
 
     assert Deployments.get_deployment!(deployment.id).external_id == nil
   end
+
+  # An in-place adoption never copied the data anywhere: the managed container mounts the
+  # ORIGINAL directory. Re-syncing it would copy the directory onto itself, via a copy
+  # engine that is not built to have its source and destination be the same bytes.
+  test "an in_place target is not re-synced into a permanent home", %{
+    deployment: deployment,
+    targets: [target],
+    src: src
+  } do
+    Application.put_env(:homelab, :migrate_copy_engine, __MODULE__.ExplodingEngine)
+    on_exit(fn -> Application.delete_env(:homelab, :migrate_copy_engine) end)
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn _spec -> {:ok, "new-managed-id"} end)
+
+    {s, ctx} = step(deployment, [Map.put(target, "strategy", "in_place")])
+
+    assert {:ok, handle} = AdoptContainer.run(s, ctx)
+    assert handle["external_id"] == "new-managed-id"
+
+    # The old container is still stopped before cutover — two writers on one directory is
+    # exactly what in-place must avoid.
+    assert_received {:stop, "old-pg"}
+
+    # No permanent home was created, and the original data is untouched.
+    refute File.exists?(PermanentHome.backing_dir("homelab-pg", "/var/lib/postgresql/data"))
+    assert File.read!(Path.join(src, "data.txt")) == "important"
+  end
+
+  defmodule ExplodingEngine do
+    @behaviour Homelab.Deployments.Migrate.CopyEngine
+
+    @impl true
+    def migrate(source, dest, _opts) do
+      raise "copy engine must not run for an in_place target (#{source} -> #{dest})"
+    end
+  end
 end

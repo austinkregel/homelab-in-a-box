@@ -193,4 +193,82 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert {:error, :boom} = AdoptionPlanner.review()
     end
   end
+
+  # A stack that is entirely folder mounts should not be forced through a copy it never
+  # asked for. :in_place mounts the ORIGINAL directory into the managed container.
+  describe "build_plan/2 with strategy: :in_place" do
+    test "the managed container mounts the original folder, not a copy of it" do
+      plan = AdoptionPlanner.build_plan([review_fixture()], strategy: :in_place)
+
+      [service] = plan.services
+      [volume] = service.template_attrs.volumes
+
+      assert volume["type"] == "bind"
+      assert volume["source"] == "/srv/homelab/appdata/pg"
+      assert volume["container_path"] == "/var/lib/postgresql/data"
+
+      # And emphatically NOT the permanent-home name the :migrate path would mint.
+      refute volume["source"] ==
+               PermanentHome.volume_name("homelab-postgres", "/var/lib/postgresql/data")
+    end
+
+    test "an existing NAMED volume is referenced by name, also without copying" do
+      mount = %{
+        preserve_mount()
+        | type: "volume",
+          source: "pgdata",
+          mountpoint: "/var/lib/docker/volumes/pgdata/_data"
+      }
+
+      plan =
+        AdoptionPlanner.build_plan([review_fixture(%{preserve: [mount]})], strategy: :in_place)
+
+      [service] = plan.services
+      [volume] = service.template_attrs.volumes
+
+      assert volume["type"] == "volume"
+      assert volume["source"] == "pgdata"
+    end
+
+    test "no bytes move: no copy step, and no permanent home to register" do
+      plan = AdoptionPlanner.build_plan([review_fixture()], strategy: :in_place)
+
+      # A backup is still PROVEN first — with no second copy, it is the only net.
+      assert Enum.map(plan.phase1, & &1.type) == [:backup_verify]
+
+      assert Enum.map(plan.phase2, & &1.type) ==
+               [:adopt_credentials, :adopt_container, :verify_integrity]
+
+      refute :migrate_volume in Enum.map(plan.phase1 ++ plan.phase2, & &1.type)
+      refute :adopt_volume in Enum.map(plan.phase1 ++ plan.phase2, & &1.type)
+    end
+
+    test "targets carry the strategy, so the cutover knows not to re-sync them" do
+      plan = AdoptionPlanner.build_plan([review_fixture()], strategy: :in_place)
+      [backup] = plan.phase1
+      [target] = backup.resource_handle["targets"]
+
+      assert target["strategy"] == "in_place"
+      # The real filesystem path, so BackupVerify reads the actual bytes.
+      assert target["source"] == "/srv/homelab/appdata/pg"
+    end
+
+    test ":migrate remains the default and is unchanged" do
+      plan = AdoptionPlanner.build_plan([review_fixture()])
+
+      assert Enum.map(plan.phase1, & &1.type) ==
+               [:backup_verify, :quiesce_old, :migrate_volume, :resume_old]
+
+      [service] = plan.services
+      [volume] = service.template_attrs.volumes
+
+      assert volume["type"] == "volume"
+
+      assert volume["source"] ==
+               PermanentHome.volume_name("homelab-postgres", "/var/lib/postgresql/data")
+
+      [target] = hd(plan.phase1).resource_handle["targets"]
+      assert target["strategy"] == "migrate"
+    end
+  end
 end
