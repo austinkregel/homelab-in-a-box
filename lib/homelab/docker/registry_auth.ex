@@ -24,24 +24,39 @@ defmodule Homelab.Docker.RegistryAuth do
   end
 
   @doc """
-  Returns the `X-Registry-Auth` header for an image ref that needs authentication —
-  the self-hosted registry, or any configured registry driver advertising
-  `:pull_auth` (e.g. GHCR) whose host the ref lives on. `nil` for public images,
-  which need no auth.
+  Returns the `X-Registry-Auth` header for an image ref that needs authentication,
+  or `nil` for a public image (which needs none).
   """
-  def for_ref(image_ref) when is_binary(image_ref) do
-    self_hosted_header(image_ref) || registry_driver_header(image_ref)
+  def for_ref(image_ref) do
+    case auth_config_for_ref(image_ref) do
+      nil -> nil
+      auth_config -> encode(auth_config)
+    end
   end
 
-  def for_ref(_), do: nil
+  @doc """
+  The `AuthConfig` (`%{"username", "password", "serveraddress"}`) that authenticates
+  `image_ref` — the self-hosted registry, or any configured registry driver
+  advertising `:pull_auth` (e.g. GHCR) whose host the ref lives on. `nil` for a
+  public image.
 
-  defp self_hosted_header(image_ref) do
+  Exposed separately from `for_ref/1` because the Docker daemon is not the only
+  thing that has to authenticate: the catalog's image inspector talks to the
+  registry's HTTP API directly and needs the same credentials in a different shape.
+  """
+  def auth_config_for_ref(image_ref) when is_binary(image_ref) do
+    self_hosted_auth(image_ref) || registry_driver_auth(image_ref)
+  end
+
+  def auth_config_for_ref(_), do: nil
+
+  defp self_hosted_auth(image_ref) do
     prefix = Config.registry_ref_prefix()
 
     if prefix && String.starts_with?(image_ref, prefix <> "/") do
       case Config.registry_credentials() do
         {username, password} when is_binary(username) and is_binary(password) ->
-          header(%{username: username, password: password, serveraddress: prefix})
+          %{"username" => username, "password" => password, "serveraddress" => prefix}
 
         _ ->
           nil
@@ -53,14 +68,14 @@ defmodule Homelab.Docker.RegistryAuth do
   # against, so that `serveraddress` is also what decides whether a ref belongs to
   # it. Without this, a private image on a third-party registry (a private GHCR
   # package) is pulled anonymously and the daemon 401s.
-  defp registry_driver_header(image_ref) do
+  defp registry_driver_auth(image_ref) do
     Config.registries()
     |> Enum.filter(&pull_auth?/1)
     |> Enum.find_value(fn registry ->
       with {:ok, %{"serveraddress" => host} = auth_config} <- registry.pull_auth_config(),
            true <- is_binary(host) and host != "",
            true <- String.starts_with?(image_ref, host <> "/") do
-        encode(auth_config)
+        auth_config
       else
         _ -> nil
       end
