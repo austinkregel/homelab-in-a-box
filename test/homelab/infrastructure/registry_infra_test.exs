@@ -20,6 +20,58 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
     :ok
   end
 
+  describe "ensure_traefik/0 routing providers" do
+    setup do
+      prev = System.get_env("TRAEFIK_DNS_API_TOKEN")
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+      on_exit(fn -> restore_env("TRAEFIK_DNS_API_TOKEN", prev) end)
+      :ok
+    end
+
+    # The Cmd Traefik would be created with, on a daemon in the given swarm state.
+    defp traefik_cmd(swarm_state) do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => swarm_state}}}
+        _path, _opts -> {:error, {:not_found, %{}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if path == "/containers/create?name=homelab-traefik",
+          do: send(test_pid, {:create, body})
+
+        {:ok, %{"Id" => "traefik-id"}}
+      end)
+
+      Infrastructure.ensure_traefik()
+
+      assert_received {:create, body}
+      body["Cmd"]
+    end
+
+    test "enables the Swarm provider when the daemon is in swarm mode" do
+      cmd = traefik_cmd("active")
+
+      # Without this Traefik never sees a Swarm deployment's routers at all: Swarm
+      # keeps the traefik.* labels on the SERVICE, and the docker provider only ever
+      # watches containers.
+      assert "--providers.swarm=true" in cmd
+      assert "--providers.swarm.exposedbydefault=false" in cmd
+      # Kept alongside it — an adopted stack's containers still route by container label.
+      assert "--providers.docker=true" in cmd
+    end
+
+    test "omits the Swarm provider on a non-swarm daemon (there is no swarm API to talk to)" do
+      cmd = traefik_cmd("inactive")
+
+      refute Enum.any?(cmd, &String.starts_with?(&1, "--providers.swarm"))
+      assert "--providers.docker=true" in cmd
+    end
+  end
+
   describe "ensure_traefik/0 wildcard DNS-01" do
     setup do
       prev = System.get_env("TRAEFIK_DNS_API_TOKEN")
