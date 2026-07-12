@@ -52,6 +52,10 @@ config :homelab, :release_step_handlers, %{
   # Greenfield deploy steps.
   provision_credentials: Homelab.Deployments.ReleaseSteps.ProvisionCredentials,
   dependency_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
+  # Applies the credentials ProvisionCredentials only *declared*: a datastore whose
+  # volume already has data ignores MARIADB_USER/PASSWORD entirely (init runs once,
+  # on an empty data dir), so the app would be handed a password the DB never took.
+  ensure_datastore_grants: Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants,
   app_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
   await_health: Homelab.Deployments.ReleaseSteps.AwaitHealth,
   publish_ingress: Homelab.Deployments.ReleaseSteps.PublishIngress,
