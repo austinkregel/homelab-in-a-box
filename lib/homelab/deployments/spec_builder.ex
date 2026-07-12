@@ -94,10 +94,13 @@ defmodule Homelab.Deployments.SpecBuilder do
         tenant_id: to_string(tenant.id),
         deployment_id: to_string(deployment.id),
         service_mode: service_mode?,
+        # Probes the SAME port the proxy forwards to. If the routed port is wrong,
+        # the container fails its healthcheck at deploy time instead of coming up
+        # "healthy" and quietly serving 502s through Traefik.
         health_check:
           build_health_check(
             Access.effective_health_check(deployment),
-            Access.effective_ports(deployment)
+            routed_port(deployment)
           )
       }
 
@@ -118,12 +121,12 @@ defmodule Homelab.Deployments.SpecBuilder do
   @doc """
   Builds a Docker `Healthcheck` payload from a declared healthcheck map, or `nil`
   when none is declared. HTTP `path` checks become a `wget`/`curl` probe against
-  the primary port; `test`/`command` checks pass through.
+  the routed port; `test`/`command` checks pass through.
   """
-  def build_health_check(health_check, ports) do
+  def build_health_check(health_check, port) do
     hc = health_check || %{}
 
-    case health_test(hc, primary_port(ports || [])) do
+    case health_test(hc, port) do
       nil ->
         nil
 
@@ -329,7 +332,7 @@ defmodule Homelab.Deployments.SpecBuilder do
 
   defp proxy_labels(deployment, domain, network) do
     router = sanitize_domain(domain)
-    port = primary_port(Access.effective_ports(deployment))
+    port = routed_port(deployment)
     exposure = to_string(Access.effective_exposure(deployment))
 
     base = %{
@@ -411,7 +414,23 @@ defmodule Homelab.Deployments.SpecBuilder do
 
   defp exposure_middleware_labels(_router, _public), do: %{}
 
-  defp primary_port(ports) when is_list(ports) do
+  @doc """
+  The container port the proxy forwards to, and the port an HTTP healthcheck probes.
+
+  An explicit `routed_port` is a DECISION and always wins. Everything below it is a
+  guess, kept only for deployments that never made one.
+
+  The guess is why aut.hair served a 502: `PortRoles.infer/1` calls *every*
+  conventional HTTP port "web" (8000 and 8080 are both on the list), so an app
+  exposing two of them had its upstream decided by array order — and an operator's
+  explicit pick was re-inferred back to "web" on the next save, handing the route to
+  whichever port happened to come first. Traefik pointed at a port nothing listened
+  on. `role` is a hint about what a port *is*; it must not decide where traffic goes.
+  """
+  def routed_port(%Deployment{routed_port: port}) when is_integer(port), do: to_string(port)
+  def routed_port(%Deployment{} = deployment), do: guess_port(Access.effective_ports(deployment))
+
+  defp guess_port(ports) when is_list(ports) do
     port =
       Enum.find(ports, fn p -> p["role"] == "web" end) ||
         Enum.find(ports, fn p -> !p["optional"] end) ||
