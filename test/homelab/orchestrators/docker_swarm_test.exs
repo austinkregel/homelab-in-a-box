@@ -314,14 +314,22 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert {:ok, "lower_id"} = DockerSwarm.deploy(build_spec())
     end
 
-    test "maps a conflict to {:error, :already_exists}" do
+    test "a conflict whose in-place update fails propagates the error" do
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+        # The service conflicted on create but cannot be inspected — converging is
+        # impossible, so the deploy must fail rather than report a phantom success.
+        "/services/" <> _, _opts -> {:error, {:not_found, %{}}}
+      end)
 
       expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", _body, _opts ->
         {:error, {:conflict, %{}}}
       end)
 
-      assert {:error, :already_exists} = DockerSwarm.deploy(build_spec())
+      assert {:error, {:not_found, _}} = DockerSwarm.deploy(build_spec())
     end
 
     test "propagates a non-conflict create error" do
@@ -422,6 +430,44 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
                DockerSwarm.deploy(spec)
 
       assert network == spec.network
+    end
+
+    test "an existing service is UPDATED in place, not failed with :already_exists" do
+      test_pid = self()
+      spec = build_spec() |> put_in([:labels, "traefik.enable"], "true")
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "overlay"}}
+
+        "/services/" <> _, _opts ->
+          {:ok, %{"ID" => "svc_existing", "Version" => %{"Index" => 11}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/services/create", _body, _opts ->
+          {:error, {:conflict, %{"message" => "name conflicts with an existing object"}}}
+
+        "/services/" <> rest, body, _opts ->
+          send(test_pid, {:updated, rest, body})
+          {:ok, %{}}
+      end)
+
+      # Converges instead of bailing out — this is what makes the deploy step re-runnable.
+      assert {:ok, "svc_existing"} = DockerSwarm.deploy(spec)
+
+      assert_received {:updated, path, body}
+      assert path =~ "/update?version=11"
+
+      # And it must carry the CURRENT spec: a redeploy exists to change something, and
+      # the labels are precisely what a Traefik-label fix needs rewritten.
+      assert body["Labels"] == spec.labels
+      assert get_in(body, ["TaskTemplate", "ContainerSpec", "Image"]) == spec.image
     end
 
     test "recreates a leftover EMPTY bridge network as an overlay" do
