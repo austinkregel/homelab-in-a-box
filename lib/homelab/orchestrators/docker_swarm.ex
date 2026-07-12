@@ -347,6 +347,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     %{
       "Name" => spec.service_name,
       "Labels" => spec.labels,
+      "UpdateConfig" => build_update_config(spec),
       "TaskTemplate" => %{
         "ContainerSpec" => build_container_spec(spec),
         "Resources" => %{
@@ -426,6 +427,45 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
   defp build_service_update_payload(spec) do
     build_service_create_payload(spec)
+  end
+
+  @doc false
+  # How Swarm swaps tasks when a service is converged. Docker's default is
+  # `stop-first`: kill the old task, then start the new one — so every config save
+  # costs a gap even when the image is already pulled.
+  #
+  # `start-first` runs the new task alongside the old and only retires the old once
+  # the new one is up, which with Traefik in front is genuinely zero-downtime. It is
+  # NOT a safe blanket default, for two reasons:
+  #
+  #   * WITHOUT A HEALTHCHECK it is worse than stop-first. Swarm treats a task as
+  #     up the moment its process starts, so it would retire the old container while
+  #     the new one is still booting, and Traefik would route to something that
+  #     cannot serve yet. A short honest gap beats a burst of 502s.
+  #
+  #   * A DATASTORE must never overlap. Two MariaDB tasks briefly sharing one volume
+  #     is corruption, not a rolling update. `:service` deployments always stop first.
+  #
+  # FailureAction is left at Docker's `pause` deliberately. `rollback` sounds
+  # appealing, but Swarm would silently revert to the PREVIOUS spec, the service
+  # would go healthy again, and the release saga's AwaitHealth step would see health
+  # and report success — a "successful" deploy still running the old code. A paused,
+  # visibly-failed update is the honest outcome, and the saga's own compensation is
+  # what should decide to roll back.
+  def build_update_config(spec) do
+    %{
+      "Order" => update_order(spec),
+      "Parallelism" => 1,
+      "FailureAction" => "pause"
+    }
+  end
+
+  defp update_order(spec) do
+    cond do
+      Map.get(spec, :service_mode, false) -> "stop-first"
+      is_map(Map.get(spec, :health_check)) -> "start-first"
+      true -> "stop-first"
+    end
   end
 
   defp maybe_add_mounts(payload, spec) do
