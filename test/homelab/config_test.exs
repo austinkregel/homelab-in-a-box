@@ -69,9 +69,13 @@ defmodule Homelab.ConfigTest do
       :ok
     end
 
-    defp stub_swarm(state) do
+    # `control_available?` is what separates a MANAGER from a worker. A worker reports
+    # LocalNodeState "active" too, but has no control plane, so inferring DockerSwarm
+    # there would fail every deploy with "This node is not a swarm manager".
+    defp stub_swarm(state, control_available? \\ true) do
       Mox.stub(Homelab.Mocks.DockerClient, :get, fn "/info", _opts ->
-        {:ok, %{"Swarm" => %{"LocalNodeState" => state}}}
+        {:ok,
+         %{"Swarm" => %{"LocalNodeState" => state, "ControlAvailable" => control_available?}}}
       end)
     end
 
@@ -93,6 +97,15 @@ defmodule Homelab.ConfigTest do
 
     test "with nothing recorded, infers Docker Engine from a non-swarm daemon" do
       stub_swarm("inactive")
+      assert Config.orchestrator() == Homelab.Orchestrators.DockerEngine
+    end
+
+    # A WORKER is an active swarm member but has no control plane. Inferring from
+    # membership alone would pick DockerSwarm and then every /services/create would come
+    # back "This node is not a swarm manager" -- the whole app broken, on a node that
+    # can perfectly well run plain containers.
+    test "a swarm WORKER falls back to Docker Engine, not Swarm it cannot drive" do
+      stub_swarm("active", false)
       assert Config.orchestrator() == Homelab.Orchestrators.DockerEngine
     end
 
