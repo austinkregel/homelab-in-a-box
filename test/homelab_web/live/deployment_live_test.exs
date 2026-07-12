@@ -1382,9 +1382,15 @@ defmodule HomelabWeb.DeploymentLiveTest do
   describe "settings reconfiguration" do
     test "saving proxy settings persists domain + auth and never publishes host ports",
          %{conn: conn, deployment: dep} do
-      # The recreate path: undeploy the old container, deploy a fresh one.
+      # Config changes CONVERGE the live workload -- deploy/1 pulls the image, then rolls
+      # the new spec onto the existing service. Tearing it down first took the app offline
+      # for the entire image pull, on every save.
+      #
+      # `expect(:undeploy, 0, ...)` is the real assertion here: the setup block stubs
+      # undeploy, so without this a regression that tears the service down again would
+      # pass silently.
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "container_123" -> :ok end)
+      |> expect(:undeploy, 0, fn _id -> :ok end)
       |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
@@ -1426,7 +1432,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
     test "switching to Host ports persists the container->host binding and recreates",
          %{conn: conn, deployment: dep} do
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "container_123" -> :ok end)
       |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
@@ -1458,7 +1463,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
     test "saving resilience limits + health path persists per-deployment overrides",
          %{conn: conn, deployment: dep} do
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "container_123" -> :ok end)
       |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
@@ -1494,7 +1498,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
         )
 
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "container_123" -> :ok end)
       |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")

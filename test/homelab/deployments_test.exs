@@ -540,15 +540,38 @@ defmodule Homelab.DeploymentsTest do
   end
 
   describe "recreate_deployment/1" do
-    test "undeploys the old container and deploys a fresh one from the current config" do
+    # It used to undeploy first and only THEN deploy -- and deploy/1 pulls the image
+    # before it creates. So the workload was removed and the app stayed down for the
+    # whole image download, on every config save. deploy/1 already converges (Swarm
+    # rolls the spec onto the live service; DockerEngine replaces the container), so
+    # the teardown bought nothing and cost minutes.
+    #
+    # Mox is strict: undeploy is not stubbed, so if the code calls it this test fails.
+    test "converges the live workload instead of tearing it down first" do
       deployment = insert(:deployment, status: :running, external_id: "old-123")
 
       Homelab.Mocks.Orchestrator
-      |> expect(:undeploy, fn "old-123" -> :ok end)
       |> expect(:deploy, fn _spec -> {:ok, "new-456"} end)
 
       assert {:ok, recreated} = Deployments.recreate_deployment(deployment)
+
+      # DockerEngine hands back a new container id on converge; recording it is what
+      # keeps logs/stop/reconcile from chasing a container that no longer exists.
       assert recreated.external_id == "new-456"
+
+      # It never stopped, so it is still running -- not :deploying, which would start
+      # the reconciler's deploy-timeout clock on a healthy app.
+      assert recreated.status == :running
+    end
+
+    test "a stopped deployment still deploys (nothing to converge onto)" do
+      deployment = insert(:deployment, status: :stopped, external_id: nil)
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "fresh-1"} end)
+
+      assert {:ok, recreated} = Deployments.recreate_deployment(deployment)
+      assert recreated.external_id == "fresh-1"
       assert recreated.status == :deploying
     end
   end

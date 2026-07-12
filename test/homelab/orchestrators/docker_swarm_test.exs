@@ -72,6 +72,46 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     end
   end
 
+  describe "build_update_config/1 (how a converge swaps tasks)" do
+    # Docker's default is stop-first: kill the old task, then start the new one. With
+    # the image already pulled that gap is short, but it is not zero -- and for a
+    # healthchecked web app behind Traefik it does not need to exist at all.
+    test "a healthchecked app starts the new task before retiring the old" do
+      spec = build_spec() |> Map.put(:health_check, %{"Test" => ["CMD-SHELL", "true"]})
+
+      assert %{"Order" => "start-first", "Parallelism" => 1} =
+               DockerSwarm.build_update_config(spec)
+    end
+
+    # start-first WITHOUT a healthcheck is worse than the default: Swarm calls a task
+    # up as soon as its process starts, so it would retire the old container while the
+    # new one is still booting and Traefik would route to something that cannot serve.
+    # A short honest gap beats a burst of 502s.
+    test "an app with no healthcheck stops first rather than lying about readiness" do
+      spec = build_spec() |> Map.put(:health_check, nil)
+
+      assert %{"Order" => "stop-first"} = DockerSwarm.build_update_config(spec)
+    end
+
+    # Two MariaDB tasks briefly sharing one volume is corruption, not a rolling
+    # update. A datastore never overlaps, healthcheck or not.
+    test "a datastore never overlaps, even with a healthcheck" do
+      spec =
+        build_spec()
+        |> Map.put(:service_mode, true)
+        |> Map.put(:health_check, %{"Test" => ["CMD-SHELL", "true"]})
+
+      assert %{"Order" => "stop-first"} = DockerSwarm.build_update_config(spec)
+    end
+
+    # `rollback` would silently revert to the previous spec, the service would go
+    # healthy again, and the release saga's AwaitHealth would report a "successful"
+    # deploy that is still running the old code. A visibly-paused update is honest.
+    test "a failed update pauses rather than silently reverting" do
+      assert %{"FailureAction" => "pause"} = DockerSwarm.build_update_config(build_spec())
+    end
+  end
+
   describe "undeploy/1" do
     @tag :integration
     test "removes a service by ID" do
