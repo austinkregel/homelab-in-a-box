@@ -78,6 +78,9 @@ defmodule HomelabWeb.SettingsLive do
         token = registry_params["ghcr_token"] || ""
         if token != "", do: Settings.set("ghcr_token", token, encrypt: true)
 
+        username = registry_params["ghcr_username"] || ""
+        if username != "", do: Settings.set("ghcr_username", username)
+
       "ecr" ->
         key = registry_params["ecr_access_key"] || ""
         secret = registry_params["ecr_secret_key"] || ""
@@ -461,7 +464,9 @@ defmodule HomelabWeb.SettingsLive do
   end
 
   defp load_section_data(socket, "registries") do
-    assign(socket, :ghcr_token_set?, Settings.get("ghcr_token") != nil)
+    socket
+    |> assign(:ghcr_token_set?, Settings.get("ghcr_token") != nil)
+    |> assign(:ghcr_username, Settings.get("ghcr_username") || "")
     |> assign(:ecr_configured?, Settings.get("ecr_access_key") != nil)
     |> assign(:docker_hub_token_set?, Settings.get("docker_hub_token") != nil)
   end
@@ -1304,6 +1309,18 @@ defmodule HomelabWeb.SettingsLive do
             class="space-y-4"
           >
             <input type="hidden" name="registry[registry]" value="ghcr" />
+            <div>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+                GitHub username
+              </label>
+              <input
+                type="text"
+                name="registry[ghcr_username]"
+                value={@ghcr_username}
+                placeholder="austinkregel"
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
             <div>
               <label class="block text-sm font-medium text-base-content/70 mb-1.5">GitHub PAT</label>
               <input
