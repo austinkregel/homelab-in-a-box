@@ -369,6 +369,49 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       vol_count_after = count_occurrences(html_after, "remove_volume")
       assert vol_count_after == vol_count_before - 1
     end
+
+    # The wizard writes its parsed volumes back to the SHARED app_template. It used to
+    # rebuild each one from container_path alone, so a single visit erased the host path
+    # of every folder mount on that template — for every deployment of it — and SpecBuilder
+    # then minted a fresh, EMPTY named volume in its place.
+    test "a folder mount survives a trip through the wizard", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      {:ok, updated} =
+        Homelab.Catalog.update_app_template(template, %{
+          volumes: [
+            %{
+              "container_path" => "/var/www/html/storage",
+              "type" => "bind",
+              "source" => "/srv/homelab/app/storage"
+            }
+          ]
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{updated.id}")
+
+      render_submit(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "app.example.com",
+        "exposure_mode" => "public",
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/var/www/html/storage",
+            "type" => "bind",
+            "source" => "/srv/homelab/app/storage"
+          }
+        },
+        "ports" => %{},
+        "env" => %{}
+      })
+
+      {:ok, reloaded} = Homelab.Catalog.get_app_template_by_slug(updated.slug)
+      assert [vol] = reloaded.volumes
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/homelab/app/storage"
+    end
   end
 
   defp clear_enrichment(view) do

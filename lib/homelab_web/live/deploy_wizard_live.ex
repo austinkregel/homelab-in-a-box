@@ -3,6 +3,7 @@ defmodule HomelabWeb.DeployWizardLive do
 
   alias Homelab.Catalog
   alias Homelab.Deployments.Access
+  alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.CatalogEntry
   alias Homelab.Catalog.MetadataEnricher
   alias Homelab.Catalog.Enrichers.ComposeParser
@@ -37,6 +38,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:custom_image, "")
       |> assign(:custom_name, "")
       |> assign(:compose_yaml, "")
+      |> assign(:compose_project_dir, "")
       |> assign(:compose_services, [])
       |> assign(:compose_error, nil)
       |> assign(:ports, [])
@@ -309,10 +311,15 @@ defmodule HomelabWeb.DeployWizardLive do
 
   # --- Events: Compose ---
 
-  def handle_event("parse_compose", %{"compose_yaml" => yaml}, socket) do
-    socket = assign(socket, :compose_yaml, yaml)
+  def handle_event("parse_compose", %{"compose_yaml" => yaml} = params, socket) do
+    project_dir = String.trim(params["project_dir"] || "")
 
-    case ComposeParser.parse_all(yaml) do
+    socket =
+      socket
+      |> assign(:compose_yaml, yaml)
+      |> assign(:compose_project_dir, project_dir)
+
+    case ComposeParser.parse_all(yaml, project_dir: project_dir) do
       {:ok, services} when services != [] ->
         env_vars =
           services
@@ -863,13 +870,9 @@ defmodule HomelabWeb.DeployWizardLive do
             source: "compose",
             source_id: image,
             ports: svc[:ports] || [],
-            volumes:
-              Enum.map(svc[:volumes] || [], fn v ->
-                %{
-                  "container_path" => v["container_path"] || v["path"] || "/data",
-                  "description" => v["description"]
-                }
-              end),
+            # Through VolumeSpec, so a companion's folder mounts keep their host paths.
+            # A database companion is exactly where dropping them hurts most.
+            volumes: VolumeSpec.parse(svc[:volumes] || []),
             default_env:
               svc[:env]
               |> Enum.filter(fn %{"value" => v} -> v != "" end)
@@ -1151,6 +1154,7 @@ defmodule HomelabWeb.DeployWizardLive do
               search_results={@search_results}
               search_loading={@search_loading}
               compose_yaml={@compose_yaml}
+              compose_project_dir={@compose_project_dir}
               compose_error={@compose_error}
               compose_services={@compose_services}
               custom_image={@custom_image}
@@ -1354,12 +1358,14 @@ defmodule HomelabWeb.DeployWizardLive do
         <% @deploy_type == "compose" -> %>
           <.compose_input
             compose_yaml={@compose_yaml}
+            compose_project_dir={@compose_project_dir}
             compose_error={@compose_error}
             compose_services={@compose_services}
           />
         <% @deploy_type == "stack" -> %>
           <.compose_input
             compose_yaml={@compose_yaml}
+            compose_project_dir={@compose_project_dir}
             compose_error={@compose_error}
             compose_services={@compose_services}
           />
@@ -1524,6 +1530,26 @@ defmodule HomelabWeb.DeployWizardLive do
           placeholder="version: '3'\nservices:\n  web:\n    image: nginx:latest\n    ports:\n      - '80:80'"
           class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-3 px-4 placeholder:text-base-content/20 focus:ring-2 focus:ring-primary/50 resize-y"
         >{@compose_yaml}</textarea>
+
+        <div class="mt-3">
+          <label class="block text-xs font-medium text-base-content/60 mb-1">
+            Project directory on the host <span class="text-base-content/30">(optional)</span>
+          </label>
+          <input
+            type="text"
+            name="project_dir"
+            value={@compose_project_dir}
+            placeholder="/home/you/homelab"
+            class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 placeholder:text-base-content/20 focus:ring-2 focus:ring-primary/50"
+          />
+          <p class="mt-1 text-[11px] text-base-content/40 leading-snug">
+            The directory this compose file lives in. Compose resolves relative folder
+            mounts (<code class="font-mono">./data</code>) against it, and prefixes named
+            volumes with its basename — so without it we cannot tell which host directory
+            or which volume your data is actually in, and you will be asked for each path
+            by hand.
+          </p>
+        </div>
 
         <div :if={@compose_error} class="mt-3 rounded-lg bg-error/10 border border-error/20 p-3">
           <p class="text-sm text-error flex items-center gap-2">
@@ -1801,18 +1827,52 @@ defmodule HomelabWeb.DeployWizardLive do
                       <.icon name="hero-x-mark-mini" class="size-3.5" />
                     </button>
                   </div>
-                  <div>
-                    <label class="block text-[10px] text-base-content/30 mb-0.5">
-                      Container path
-                    </label>
-                    <input
-                      type="text"
-                      name={"volumes[#{idx}][container_path]"}
-                      value={vol["path"] || vol["container_path"] || ""}
-                      placeholder="/data"
-                      class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
-                    />
+                  <div class="flex gap-2">
+                    <div class="w-28 shrink-0">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">
+                        Storage
+                      </label>
+                      <select
+                        name={"volumes[#{idx}][type]"}
+                        class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
+                        <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
+                      </select>
+                    </div>
+                    <div :if={vol["type"] == "bind"} class="flex-1">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">
+                        Host folder
+                      </label>
+                      <input
+                        type="text"
+                        name={"volumes[#{idx}][source]"}
+                        value={vol["source"] || ""}
+                        placeholder="/home/you/.homelab/app/data"
+                        class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      />
+                    </div>
+                    <div class="flex-1">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">
+                        Container path
+                      </label>
+                      <input
+                        type="text"
+                        name={"volumes[#{idx}][container_path]"}
+                        value={vol["path"] || vol["container_path"] || ""}
+                        placeholder="/data"
+                        class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      />
+                    </div>
                   </div>
+                  <p
+                    :if={vol["type"] == "bind"}
+                    class="mt-1 text-[10px] text-base-content/40 leading-snug"
+                  >
+                    Mounts a directory that already exists on the host — the data stays where
+                    it is. Must be an absolute path: Docker reads a bare name as a named
+                    volume and would mount an empty one instead.
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -2929,12 +2989,14 @@ defmodule HomelabWeb.DeployWizardLive do
     end)
   end
 
+  # `type` and `source` ride along, or switching a row to Folder and typing its host path
+  # would be discarded the moment the operator added or removed another row.
   defp sync_volumes(params, existing) do
     merge_indexed(existing, params, fn row, p ->
-      case p["container_path"] do
-        nil -> row
-        path -> Map.put(row, "container_path", path)
-      end
+      row
+      |> put_present(p, "container_path")
+      |> put_present(p, "type")
+      |> put_present(p, "source")
     end)
   end
 
@@ -3107,17 +3169,9 @@ defmodule HomelabWeb.DeployWizardLive do
 
   defp parse_port_params(ports), do: Homelab.Deployments.ConfigForm.parse_ports(ports)
 
-  defp parse_volume_params(nil), do: []
-
-  defp parse_volume_params(volumes_map) when is_map(volumes_map) do
-    volumes_map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, vol} ->
-      %{
-        "container_path" => vol["container_path"],
-        "description" => vol["description"] || "",
-        "optional" => vol["optional"] == "true"
-      }
-    end)
-  end
+  # Through VolumeSpec, so `type`/`source` survive. This used to rebuild each volume from
+  # container_path alone and write the result back to the SHARED template (see
+  # deploy/deploy_compose) -- which erased the host path of every folder mount
+  # on that template, for every deployment of it, on one visit to the wizard.
+  defp parse_volume_params(volumes), do: VolumeSpec.parse(volumes)
 end
