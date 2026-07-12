@@ -166,8 +166,10 @@ defmodule Homelab.Bootstrap do
         :ok
 
       _ ->
+        # Manager-ness, not swarm membership — a worker can join a swarm but cannot
+        # drive it, and recording DockerSwarm there would brick every deploy.
         module =
-          if Homelab.Docker.Network.swarm_active?(),
+          if Homelab.Docker.Network.swarm_manager?(),
             do: Homelab.Orchestrators.DockerSwarm,
             else: Homelab.Orchestrators.DockerEngine
 
