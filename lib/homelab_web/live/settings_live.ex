@@ -254,8 +254,17 @@ defmodule HomelabWeb.SettingsLive do
   end
 
   def handle_event("preview_plan", _params, socket) do
-    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
-    {:noreply, assign(socket, :import_plan, plan)}
+    {:noreply, assign(socket, :import_plan, build_import_plan(socket))}
+  end
+
+  # Copy the data into a plane-owned home, or mount the original folder as-is. Changing it
+  # invalidates any previewed plan — the two produce different steps AND different volumes.
+  def handle_event("select_import_strategy", %{"strategy" => strategy}, socket)
+      when strategy in ["migrate", "in_place"] do
+    {:noreply,
+     socket
+     |> assign(:import_strategy, String.to_existing_atom(strategy))
+     |> assign(:import_plan, nil)}
   end
 
   def handle_event("select_import_tenant", %{"tenant_id" => id}, socket) do
@@ -265,7 +274,7 @@ defmodule HomelabWeb.SettingsLive do
   def handle_event("apply_import", _params, socket) do
     tenant_id = socket.assigns.import_tenant_id
     # Rebuild the plan from the current selection so a stale assign can't be applied.
-    plan = Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket))
+    plan = build_import_plan(socket)
 
     cond do
       is_nil(tenant_id) ->
@@ -618,6 +627,7 @@ defmodule HomelabWeb.SettingsLive do
     |> assign_new(:import_plan, fn -> nil end)
     |> assign_new(:import_error, fn -> nil end)
     |> assign_new(:import_result, fn -> nil end)
+    |> assign_new(:import_strategy, fn -> :migrate end)
     |> assign_new(:import_tenant_id, fn ->
       case socket.assigns.tenants do
         [%{id: id} | _] -> id
@@ -2142,11 +2152,75 @@ defmodule HomelabWeb.SettingsLive do
           </label>
         </div>
 
+        <div class="mt-4 space-y-2">
+          <p class="text-xs font-semibold text-base-content/70">Where should the data live?</p>
+
+          <label class={[
+            "flex gap-3 rounded-lg border p-3 cursor-pointer transition-colors",
+            if(@import_strategy == :migrate,
+              do: "border-primary bg-primary/5",
+              else: "border-base-content/[0.06] hover:bg-base-content/[0.02]"
+            )
+          ]}>
+            <input
+              type="radio"
+              name="import_strategy"
+              value="migrate"
+              checked={@import_strategy == :migrate}
+              phx-click="select_import_strategy"
+              phx-value-strategy="migrate"
+              class="mt-0.5"
+            />
+            <div>
+              <p class="text-sm font-medium text-base-content">Copy into a managed home</p>
+              <p class="text-[11px] text-base-content/50 leading-snug">
+                Copies each folder into storage this system owns, then cuts over onto the
+                copy. Your original folders are never written to, so a failed import rolls
+                back to bytes that were never touched. Needs enough free disk for a second
+                copy, and takes as long as the copy takes.
+              </p>
+            </div>
+          </label>
+
+          <label class={[
+            "flex gap-3 rounded-lg border p-3 cursor-pointer transition-colors",
+            if(@import_strategy == :in_place,
+              do: "border-primary bg-primary/5",
+              else: "border-base-content/[0.06] hover:bg-base-content/[0.02]"
+            )
+          ]}>
+            <input
+              type="radio"
+              name="import_strategy"
+              value="in_place"
+              checked={@import_strategy == :in_place}
+              phx-click="select_import_strategy"
+              phx-value-strategy="in_place"
+              class="mt-0.5"
+            />
+            <div>
+              <p class="text-sm font-medium text-base-content">
+                Keep the folders where they are
+              </p>
+              <p class="text-[11px] text-base-content/50 leading-snug">
+                Mounts your existing folders straight into the managed container. Nothing is
+                copied, so it is near-instant and needs no extra disk — and the folders stay
+                exactly where your compose files put them.
+                <strong class="text-base-content/70">
+                  There is no second copy to fall back on:
+                </strong>
+                the new container writes to the same directories, so a verified backup is
+                the only thing standing between a bad import and your data.
+              </p>
+            </div>
+          </label>
+        </div>
+
         <button
           type="button"
           phx-click="preview_plan"
           disabled={MapSet.size(@import_selected) == 0}
-          class="px-4 py-2 rounded-lg bg-base-200 text-base-content text-sm font-medium hover:bg-base-300 transition-colors cursor-pointer disabled:opacity-50"
+          class="mt-3 px-4 py-2 rounded-lg bg-base-200 text-base-content text-sm font-medium hover:bg-base-300 transition-colors cursor-pointer disabled:opacity-50"
         >
           Preview migration plan
         </button>
@@ -2225,6 +2299,12 @@ defmodule HomelabWeb.SettingsLive do
   defp selected_import_services(socket) do
     (socket.assigns.import_services || [])
     |> Enum.filter(&MapSet.member?(socket.assigns.import_selected, &1.name))
+  end
+
+  defp build_import_plan(socket) do
+    Homelab.Deployments.AdoptionPlanner.build_plan(selected_import_services(socket),
+      strategy: socket.assigns.import_strategy
+    )
   end
 
   # A short human summary of a plan step's resource_handle for the preview.

@@ -654,6 +654,87 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
   end
 
+  describe "volumes tab editing" do
+    test "saves a folder mount with its host path", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      render_submit(view, "save_volumes", %{
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/var/www/html/storage",
+            "type" => "bind",
+            "source" => "/srv/homelab/authair/storage"
+          }
+        }
+      })
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/homelab/authair/storage"
+    end
+
+    test "rejects a folder mount whose host path is a bare name", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      render_submit(view, "save_volumes", %{
+        "volumes" => %{
+          "0" => %{"container_path" => "/data", "type" => "bind", "source" => "storage"}
+        }
+      })
+
+      # Docker would read "storage" as a named volume and mount an empty one.
+      assert Homelab.Deployments.get_deployment!(dep.id).volumes_override == nil
+    end
+
+    # An adopted service's volumes carry the NAME of the volume the data was moved into.
+    # Dropping that name on save makes SpecBuilder derive a synthetic one instead —
+    # mounting an empty volume and orphaning every byte the adoption just migrated.
+    test "keeps a managed volume's source name instead of re-deriving it", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      template =
+        insert(:app_template,
+          volumes: [
+            %{
+              "container_path" => "/var/lib/postgresql/data",
+              "source" => "homelab-managed-pg-var-lib-postgresql-data",
+              "type" => "volume"
+            }
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_3"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      render_submit(view, "save_volumes", %{
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/var/lib/postgresql/data",
+            "type" => "volume",
+            "source" => "homelab-managed-pg-var-lib-postgresql-data"
+          }
+        }
+      })
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == "homelab-managed-pg-var-lib-postgresql-data"
+    end
+  end
+
   describe "backups tab with existing jobs" do
     test "shows backup jobs in table", %{conn: conn, deployment: dep} do
       insert(:backup_job, deployment: dep, status: :completed)

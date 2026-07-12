@@ -4,6 +4,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Deployments
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.Readiness
+  alias Homelab.Deployments.VolumeSpec
   alias Homelab.Backups
   alias Homelab.Services.BackupScheduler
 
@@ -421,24 +422,11 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("save_volumes", params, socket) do
     deployment = socket.assigns.deployment
 
-    volumes =
-      params["volumes"]
-      |> volume_rows_from_params()
-      |> Enum.reject(fn vol -> String.trim(vol["container_path"] || "") == "" end)
-      |> Enum.map(fn vol ->
-        base = %{
-          "container_path" => String.trim(vol["container_path"]),
-          "type" => vol["type"],
-          "description" => vol["description"] || ""
-        }
-
-        # Only a bind carries a source. A named volume's source is DERIVED from its mount
-        # path (SpecBuilder.volume_name/3), so persisting a stale one here would pin the
-        # volume to a path it no longer mounts at.
-        if vol["type"] == "bind",
-          do: Map.put(base, "source", String.trim(vol["source"] || "")),
-          else: base
-      end)
+    # `source` is preserved for a MANAGED volume too, not just a bind: adoption names the
+    # volume it moved the data into (PermanentHome), and dropping that name here would
+    # make SpecBuilder derive a synthetic one -- mounting an empty volume and orphaning
+    # the adopted data. A blank source is the only one that gets derived.
+    volumes = VolumeSpec.parse(params["volumes"])
 
     case apply_config(deployment, %{volumes_override: volumes}) do
       {:ok, updated} ->
@@ -1915,40 +1903,13 @@ defmodule HomelabWeb.DeploymentLive do
 
   # Volume rows, as the Volumes tab holds them. `target` is the shape a spec-built
   # volume carries; `container_path` the shape the template and the override carry.
-  # A volume is either a managed NAMED volume (Docker owns the data) or a BIND of a host
-  # folder (the data stays where it already is). The existing homelab stack is entirely
-  # folder mounts, so a volumes editor that could only make named volumes could not
-  # express it.
-  defp volume_rows(volumes) do
-    volumes
-    |> List.wrap()
-    |> Enum.map(fn vol ->
-      source = vol["source"] || ""
+  # Both go through VolumeSpec. This used to carry its own inference ("a volume with a
+  # source is a bind unless it says otherwise") which contradicted SpecBuilder's ("a
+  # volume with a source is a VOLUME unless it says otherwise") -- so an adopted named
+  # volume displayed as a folder mount, and the two disagreed about what was mounted.
+  defp volume_rows(volumes), do: VolumeSpec.parse_rows(List.wrap(volumes))
 
-      %{
-        "container_path" => vol["container_path"] || vol["target"] || "",
-        # An existing volume carrying a source is a bind unless it says otherwise.
-        "type" => vol["type"] || if(source != "", do: "bind", else: "volume"),
-        "source" => source,
-        "description" => vol["description"] || ""
-      }
-    end)
-  end
-
-  defp volume_rows_from_params(nil), do: []
-
-  defp volume_rows_from_params(params) when is_map(params) do
-    params
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} ->
-      %{
-        "container_path" => row["container_path"] || "",
-        "type" => row["type"] || "volume",
-        "source" => row["source"] || "",
-        "description" => row["description"] || ""
-      }
-    end)
-  end
+  defp volume_rows_from_params(params), do: VolumeSpec.parse_rows(params)
 
   # Extra path routes, as the form holds them (strings) and as the DB holds them (a
   # path plus an integer port).
