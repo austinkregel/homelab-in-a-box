@@ -347,8 +347,10 @@ defmodule Homelab.Infrastructure do
   # and it costs nothing while no services exist. `providers.docker` stays enabled
   # alongside it — an adopted stack's containers are still plain containers and
   # route by container label.
+  # Manager-ness: Traefik's swarm provider polls the Swarm control plane for services,
+  # which a worker node cannot answer.
   defp swarm_provider_cmd do
-    if Homelab.Docker.Network.swarm_active?() do
+    if Homelab.Docker.Network.swarm_manager?() do
       ["--providers.swarm=true", "--providers.swarm.exposedbydefault=false"]
     else
       []
