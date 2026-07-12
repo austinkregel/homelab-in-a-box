@@ -32,10 +32,26 @@ defmodule Homelab.Docker.RegistryAuthTest do
           serveraddress: "registry.example.com"
         })
 
-      decoded = encoded |> Base.url_decode64!(padding: false) |> Jason.decode!()
+      decoded = encoded |> Base.url_decode64!() |> Jason.decode!()
       assert decoded["username"] == "bob"
       assert decoded["password"] == "s3cret"
       assert decoded["serveraddress"] == "registry.example.com"
+    end
+
+    test "the base64 is PADDED, as the daemon's decoder requires" do
+      {"X-Registry-Auth", encoded} =
+        RegistryAuth.header(%{
+          username: "bob",
+          password: "s3cret",
+          serveraddress: "registry.example.com"
+        })
+
+      # The daemon decodes with Go's base64.URLEncoding (padded). An unpadded value
+      # does not error — it fails to decode and the daemon silently falls back to an
+      # ANONYMOUS pull, so a private image 401s however good the credentials were.
+      # Decoding with padding: true (strict) must therefore succeed.
+      assert {:ok, _} = Base.url_decode64(encoded)
+      assert rem(String.length(encoded), 4) == 0
     end
   end
 
@@ -75,7 +91,7 @@ defmodule Homelab.Docker.RegistryAuthTest do
     end
 
     defp decode({"X-Registry-Auth", encoded}) do
-      encoded |> Base.url_decode64!(padding: false) |> Jason.decode!()
+      encoded |> Base.url_decode64!() |> Jason.decode!()
     end
 
     test "authenticates a private GHCR image with the configured token" do
