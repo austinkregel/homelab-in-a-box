@@ -351,8 +351,32 @@ defmodule Homelab.Deployments.SpecBuilder do
       "traefik.http.services.#{router}.loadbalancer.server.port" => to_string(port)
     }
 
-    Map.merge(base, exposure_middleware_labels(router, exposure))
+    base
+    |> Map.merge(exposure_middleware_labels(router, exposure))
+    |> Map.merge(sticky_labels(router, deployment))
   end
+
+  # Websockets need no Traefik label — the HTTP upgrade is proxied transparently.
+  # What DOES break them is load balancing: with more than one replica Traefik
+  # round-robins, so a websocket (or LiveView) reconnect can land on a different
+  # container than the one holding the session. A sticky cookie pins a client to the
+  # replica it first reached.
+  defp sticky_labels(router, deployment) do
+    if sticky?(deployment) do
+      %{
+        "traefik.http.services.#{router}.loadbalancer.sticky.cookie" => "true",
+        "traefik.http.services.#{router}.loadbalancer.sticky.cookie.name" => "homelab_#{router}",
+        # The session cookie rides the same HTTPS the router already enforces.
+        "traefik.http.services.#{router}.loadbalancer.sticky.cookie.secure" => "true",
+        "traefik.http.services.#{router}.loadbalancer.sticky.cookie.httponly" => "true"
+      }
+    else
+      %{}
+    end
+  end
+
+  defp sticky?(%{proxy_options: %{"sticky" => true}}), do: true
+  defp sticky?(_deployment), do: false
 
   # Keyed off the ORCHESTRATOR, not the daemon: Traefik runs both providers on a
   # swarm-enabled daemon, and what decides which one discovers this workload is
