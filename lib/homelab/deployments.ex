@@ -127,6 +127,25 @@ defmodule Homelab.Deployments do
   def ensure_external_id(_deployment, _external_id), do: {0, nil}
 
   @doc """
+  Records the id `deploy/1` just returned, overwriting any existing one.
+
+  Distinct from `ensure_external_id/2`, which refuses to clobber. Converging a
+  RUNNING deployment no-ops the status transition, and on DockerEngine a converge
+  stops, removes and recreates the container — so it hands back a NEW id. Declining
+  to write it there would leave `external_id` pointing at a container that no longer
+  exists, and every later lookup (logs, stop, reconcile) would chase the corpse.
+
+  The id from `deploy/1` is authoritative: it is the workload we just created.
+  """
+  def record_external_id(%Deployment{id: id}, external_id) when is_binary(external_id) do
+    Deployment
+    |> where([d], d.id == ^id)
+    |> Repo.update_all(set: [external_id: external_id, updated_at: naive_now()])
+  end
+
+  def record_external_id(_deployment, _external_id), do: {0, nil}
+
+  @doc """
   True when a deployment *should* carry a public Traefik route: it's in a reverse-
   proxy access mode AND has a domain. `:host`/`:service` deployments are never
   proxied (a host deployment with a stray domain is not routed). Requires
@@ -244,8 +263,14 @@ defmodule Homelab.Deployments do
                    [:pending, :deploying, :stopped, :failed],
                    external_id: external_id
                  ) do
-              {:ok, _} -> :ok
-              {:noop, _} -> ensure_external_id(deployment, external_id)
+              {:ok, _} ->
+                :ok
+
+              # Already :running — this was a converge, not a cold start. The workload
+              # never stopped, so the status is right as it is; only the id may have
+              # moved (DockerEngine recreates the container on converge).
+              {:noop, _} ->
+                record_external_id(deployment, external_id)
             end
 
             {:ok, get_deployment!(deployment.id)}
@@ -301,17 +326,24 @@ defmodule Homelab.Deployments do
     do: Homelab.Config.orchestrator().undeploy(external_id)
 
   @doc """
-  Recreates a deployment's container so config changes (domain, ports, exposure,
-  env) take effect. Docker bakes those into the container at create time, so
-  there is no in-place update — we undeploy the old container and deploy a fresh
-  one from the (now-updated) row via `SpecBuilder.build/1`. Pass the deployment
-  AFTER persisting any config changes. Safe when stopped/failed (no old container
-  to remove).
+  Applies a deployment's current config (domain, ports, exposure, env) to its
+  running workload. Pass the deployment AFTER persisting any config changes; the
+  new spec is rebuilt from the row by `SpecBuilder.build/1`.
+
+  This CONVERGES rather than undeploying first, and the difference is downtime.
+
+  `deploy/1` on both orchestrators pulls the image FIRST and then creates-or-
+  converges: Swarm rolls the new spec onto the existing service in place, and
+  DockerEngine replaces the container on a name conflict. Undeploying first threw
+  that away — the service was removed, and only THEN did the pull start, so the app
+  stayed down for the entire image download rather than for a container restart.
+  On a fat image that is minutes instead of seconds, and it happened on every
+  config save (editing one env var blacked the app out for a download).
+
+  Safe when stopped/failed: there is simply no existing workload to converge onto.
   """
   def recreate_deployment(%Deployment{} = deployment) do
-    with {:ok, stopped} <- stop_deployment(deployment) do
-      start_deployment(stopped)
-    end
+    start_deployment(deployment)
   end
 
   def change_deployment(%Deployment{} = deployment, attrs \\ %{}) do
