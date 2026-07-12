@@ -31,12 +31,14 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_memory_mb, "")
       |> assign(:settings_cpu_shares, "")
       |> assign(:settings_health_path, "")
+      |> assign(:settings_sticky, false)
       |> assign(:resource_stats, nil)
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
       |> assign(:siblings, [])
       |> assign(:releases, [])
       |> assign(:driving_release, nil)
+      |> assign(:tls, :idle)
 
     {:ok, socket}
   end
@@ -56,6 +58,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:siblings, siblings)
       |> assign_releases()
       |> assign_readiness()
+      |> probe_tls()
 
     socket =
       if connected?(socket) do
@@ -103,6 +106,19 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   @impl true
+  def handle_info({ref, {:tls_probed, result}}, socket) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, assign(socket, :tls, result)}
+  end
+
+  # A crashed probe must not wedge the card on "checking…".
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
+    case socket.assigns.tls do
+      :loading -> {:noreply, assign(socket, :tls, {:error, :probe_crashed})}
+      _ -> {:noreply, socket}
+    end
+  end
+
   def handle_info({:metrics, _metrics}, socket) do
     {:noreply,
      socket
@@ -295,7 +311,8 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
      |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
      |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
-     |> assign(:settings_health_path, health["path"] || "")}
+     |> assign(:settings_health_path, health["path"] || "")
+     |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)}
   end
 
   def handle_event("cancel_settings_edit", _params, socket) do
@@ -310,6 +327,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
      |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
      |> assign(:settings_ports, ports_from_params(settings["ports"]))
+     |> assign(:settings_sticky, settings["sticky"] == "true")
      |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
      |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
      |> assign(
@@ -318,8 +336,19 @@ defmodule HomelabWeb.DeploymentLive do
      )}
   end
 
+  def handle_event("recheck_tls", _params, socket) do
+    {:noreply, probe_tls(socket)}
+  end
+
   def handle_event("settings_add_port", _params, socket) do
-    blank = %{"internal" => "", "external" => ""}
+    blank = %{
+      "internal" => "",
+      "external" => "",
+      "role" => "other",
+      "description" => "",
+      "optional" => false
+    }
+
     {:noreply, assign(socket, :settings_ports, socket.assigns.settings_ports ++ [blank])}
   end
 
@@ -337,19 +366,22 @@ defmodule HomelabWeb.DeploymentLive do
     # Domain only matters for proxy access; in Host mode every listed port binds.
     domain = if access == "proxy", do: blank_to_nil(settings["domain"]), else: nil
 
+    # Proxy mode used to hard-code `[]` here, which is NOT "inherit the template" —
+    # `Access.effective_ports/1` only inherits on nil, so an empty override won, and
+    # `primary_port([])` falls back to "80". Merely opening Settings and saving
+    # silently repointed the reverse proxy at port 80. Parse the form in every mode,
+    # publish to the host only in host mode, and treat "no ports" as inherit.
     ports =
-      if access == "host" do
-        settings["ports"]
-        |> Homelab.Deployments.ConfigForm.parse_ports()
-        |> Enum.map(&Map.put(&1, "published", true))
-      else
-        []
-      end
+      settings["ports"]
+      |> Homelab.Deployments.ConfigForm.parse_ports()
+      |> Enum.map(&Map.put(&1, "published", access == "host"))
+      |> mark_routed_port(settings["routed_port"])
 
     attrs = %{
       domain: domain,
       exposure_mode_override: exposure,
-      ports_override: ports,
+      ports_override: if(ports == [], do: nil, else: ports),
+      proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
       health_check_override: health_override(deployment, settings)
     }
@@ -558,6 +590,7 @@ defmodule HomelabWeb.DeploymentLive do
 
         <%!-- Overview tab --%>
         <div :if={@active_tab == "overview"} class="space-y-4">
+          <.tls_card tls={@tls} domain={@deployment.domain} />
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="flex items-center gap-5">
               <div class="w-14 h-14 rounded-lg bg-primary/10 flex items-center justify-center overflow-hidden">
@@ -1016,6 +1049,90 @@ defmodule HomelabWeb.DeploymentLive do
                       Add a domain to go live; until then the app isn't reachable externally.
                     </p>
                   </div>
+
+                  <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between">
+                      <label class="text-xs font-medium text-base-content/50">
+                        App port — where the proxy sends traffic
+                      </label>
+                      <button
+                        type="button"
+                        phx-click="settings_add_port"
+                        class="text-xs text-primary hover:text-primary/80"
+                      >
+                        + Add port
+                      </button>
+                    </div>
+                    <p :if={@settings_ports == []} class="text-[11px] text-warning">
+                      No port set — the proxy will fall back to port 80, which is almost
+                      certainly not what the app listens on.
+                    </p>
+                    <div
+                      :for={{port, idx} <- Enum.with_index(@settings_ports)}
+                      class="flex items-center gap-2"
+                    >
+                      <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="settings[routed_port]"
+                          value={idx}
+                          checked={routed_port_index(@settings_ports) == idx}
+                          class="radio radio-xs radio-primary"
+                        />
+                        <span class="text-[10px] text-base-content/40 w-10">route</span>
+                      </label>
+                      <input
+                        type="text"
+                        name={"settings[ports][#{idx}][internal]"}
+                        value={port["internal"]}
+                        placeholder="container port"
+                        class="w-28 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                      />
+                      <input
+                        type="hidden"
+                        name={"settings[ports][#{idx}][role]"}
+                        value={port["role"]}
+                      />
+                      <input
+                        type="text"
+                        name={"settings[ports][#{idx}][description]"}
+                        value={port["description"]}
+                        placeholder="what it's for (optional)"
+                        class="flex-1 rounded-lg bg-base-100 border-0 text-xs py-1.5 px-2 text-base-content/60"
+                      />
+                      <button
+                        type="button"
+                        phx-click="settings_remove_port"
+                        phx-value-index={idx}
+                        class="text-base-content/30 hover:text-error"
+                      >
+                        <.icon name="hero-x-mark" class="size-4" />
+                      </button>
+                    </div>
+                    <p class="text-[10px] text-base-content/40">
+                      The selected port is the one Traefik forwards to inside the container.
+                      Nothing is published to the host.
+                    </p>
+                  </div>
+
+                  <label class="flex items-start gap-2 cursor-pointer">
+                    <input type="hidden" name="settings[sticky]" value="false" />
+                    <input
+                      type="checkbox"
+                      name="settings[sticky]"
+                      value="true"
+                      checked={@settings_sticky}
+                      class="checkbox checkbox-xs checkbox-primary mt-0.5"
+                    />
+                    <span class="flex flex-col gap-0.5">
+                      <span class="text-xs font-medium text-base-content">Sticky sessions</span>
+                      <span class="text-[10px] text-base-content/40 leading-snug">
+                        Pins each client to one replica. Websockets and LiveView are proxied
+                        automatically, but with more than one replica a reconnect can land on a
+                        different container and drop the session.
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 <div :if={@settings_access == "host"} class="space-y-2 rounded-lg bg-base-200/40 p-3">
@@ -1388,11 +1505,18 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   # Normalizes stored ports into the container->host rows the Host editor renders.
+  # Carries the ROLE through the form. The settings form used to post only
+  # internal/external, so `ConfigForm` re-inferred the role from the port number on
+  # every save — and an app on a non-obvious port lost its explicit "web"
+  # designation, which is the one the reverse proxy routes to.
   defp editable_ports(ports) do
     Enum.map(ports, fn p ->
       %{
         "internal" => to_string(p["internal"] || p["container_port"] || ""),
-        "external" => to_string(p["external"] || p["host_port"] || "")
+        "external" => to_string(p["external"] || p["host_port"] || ""),
+        "role" => p["role"] || "other",
+        "description" => p["description"] || "",
+        "optional" => p["optional"] == true
       }
     end)
   end
@@ -1404,11 +1528,80 @@ defmodule HomelabWeb.DeploymentLive do
     ports
     |> Enum.sort_by(fn {i, _} -> String.to_integer(i) end)
     |> Enum.map(fn {_, p} ->
-      %{"internal" => p["internal"] || "", "external" => p["external"] || ""}
+      %{
+        "internal" => p["internal"] || "",
+        "external" => p["external"] || "",
+        "role" => p["role"] || "other",
+        "description" => p["description"] || "",
+        "optional" => p["optional"] == "true"
+      }
     end)
   end
 
   defp ports_from_params(_), do: []
+
+  # Off-process: the probe is a TLS handshake against a possibly-unreachable host, and
+  # the page must not freeze for its timeout. async_nolink so a failed probe cannot take
+  # the LiveView down with it.
+  defp probe_tls(%{assigns: %{deployment: %{domain: domain}}} = socket)
+       when is_binary(domain) and domain != "" do
+    if connected?(socket) do
+      probe = tls_probe_impl()
+
+      Task.Supervisor.async_nolink(Homelab.TlsProbeSupervisor, fn ->
+        {:tls_probed, probe.inspect_domain(domain)}
+      end)
+
+      assign(socket, :tls, :loading)
+    else
+      assign(socket, :tls, :idle)
+    end
+  end
+
+  # No domain means nothing is served over TLS — there is no certificate to report.
+  defp probe_tls(socket), do: assign(socket, :tls, :no_domain)
+
+  # Swappable so tests don't reach out to the real internet on every page mount.
+  defp tls_probe_impl,
+    do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
+
+  # Which row the "route here" radio sits on. Mirrors SpecBuilder.primary_port/1 so the
+  # form shows the port Traefik would ACTUALLY use, not a different guess: the explicit
+  # web role, else the first non-optional port, else the first.
+  defp routed_port_index(ports) do
+    Enum.find_index(ports, &(&1["role"] == "web")) ||
+      Enum.find_index(ports, &(&1["optional"] != true)) ||
+      0
+  end
+
+  # The routed port is the one Traefik's `loadbalancer.server.port` points at — the
+  # port the app actually listens on inside the container. Exactly one port carries
+  # role "web"; without an explicit choice the role is guessed from the port number,
+  # which is wrong for anything on a non-conventional port.
+  defp mark_routed_port(ports, index) when is_binary(index) and index != "" do
+    case Integer.parse(index) do
+      {chosen, _} ->
+        ports
+        |> Enum.with_index()
+        |> Enum.map(fn {port, idx} ->
+          Map.put(port, "role", if(idx == chosen, do: "web", else: demote_web(port["role"])))
+        end)
+
+      :error ->
+        ports
+    end
+  end
+
+  defp mark_routed_port(ports, _index), do: ports
+
+  defp demote_web("web"), do: "other"
+  defp demote_web(role), do: role
+
+  # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
+  # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
+  # different container drops the session.
+  defp proxy_options(settings, "proxy"), do: %{"sticky" => settings["sticky"] == "true"}
+  defp proxy_options(_settings, _access), do: %{}
 
   defp blank_to_nil(v) when v in [nil, ""], do: nil
   defp blank_to_nil(v), do: v
@@ -1597,6 +1790,113 @@ defmodule HomelabWeb.DeploymentLive do
     do: Enum.find(Enum.sort_by(steps, & &1.position), &(&1.status == :failed))
 
   defp failed_step(_), do: nil
+
+  # What the domain is ACTUALLY serving, read from the live TLS handshake rather than
+  # from Traefik's opinion — Traefik reports a router as "active" even while it serves
+  # its self-signed default because ACME failed, which is the exact failure mode a
+  # custom (non-wildcard) domain hits.
+  attr :tls, :any, required: true
+  attr :domain, :string, default: nil
+
+  defp tls_card(assigns) do
+    ~H"""
+    <div :if={@tls != :no_domain} class="rounded-lg bg-base-100 border border-base-content/5 p-4">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <.icon name="hero-lock-closed" class="size-4 text-base-content/40" />
+          <span class="text-sm font-semibold text-base-content">TLS certificate</span>
+          <span class="text-[11px] text-base-content/40">{@domain}</span>
+        </div>
+        <button
+          type="button"
+          phx-click="recheck_tls"
+          class="text-[11px] text-primary hover:text-primary/80 cursor-pointer"
+        >
+          Re-check
+        </button>
+      </div>
+
+      <p :if={@tls in [:loading, :idle]} class="mt-2 text-xs text-base-content/40">
+        Checking the certificate being served…
+      </p>
+
+      <div :if={match?({:error, _}, @tls)} class="mt-2 flex items-start gap-2">
+        <.icon name="hero-exclamation-triangle" class="size-4 text-error shrink-0 mt-0.5" />
+        <div>
+          <p class="text-xs font-medium text-error">Could not complete a TLS handshake</p>
+          <p class="text-[11px] text-base-content/40">
+            Nothing is answering on :443 for this name — the DNS record, the route, or the
+            app itself is not up. {inspect(elem(@tls, 1))}
+          </p>
+        </div>
+      </div>
+
+      <div :if={match?({:ok, _}, @tls)} class="mt-3 space-y-2">
+        <% cert = elem(@tls, 1) %>
+        <div class="flex items-center gap-2">
+          <span class={[
+            "px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide",
+            tls_badge_class(cert.status)
+          ]}>
+            {tls_status_label(cert.status)}
+          </span>
+          <span class="text-xs text-base-content/60">
+            {tls_status_detail(cert)}
+          </span>
+        </div>
+
+        <dl class="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+          <div class="flex justify-between">
+            <dt class="text-base-content/40">Issuer</dt>
+            <dd class="text-base-content/70 font-medium truncate ml-2">{cert.issuer}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-base-content/40">Expires</dt>
+            <dd class={[
+              "font-medium ml-2",
+              if(cert.days_remaining <= 21, do: "text-warning", else: "text-base-content/70")
+            ]}>
+              {Calendar.strftime(cert.not_after, "%Y-%m-%d")} ({cert.days_remaining}d)
+            </dd>
+          </div>
+          <div class="flex justify-between col-span-2">
+            <dt class="text-base-content/40">Covers</dt>
+            <dd class="text-base-content/70 font-medium ml-2 truncate">
+              {Enum.join(cert.sans, ", ")}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+    """
+  end
+
+  # A self-signed cert is the headline: the browser rejects it outright, and it is what
+  # Traefik serves when ACME could not issue for this name.
+  defp tls_status_label(:valid), do: "Valid"
+  defp tls_status_label(:expiring), do: "Expiring"
+  defp tls_status_label(:expired), do: "Expired"
+  defp tls_status_label(:self_signed), do: "Self-signed"
+  defp tls_status_label(:name_mismatch), do: "Wrong name"
+
+  defp tls_badge_class(:valid), do: "bg-success/10 text-success"
+  defp tls_badge_class(:expiring), do: "bg-warning/10 text-warning"
+
+  defp tls_badge_class(status) when status in [:expired, :self_signed, :name_mismatch],
+    do: "bg-error/10 text-error"
+
+  defp tls_status_detail(%{status: :self_signed}),
+    do: "Traefik is serving its default certificate — ACME never issued a real one."
+
+  defp tls_status_detail(%{status: :name_mismatch, subject: subject}),
+    do: "The served certificate is for #{subject}, not this domain."
+
+  defp tls_status_detail(%{status: :expired}), do: "Browsers are rejecting this certificate."
+
+  defp tls_status_detail(%{status: :expiring, days_remaining: days}),
+    do: "Renews automatically; #{days} days left."
+
+  defp tls_status_detail(%{issuer: issuer}), do: "Issued by #{issuer}."
 
   # One release: header (status + time + lease), any release-level error, then the
   # ordered steps with per-step status and error.
