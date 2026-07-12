@@ -8,6 +8,15 @@ defmodule Homelab.Docker.RegistryAuth do
   (`{"username","password","serveraddress"}`). On Swarm `/services/create`,
   the daemon stores this and distributes it to worker nodes — the API
   equivalent of `docker service create --with-registry-auth`.
+
+  The padding on that base64 is NOT optional. The daemon decodes the header with
+  Go's `base64.URLEncoding`, the *padded* alphabet, and an unpadded value simply
+  fails to decode — whereupon the daemon does not reject the request, it quietly
+  falls back to an ANONYMOUS pull. A private image then comes back 401/unauthorized
+  no matter how correct the credentials were, which is indistinguishable from having
+  sent no header at all. Verified against a live daemon: a padded header with bad
+  credentials gets "denied" from the registry (they were evaluated), an unpadded one
+  gets "unauthorized" (they were never sent).
   """
 
   require Logger
@@ -112,7 +121,8 @@ defmodule Homelab.Docker.RegistryAuth do
     Code.ensure_loaded?(registry) and function_exported?(registry, :pull_auth_config, 0)
   end
 
+  # padding: true (the default) is load-bearing — see the moduledoc.
   defp encode(payload) do
-    {"X-Registry-Auth", payload |> Jason.encode!() |> Base.url_encode64(padding: false)}
+    {"X-Registry-Auth", payload |> Jason.encode!() |> Base.url_encode64()}
   end
 end
