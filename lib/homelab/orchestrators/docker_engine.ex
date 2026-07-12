@@ -264,11 +264,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
     require Logger
     Logger.info("[DockerEngine] Pulling image #{image}...")
 
-    opts =
-      case Homelab.Docker.RegistryAuth.for_ref(image) do
-        nil -> []
-        header -> [headers: [header]]
-      end
+    opts = Homelab.Docker.RegistryAuth.request_opts(image)
 
     case Client.post_stream("/images/create?fromImage=#{URI.encode(image)}", opts) do
       :ok ->
