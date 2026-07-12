@@ -120,6 +120,50 @@ defmodule HomelabWeb.SettingsLive do
      |> put_flash(:info, "Registry settings saved.")}
   end
 
+  # Saving an issuer + client id turns OIDC enforcement on for every route. If the issuer
+  # is unreachable or wrong, the operator is locked out of the very page that would fix
+  # it (fail-open only reaches break-glass when break-glass is armed; otherwise it is a
+  # 503). So discovery is VERIFIED before the settings are written -- a configuration that
+  # cannot work is refused rather than persisted.
+  def handle_event("save_oidc", %{"oidc" => params}, socket) do
+    issuer = String.trim(params["issuer"] || "")
+    client_id = String.trim(params["client_id"] || "")
+    secret = params["client_secret"] || ""
+
+    case verify_issuer(issuer) do
+      {:error, message} ->
+        {:noreply,
+         socket
+         |> assign(:oidc_check, %{ok?: false, message: message})
+         |> put_flash(:error, "Not saved — the provider could not be verified.")}
+
+      :ok ->
+        Settings.set("oidc_issuer", issuer, category: "auth")
+        Settings.set("oidc_client_id", client_id, category: "auth")
+
+        # Blank means "keep the existing one" -- the form never renders the stored secret
+        # back, so an empty field is the normal state of an edit that isn't rotating it.
+        if secret != "",
+          do: Settings.set("oidc_client_secret", secret, category: "auth", encrypt: true)
+
+        {:noreply,
+         socket
+         |> load_section_data("authentication")
+         |> assign(:oidc_check, %{ok?: true, message: "Discovery succeeded. OIDC is configured."})
+         |> put_flash(:info, "OIDC settings saved.")}
+    end
+  end
+
+  def handle_event("test_oidc", _params, socket) do
+    check =
+      case verify_issuer(socket.assigns.oidc_issuer) do
+        :ok -> %{ok?: true, message: "Discovery succeeded — the provider is reachable."}
+        {:error, message} -> %{ok?: false, message: message}
+      end
+
+    {:noreply, assign(socket, :oidc_check, check)}
+  end
+
   def handle_event("enable_registry", _params, socket) do
     Settings.set("registry_enabled", "true")
 
@@ -437,6 +481,8 @@ defmodule HomelabWeb.SettingsLive do
       :oidc_client_secret_placeholder,
       if(Settings.get("oidc_client_secret"), do: "••••••••", else: "")
     )
+    |> assign(:oidc_redirect_uri, oidc_redirect_uri())
+    |> assign_new(:oidc_check, fn -> nil end)
   end
 
   defp load_section_data(socket, "infrastructure") do
@@ -692,54 +738,137 @@ defmodule HomelabWeb.SettingsLive do
     """
   end
 
+  # The URI the AuthController will actually send -- it builds the same path off the
+  # endpoint's :url config. A hand-written guess would be worse than nothing: OIDC compares
+  # redirect URIs byte-for-byte, and PHX_PORT/PHX_SCHEME can put a port in here that an
+  # operator would never think to register.
+  defp oidc_redirect_uri do
+    HomelabWeb.Endpoint.url() <> "/auth/oidc/callback"
+  end
+
+  # Clearing the issuer turns enforcement OFF, which is a legitimate thing to do -- it is
+  # how you get back to no-auth -- so an empty issuer passes.
+  defp verify_issuer(""), do: :ok
+  defp verify_issuer(nil), do: :ok
+
+  defp verify_issuer(issuer) do
+    case Homelab.Auth.OidcDiscovery.discover(issuer) do
+      {:ok, _discovery} ->
+        :ok
+
+      {:error, {:http_error, status}} ->
+        {:error,
+         "#{issuer}/.well-known/openid-configuration returned HTTP #{status}. " <>
+           "Check the issuer is the provider's BASE url."}
+
+      {:error, {:connection_error, _reason}} ->
+        {:error,
+         "Could not reach #{issuer}. Is the provider up, and resolvable from this container?"}
+
+      {:error, reason} ->
+        {:error, "Discovery failed: #{inspect(reason)}"}
+    end
+  end
+
   defp render_authentication(assigns) do
     ~H"""
     <div class="p-4">
       <h2 class="text-lg font-semibold text-base-content mb-4">Authentication</h2>
-      <div class="space-y-4 max-w-md">
+
+      <div class="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2.5 mb-4 max-w-md">
+        <p class="text-[11px] text-base-content/70 leading-snug">
+          Setting an issuer and client ID turns OIDC enforcement ON for every route. If the
+          provider is unreachable or the client is wrong, the only way back in is
+          <strong>break-glass</strong>
+          — arm it before you save, or you can be locked out of
+          the page that would fix this. Discovery is checked on save for exactly that reason.
+        </p>
+      </div>
+
+      <.form
+        for={%{}}
+        as={:oidc}
+        id="oidc-form"
+        phx-submit="save_oidc"
+        class="space-y-4 max-w-md"
+      >
         <div>
           <label class="block text-sm font-medium text-base-content/70 mb-1.5">OIDC Issuer URL</label>
           <input
             type="url"
+            name="oidc[issuer]"
             value={@oidc_issuer}
-            readonly
-            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content/70 py-2.5 px-3"
+            placeholder="https://aut.hair"
+            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3"
           />
+          <p class="text-[10px] text-base-content/40 mt-1">
+            The base URL only. Discovery appends <code>/.well-known/openid-configuration</code>
+            itself, so don't include it.
+          </p>
         </div>
         <div>
           <label class="block text-sm font-medium text-base-content/70 mb-1.5">Client ID</label>
           <input
             type="text"
+            name="oidc[client_id]"
             value={@oidc_client_id}
-            readonly
-            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content/70 py-2.5 px-3"
+            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3"
           />
         </div>
         <div>
           <label class="block text-sm font-medium text-base-content/70 mb-1.5">Client Secret</label>
           <input
             type="password"
-            value={@oidc_client_secret_placeholder}
-            readonly
-            placeholder="Configured"
-            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content/70 py-2.5 px-3"
+            name="oidc[client_secret]"
+            value=""
+            placeholder={
+              if @oidc_client_secret_placeholder != "", do: "•••••••• (unchanged)", else: "secret"
+            }
+            class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3"
           />
+          <p class="text-[10px] text-base-content/40 mt-1">
+            Stored encrypted. Leave blank to keep the existing one.
+          </p>
         </div>
+
+        <div class="rounded-lg bg-base-200/60 px-3 py-2">
+          <p class="text-[10px] text-base-content/50 leading-snug">
+            Register this exact redirect URI with the provider — OIDC compares it
+            byte-for-byte:
+          </p>
+          <code class="text-[11px] font-mono text-base-content break-all">
+            {@oidc_redirect_uri}
+          </code>
+        </div>
+
+        <div
+          :if={@oidc_check}
+          class={[
+            "rounded-lg px-3 py-2 text-xs",
+            if(@oidc_check.ok?,
+              do: "border border-success/20 bg-success/5 text-success",
+              else: "border border-error/20 bg-error/5 text-error"
+            )
+          ]}
+        >
+          {@oidc_check.message}
+        </div>
+
         <div class="flex gap-3">
+          <.button
+            type="submit"
+            label="Save"
+            class="px-4 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-medium"
+          />
           <button
             type="button"
+            phx-click="test_oidc"
             class="px-4 py-2.5 rounded-lg text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-content/5 transition-colors cursor-pointer"
           >
-            Test Connection
-          </button>
-          <button
-            type="button"
-            class="px-4 py-2.5 rounded-lg text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-content/5 transition-colors cursor-pointer"
-          >
-            Re-run Discovery
+            Test discovery
           </button>
         </div>
-      </div>
+      </.form>
     </div>
     """
   end
