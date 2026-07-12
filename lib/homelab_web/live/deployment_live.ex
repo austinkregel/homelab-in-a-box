@@ -29,6 +29,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_access, "proxy")
       |> assign(:settings_auth, "public")
       |> assign(:settings_ports, [])
+      |> assign(:settings_routes, [])
       |> assign(:settings_memory_mb, "")
       |> assign(:settings_cpu_shares, "")
       |> assign(:settings_health_path, "")
@@ -332,6 +333,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_access, Access.access_of(exposure))
      |> assign(:settings_auth, Access.auth_of(exposure))
      |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
+     |> assign(:settings_routes, editable_routes(deployment.extra_routes))
      |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
      |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
      |> assign(:settings_health_path, health["path"] || "")
@@ -350,6 +352,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
      |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
      |> assign(:settings_ports, ports_from_params(settings["ports"]))
+     |> assign(:settings_routes, routes_from_params(settings["routes"]))
      |> assign(:settings_sticky, settings["sticky"] == "true")
      |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
      |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
@@ -380,6 +383,16 @@ defmodule HomelabWeb.DeploymentLive do
     {:noreply, assign(socket, :settings_ports, ports)}
   end
 
+  def handle_event("settings_add_route", _params, socket) do
+    blank = %{"path_prefix" => "", "port" => ""}
+    {:noreply, assign(socket, :settings_routes, socket.assigns.settings_routes ++ [blank])}
+  end
+
+  def handle_event("settings_remove_route", %{"index" => idx}, socket) do
+    routes = List.delete_at(socket.assigns.settings_routes, String.to_integer(idx))
+    {:noreply, assign(socket, :settings_routes, routes)}
+  end
+
   def handle_event("save_settings", %{"settings" => settings}, socket) do
     deployment = socket.assigns.deployment
     access = settings["access"] || socket.assigns.settings_access
@@ -404,6 +417,8 @@ defmodule HomelabWeb.DeploymentLive do
       exposure_mode_override: exposure,
       ports_override: if(ports == [], do: nil, else: ports),
       routed_port: parse_routed_port(settings["routed_port"]),
+      # Only a proxied app has paths to route; in host mode Traefik is not in the way.
+      extra_routes: if(access == "proxy", do: parse_routes(settings["routes"]), else: []),
       proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
       health_check_override: health_override(deployment, settings)
@@ -1141,6 +1156,57 @@ defmodule HomelabWeb.DeploymentLive do
                     </p>
                   </div>
 
+                  <div class="space-y-2 rounded-lg bg-base-200/40 p-3">
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-medium text-base-content">Extra path routes</span>
+                      <button
+                        type="button"
+                        phx-click="settings_add_route"
+                        class="text-[10px] text-primary hover:underline cursor-pointer"
+                      >
+                        + Add route
+                      </button>
+                    </div>
+                    <p class="text-[10px] text-base-content/40 leading-snug">
+                      Send one path to a <em>different</em>
+                      port in the same container. An app that serves
+                      a second protocol from a second port needs this — Laravel Reverb answers
+                      websockets on 6001 while the app itself is on 8000, so <code>/app</code>
+                      has to reach 6001 or every handshake lands on the HTTP server.
+                    </p>
+
+                    <div
+                      :for={{route, idx} <- Enum.with_index(@settings_routes)}
+                      class="flex items-center gap-2"
+                    >
+                      <input
+                        type="text"
+                        name={"settings[routes][#{idx}][path_prefix]"}
+                        value={route["path_prefix"]}
+                        placeholder="/app"
+                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                      />
+                      <span class="text-[10px] text-base-content/40">→</span>
+                      <input
+                        type="text"
+                        inputmode="numeric"
+                        name={"settings[routes][#{idx}][port]"}
+                        value={route["port"]}
+                        placeholder="6001"
+                        class="w-24 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                      />
+                      <button
+                        type="button"
+                        phx-click="settings_remove_route"
+                        phx-value-index={idx}
+                        class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
+                        aria-label={"Remove route #{route["path_prefix"]}"}
+                      >
+                        <.icon name="hero-trash" class="size-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
                   <label class="flex items-start gap-2 cursor-pointer">
                     <input type="hidden" name="settings[sticky]" value="false" />
                     <input
@@ -1670,6 +1736,46 @@ defmodule HomelabWeb.DeploymentLive do
         List.first(ports)
 
     to_string(port && port["internal"])
+  end
+
+  # Extra path routes, as the form holds them (strings) and as the DB holds them (a
+  # path plus an integer port).
+  defp editable_routes(routes) do
+    routes
+    |> List.wrap()
+    |> Enum.map(fn route ->
+      %{
+        "path_prefix" => route["path_prefix"] || "",
+        "port" => to_string(route["port"] || "")
+      }
+    end)
+  end
+
+  defp routes_from_params(nil), do: []
+
+  defp routes_from_params(params) when is_map(params) do
+    params
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{"path_prefix" => row["path_prefix"] || "", "port" => row["port"] || ""}
+    end)
+  end
+
+  # A half-filled row is dropped, not saved as a broken route. The changeset would
+  # reject it anyway; discarding it here means an operator who added a row and changed
+  # their mind isn't blocked by a validation error on a field they left blank.
+  defp parse_routes(params) do
+    params
+    |> routes_from_params()
+    |> Enum.reject(fn route ->
+      String.trim(route["path_prefix"]) == "" or String.trim(to_string(route["port"])) == ""
+    end)
+    |> Enum.map(fn route ->
+      %{
+        "path_prefix" => String.trim(route["path_prefix"]),
+        "port" => parse_routed_port(to_string(route["port"]))
+      }
+    end)
   end
 
   # The radio carries the port NUMBER, not its row index -- an index would silently
