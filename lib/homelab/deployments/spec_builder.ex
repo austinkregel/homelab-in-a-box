@@ -334,7 +334,12 @@ defmodule Homelab.Deployments.SpecBuilder do
 
     base = %{
       "traefik.enable" => "true",
+      # A routed workload is multi-homed (its own app network + the ingress
+      # network), so Traefik must be told which one to reach the backend on. The
+      # label is provider-specific and each provider ignores the other's, so both
+      # are emitted: `docker` for standalone containers, `swarm` for services.
       "traefik.docker.network" => network,
+      "traefik.swarm.network" => network,
       "traefik.http.routers.#{router}.rule" => "Host(`#{domain}`)",
       "traefik.http.routers.#{router}.entrypoints" => "web,websecure",
       "traefik.http.routers.#{router}.tls" => "true",
