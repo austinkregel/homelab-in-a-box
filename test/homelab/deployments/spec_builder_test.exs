@@ -469,6 +469,46 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  describe "volumes_override (durable storage a template never declared)" do
+    # Volumes came from the TEMPLATE only -- build_volumes/2 never looked at the
+    # deployment -- so an app needing storage its catalog entry did not declare had no way
+    # to get it short of editing the shared catalog entry. aut.hair needs exactly that.
+    test "a deployment can add a durable volume its template never declared" do
+      tenant = build_tenant()
+      template = build_template(%{volumes: [], exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          volumes_override: [%{"container_path" => "/var/www/html/storage"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert [volume] = spec.volumes
+
+      assert volume.target == "/var/www/html/storage"
+
+      # A NAMED volume, not a bind: that is what makes it survive the container being
+      # recreated, which every config save now does.
+      assert volume.type == "volume"
+      assert volume.source =~ "homelab-"
+    end
+
+    # nil = inherit, [] = deliberately none. Collapsing those is what silently repointed
+    # Traefik at port 80 when ports_override was hard-coded to [].
+    test "nil inherits the template's volumes; [] means deliberately none" do
+      tenant = build_tenant()
+      template = build_template(%{volumes: [%{"container_path" => "/data"}]})
+
+      inherited = build_deployment(tenant, template, %{volumes_override: nil})
+      assert {:ok, spec} = SpecBuilder.build(inherited)
+      assert [%{target: "/data"}] = spec.volumes
+
+      none = build_deployment(tenant, template, %{volumes_override: []})
+      assert {:ok, spec} = SpecBuilder.build(none)
+      assert spec.volumes == []
+    end
+  end
+
   describe "extra routes (a second protocol on a second port)" do
     # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
     # wss://aut.hair/app -- 443, path /app -- and the HTTP server does not speak the

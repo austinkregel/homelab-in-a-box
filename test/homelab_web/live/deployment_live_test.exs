@@ -1379,6 +1379,51 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
   end
 
+  describe "volumes editing" do
+    # The Volumes tab was a read-only table of template.volumes, and there was no
+    # volumes_override at all -- so an app needing durable storage its catalog entry never
+    # declared simply could not get it from the UI.
+    test "a durable volume can be added to a deployment from the UI", %{
+      conn: conn,
+      deployment: dep
+    } do
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit")
+      render_click(view, "add_volume")
+
+      view
+      |> form("#volumes-form",
+        volumes: %{
+          "0" => %{"container_path" => "/var/www/html/storage", "description" => "app storage"}
+        }
+      )
+      |> render_submit()
+
+      reloaded = Homelab.Deployments.get_deployment!(dep.id)
+      assert [%{"container_path" => "/var/www/html/storage"}] = reloaded.volumes_override
+    end
+
+    test "a relative mount path is rejected rather than turned into a garbage volume name",
+         %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit")
+      render_click(view, "add_volume")
+
+      html =
+        view
+        |> form("#volumes-form", volumes: %{"0" => %{"container_path" => "storage"}})
+        |> render_submit()
+
+      assert html =~ "absolute"
+      assert Homelab.Deployments.get_deployment!(dep.id).volumes_override == nil
+    end
+  end
+
   describe "settings reconfiguration" do
     test "saving proxy settings persists domain + auth and never publishes host ports",
          %{conn: conn, deployment: dep} do
