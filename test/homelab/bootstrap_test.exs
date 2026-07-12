@@ -79,6 +79,7 @@ defmodule Homelab.BootstrapTest do
       test_pid = self()
 
       stub(Homelab.Mocks.DockerClient, :get, fn
+        "/info", _ -> {:ok, %{"Swarm" => %{"LocalNodeState" => "inactive"}}}
         "/networks/homelab-iab-internal", _ -> {:error, {:not_found, ""}}
         "/volumes/" <> _, _ -> {:error, {:not_found, ""}}
         "/containers/" <> _, _ -> {:error, {:not_found, ""}}
