@@ -105,12 +105,22 @@ defmodule Homelab.Deployments.Deployment do
   defp valid_port?(port) when is_integer(port), do: port > 0 and port < 65_536
   defp valid_port?(_port), do: false
 
-  # A volume's container_path is what its generated volume NAME is derived from
-  # (SpecBuilder.volume_name/3). A blank or relative path would produce a garbage name
-  # and silently mount the wrong thing, so it never reaches the spec.
+  # A volume is either a managed NAMED volume (Docker keeps the data, name derived from
+  # container_path) or a BIND of a host folder (the operator keeps the data where it
+  # already is). Both are legitimate; the existing homelab stack is entirely folder
+  # mounts, and adopting or matching it is impossible without binds.
   #
-  # Two paths mounting at the same place is rejected too: Docker would take one and drop
-  # the other, and which one it takes is not something to leave to chance when the answer
+  # container_path must be absolute either way: a named volume's NAME is derived from it
+  # (SpecBuilder.volume_name/3), so a relative one produces a garbage name and silently
+  # mounts the wrong thing.
+  #
+  # A bind additionally needs an absolute host `source`. Docker would happily interpret a
+  # bare word as a NAMED VOLUME rather than a path -- so a typo'd bind source does not
+  # error, it quietly creates an empty volume and the app comes up with no data. That
+  # failure is indistinguishable from data loss at a glance, so it is refused here.
+  #
+  # Two volumes at the same container_path is rejected: Docker takes one and drops the
+  # other, and which one it takes is not something to leave to chance when the answer
   # decides where an app's data lives.
   defp validate_volumes_override(changeset) do
     case get_change(changeset, :volumes_override) do
@@ -121,18 +131,7 @@ defmodule Homelab.Deployments.Deployment do
         paths = Enum.map(volumes, & &1["container_path"])
 
         changeset
-        |> then(fn cs ->
-          Enum.reduce(volumes, cs, fn vol, acc ->
-            if valid_container_path?(vol["container_path"]),
-              do: acc,
-              else:
-                add_error(
-                  acc,
-                  :volumes_override,
-                  "mount path must be absolute (got #{inspect(vol["container_path"])})"
-                )
-          end)
-        end)
+        |> then(fn cs -> Enum.reduce(volumes, cs, &validate_volume/2) end)
         |> then(fn cs ->
           if length(Enum.uniq(paths)) == length(paths),
             do: cs,
@@ -141,6 +140,28 @@ defmodule Homelab.Deployments.Deployment do
 
       _ ->
         add_error(changeset, :volumes_override, "must be a list")
+    end
+  end
+
+  defp validate_volume(vol, changeset) do
+    cond do
+      not valid_container_path?(vol["container_path"]) ->
+        add_error(
+          changeset,
+          :volumes_override,
+          "mount path must be absolute (got #{inspect(vol["container_path"])})"
+        )
+
+      vol["type"] == "bind" and not valid_container_path?(vol["source"]) ->
+        add_error(
+          changeset,
+          :volumes_override,
+          "a folder mount needs an absolute host path (got #{inspect(vol["source"])}) — " <>
+            "Docker reads a bare name as a named volume, so a typo would silently mount an empty one"
+        )
+
+      true ->
+        changeset
     end
   end
 
