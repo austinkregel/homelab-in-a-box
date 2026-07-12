@@ -47,6 +47,18 @@ defmodule Homelab.Deployments.Access do
 
   def effective_ports(%Deployment{ports_override: ports}), do: ports
 
+  @doc """
+  Effective volumes (override wins; nil = inherit the template).
+
+  Volumes used to come from the template ONLY, so an app that needed durable storage its
+  catalog entry never declared had no way to get it — short of editing the catalog entry,
+  which every deployment of that app shares.
+  """
+  def effective_volumes(%Deployment{volumes_override: nil, app_template: template}),
+    do: template.volumes || []
+
+  def effective_volumes(%Deployment{volumes_override: volumes}), do: volumes
+
   @doc "Effective resource limits map (override wins; nil = inherit the template)."
   def effective_resource_limits(%Deployment{resource_limits_override: nil, app_template: t}),
     do: t.resource_limits || %{}

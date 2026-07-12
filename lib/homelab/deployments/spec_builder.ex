@@ -83,7 +83,7 @@ defmodule Homelab.Deployments.SpecBuilder do
         # for greenfield deploys, which run as the image's default user.
         user: template.user,
         env: build_env(template, tenant, deployment),
-        volumes: build_volumes(template, tenant),
+        volumes: build_volumes(template, tenant, Access.effective_volumes(deployment)),
         ports: ports,
         network: primary_network,
         bridge_networks: bridge_networks,
@@ -226,8 +226,9 @@ defmodule Homelab.Deployments.SpecBuilder do
     }
   end
 
-  defp build_volumes(template, tenant) do
-    (template.volumes || [])
+  defp build_volumes(template, tenant, volumes) do
+    volumes
+    |> List.wrap()
     |> Enum.map(fn vol ->
       container_path = vol["container_path"] || vol["path"] || "/data"
 
