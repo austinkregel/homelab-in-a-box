@@ -528,13 +528,21 @@ defmodule Homelab.Services.Reconciler do
     apply(ActivityLog, log_level, ["reconciler", "#{title}: #{body}", meta])
 
     severity = if level == :error, do: "error", else: "warning"
-    notify_admins(title, body, severity)
+    notify_admins(title, body, severity, deployment_id)
     :ok
   end
 
-  defp notify_admins(title, body, severity) do
+  defp notify_admins(title, body, severity, deployment_id) do
+    link = if deployment_id, do: "/deployments/#{deployment_id}", else: "/activity"
+
     for user <- Accounts.list_admins() do
-      Notifications.create(%{user_id: user.id, title: title, body: body, severity: severity})
+      Notifications.create(%{
+        user_id: user.id,
+        title: title,
+        body: body,
+        severity: severity,
+        link: link
+      })
     end
 
     :ok

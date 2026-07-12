@@ -91,12 +91,16 @@ defmodule HomelabWeb.Live.Hooks do
   defp notif_handle_event("notif-open", %{"id" => id}, socket) do
     user = socket.assigns.current_user
     notification = Enum.find(socket.assigns.notifications, &(to_string(&1.id) == to_string(id)))
-    link = notification && notification.link
     if notification, do: Notifications.mark_read(notification)
 
     socket = assign_notifications(socket, user.id)
 
-    if link, do: {:halt, push_navigate(socket, to: link)}, else: {:halt, socket}
+    # Older notifications predate link support; send those to the activity log
+    # rather than leaving the click as a dead end.
+    case notification && (notification.link || "/activity") do
+      nil -> {:halt, socket}
+      link -> {:halt, push_navigate(socket, to: link)}
+    end
   end
 
   defp notif_handle_event("notif-mark-all-read", _params, socket) do

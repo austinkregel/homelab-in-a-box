@@ -60,6 +60,36 @@ defmodule HomelabWeb.NotificationsLiveTest do
     refute is_nil(reloaded.read_at)
   end
 
+  test "notif-open on a link-less notification falls back to the activity log", %{
+    conn: conn,
+    user: user
+  } do
+    notification = insert(:notification, user: user, title: "No link", link: nil)
+
+    {:ok, view, _html} = live(conn, ~p"/catalog")
+    render_click(view, "notif-open", %{"id" => to_string(notification.id)})
+
+    assert_redirect(view, "/activity")
+  end
+
+  # Tailwind v4's preflight styles the `hidden` *attribute* as `display: none !important`,
+  # which JS.toggle's inline `display: block` cannot override -- the dropdown would be
+  # impossible to open. It must use the `hidden` utility class instead.
+  test "the dropdown is hidden by class, not by the unopenable hidden attribute", %{conn: conn} do
+    {:ok, _view, html} = live(conn, ~p"/catalog")
+
+    [dropdown] =
+      html
+      |> LazyHTML.from_fragment()
+      |> LazyHTML.query("#notif-dropdown")
+      |> Enum.to_list()
+
+    refute dropdown |> LazyHTML.attribute("hidden") != [],
+           "dropdown uses the `hidden` attribute, which Tailwind marks !important"
+
+    assert dropdown |> LazyHTML.attribute("class") |> hd() =~ "hidden"
+  end
+
   test "notif-mark-all-read clears the unread count", %{conn: conn, user: user} do
     insert(:notification, user: user, title: "One", severity: "info")
     insert(:notification, user: user, title: "Two", severity: "info")

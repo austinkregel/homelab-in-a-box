@@ -142,7 +142,7 @@ defmodule HomelabWeb.Layouts do
                 Sign out
               </.link>
             </div>
-            <div class="relative">
+            <div class="relative" phx-click-away={JS.hide(to: "#notif-dropdown")}>
               <button
                 type="button"
                 phx-click={JS.toggle(to: "#notif-dropdown")}
@@ -168,8 +168,9 @@ defmodule HomelabWeb.Layouts do
               </button>
               <div
                 id="notif-dropdown"
-                hidden
-                class="absolute bottom-full right-0 mb-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-base-content/10 bg-base-100 shadow-xl z-50"
+                phx-window-keydown={JS.hide(to: "#notif-dropdown")}
+                phx-key="escape"
+                class="hidden absolute bottom-full right-0 mb-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-base-content/10 bg-base-100 shadow-xl z-50"
               >
                 <div class="flex items-center justify-between px-4 py-2.5 border-b border-base-content/[0.06]">
                   <span class="text-sm font-semibold text-base-content">Notifications</span>
@@ -212,6 +213,12 @@ defmodule HomelabWeb.Layouts do
                     </div>
                   </div>
                 </button>
+                <.link
+                  navigate={~p"/activity"}
+                  class="block px-4 py-2.5 text-center text-xs text-primary hover:bg-base-content/[0.03]"
+                >
+                  View all activity
+                </.link>
               </div>
             </div>
           </div>
