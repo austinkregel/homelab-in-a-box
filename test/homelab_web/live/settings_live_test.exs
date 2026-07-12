@@ -54,6 +54,95 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "OIDC configuration" do
+    @discovery %{
+      "issuer" => "https://aut.hair",
+      "authorization_endpoint" => "https://aut.hair/authorize",
+      "token_endpoint" => "https://aut.hair/token",
+      "userinfo_endpoint" => "https://aut.hair/userinfo",
+      "jwks_uri" => "https://aut.hair/.well-known/jwks.json"
+    }
+
+    defp serve_discovery(bypass) do
+      Bypass.expect(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(@discovery))
+      end)
+    end
+
+    test "the panel was read-only; OIDC can now be configured from it", %{conn: conn} do
+      bypass = Bypass.open()
+      serve_discovery(bypass)
+      issuer = "http://localhost:#{bypass.port}"
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "authentication"})
+
+      view
+      |> form("#oidc-form",
+        oidc: %{"issuer" => issuer, "client_id" => "homelab", "client_secret" => "s3cret"}
+      )
+      |> render_submit()
+
+      assert Homelab.Settings.get("oidc_issuer") == issuer
+      assert Homelab.Settings.get("oidc_client_id") == "homelab"
+      # Round-trips through encryption.
+      assert Homelab.Settings.get("oidc_client_secret") == "s3cret"
+    end
+
+    # THE safety property. Saving an issuer turns OIDC enforcement on for every route; a
+    # bad one locks the operator out of the page that would fix it (fail-open reaches
+    # break-glass only when break-glass is armed, else it is a 503). A config that cannot
+    # work must be refused, not persisted.
+    test "an unreachable issuer is refused rather than saved", %{conn: conn} do
+      bypass = Bypass.open()
+      Bypass.down(bypass)
+      issuer = "http://localhost:#{bypass.port}"
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "authentication"})
+
+      html =
+        view
+        |> form("#oidc-form", oidc: %{"issuer" => issuer, "client_id" => "homelab"})
+        |> render_submit()
+
+      assert html =~ "Could not reach"
+      assert Homelab.Settings.get("oidc_issuer") in [nil, ""]
+      assert Homelab.Settings.get("oidc_client_id") in [nil, ""]
+    end
+
+    test "a blank secret keeps the stored one instead of wiping it", %{conn: conn} do
+      bypass = Bypass.open()
+      serve_discovery(bypass)
+      issuer = "http://localhost:#{bypass.port}"
+
+      Homelab.Settings.set("oidc_client_secret", "original", category: "auth", encrypt: true)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "authentication"})
+
+      view
+      |> form("#oidc-form",
+        oidc: %{"issuer" => issuer, "client_id" => "homelab", "client_secret" => ""}
+      )
+      |> render_submit()
+
+      assert Homelab.Settings.get("oidc_client_secret") == "original"
+    end
+
+    # OIDC compares redirect URIs byte-for-byte, so the operator must register the exact
+    # string the AuthController sends -- not a guess at what it might be.
+    test "the panel shows the callback URL the app will actually send", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "authentication"})
+
+      assert html =~ "/auth/oidc/callback"
+      assert html =~ HomelabWeb.Endpoint.url()
+    end
+  end
+
   describe "section switching" do
     test "switch to authentication section", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
