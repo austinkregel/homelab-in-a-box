@@ -402,6 +402,73 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  describe "routed port (the port Traefik forwards to)" do
+    # The aut.hair outage: the app exposed 8080 and listened on 8000. Both are
+    # "conventional" web ports, so PortRoles.infer/1 called BOTH "web", the guess took
+    # whichever came first, and Traefik was pointed at a port nothing listened on --
+    # a 502 with a perfectly healthy container behind it.
+    test "an explicit routed_port beats a role=web port that merely sorts first" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          ports_override: [
+            %{"internal" => "8080", "role" => "web"},
+            %{"internal" => "8000", "role" => "web"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "8000",
+             "the proxy must forward to the declared port, not the first web-ish one"
+    end
+
+    test "without an explicit routed_port the old heuristic still applies" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: nil,
+          ports_override: [%{"internal" => "9000", "role" => "web"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "9000"
+    end
+
+    # A wrong routed port must fail loudly at deploy time rather than come up
+    # "healthy" and serve 502s through the proxy.
+    test "an HTTP healthcheck probes the routed port, not a different guess" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :public,
+          health_check: %{"path" => "/up"}
+        })
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          ports_override: [
+            %{"internal" => "8080", "role" => "web"},
+            %{"internal" => "8000", "role" => "web"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert Enum.any?(spec.health_check["Test"], &String.contains?(&1, "localhost:8000/up"))
+      refute Enum.any?(spec.health_check["Test"], &String.contains?(&1, "8080"))
+    end
+  end
+
   describe "per-deployment config overrides" do
     test "ports_override wins over the template ports" do
       tenant = build_tenant()
