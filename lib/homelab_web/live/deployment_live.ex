@@ -1618,8 +1618,7 @@ defmodule HomelabWeb.DeploymentLive do
               <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2">
                 <p class="text-[11px] text-base-content/70 leading-snug">
                   Saving recreates the container. A volume's name is derived from its mount
-                  path, so <strong>changing a path does not move the data</strong>
-                  — it mounts a
+                  path, so <strong>changing a path does not move the data</strong> — it mounts a
                   new, empty volume and leaves the old one behind. Removing a row detaches the
                   volume but does not delete it.
                 </p>
@@ -1878,6 +1877,32 @@ defmodule HomelabWeb.DeploymentLive do
         List.first(ports)
 
     to_string(port && port["internal"])
+  end
+
+  # Volume rows, as the Volumes tab holds them. `target` is the shape a spec-built
+  # volume carries; `container_path` the shape the template and the override carry.
+  defp volume_rows(volumes) do
+    volumes
+    |> List.wrap()
+    |> Enum.map(fn vol ->
+      %{
+        "container_path" => vol["container_path"] || vol["target"] || "",
+        "description" => vol["description"] || ""
+      }
+    end)
+  end
+
+  defp volume_rows_from_params(nil), do: []
+
+  defp volume_rows_from_params(params) when is_map(params) do
+    params
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{
+        "container_path" => row["container_path"] || "",
+        "description" => row["description"] || ""
+      }
+    end)
   end
 
   # Extra path routes, as the form holds them (strings) and as the DB holds them (a
