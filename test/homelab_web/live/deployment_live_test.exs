@@ -219,6 +219,74 @@ defmodule HomelabWeb.DeploymentLiveTest do
       html = render_click(view, "save_env", %{"env" => %{"APP_ENV" => "staging"}})
       assert html =~ "Environment updated"
     end
+
+    # The editor used to render one input per EXISTING key, so a variable the template
+    # never declared could not be added at all. aut.hair needed REVERB_* on an already
+    # deployed stack and there was no way to put them there.
+    test "a variable the template never declared can be added", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      html =
+        render_click(view, "save_env", %{
+          "env" => %{
+            "0" => %{"key" => "REVERB_APP_KEY", "value" => "pub-key"},
+            "1" => %{"key" => "REVERB_APP_SECRET", "value" => "s3cret"},
+            "2" => %{"key" => "BROADCAST_DRIVER", "value" => "reverb"}
+          }
+        })
+
+      assert html =~ "Environment updated"
+
+      env = Homelab.Deployments.get_deployment!(dep.id).env_overrides
+      assert env["REVERB_APP_KEY"] == "pub-key"
+      assert env["REVERB_APP_SECRET"] == "s3cret"
+      assert env["BROADCAST_DRIVER"] == "reverb"
+    end
+
+    test "a row with a blank key is dropped rather than saved as an empty var", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      render_click(view, "save_env", %{
+        "env" => %{
+          "0" => %{"key" => "REAL_VAR", "value" => "yes"},
+          "1" => %{"key" => "   ", "value" => "orphaned"}
+        }
+      })
+
+      env = Homelab.Deployments.get_deployment!(dep.id).env_overrides
+      assert env["REAL_VAR"] == "yes"
+      refute Map.has_key?(env, "")
+      refute Map.has_key?(env, "   ")
+    end
+
+    test "add_env_var appends an empty row and remove_env_var drops one", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      before = view |> element("#env-form") |> render()
+      rows_before = before |> String.split(~s(name="env[)) |> length()
+
+      after_add = render_click(view, "add_env_var", %{})
+      rows_after = after_add |> String.split(~s(name="env[)) |> length()
+
+      assert rows_after > rows_before, "add_env_var did not add a row"
+
+      after_remove = render_click(view, "remove_env_var", %{"index" => "0"})
+      rows_removed = after_remove |> String.split(~s(name="env[)) |> length()
+
+      assert rows_removed < rows_after, "remove_env_var did not drop a row"
+    end
   end
 
   describe "deployment actions" do
