@@ -190,21 +190,17 @@ defmodule Homelab.Bootstrap do
     Application.get_env(:homelab, :bootstrap_tcp_target, {~c"#{@postgres_container}", 5432})
   end
 
+  # Runs before the Repo starts, so the orchestrator setting — a database read —
+  # is not available here. `Homelab.Docker.Network` keys the driver off the
+  # daemon's swarm state instead, which is precisely what makes it callable from
+  # this far down in the boot sequence.
   defp ensure_network do
-    case Client.get("/networks/#{@network}") do
-      {:ok, _} ->
-        :ok
+    Logger.info("Bootstrap: ensuring network #{@network}")
 
-      {:error, {:not_found, _}} ->
-        Logger.info("Bootstrap: creating network #{@network}")
-
-        case Client.post("/networks/create", %{"Name" => @network, "Driver" => "bridge"}) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, {:network_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, {:network_check_failed, reason}}
+    case Homelab.Docker.Network.ensure(@network) do
+      :ok -> :ok
+      {:error, {:network_create_failed, reason}} -> {:error, {:network_failed, reason}}
+      {:error, reason} -> {:error, {:network_check_failed, reason}}
     end
   end
 
