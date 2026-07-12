@@ -35,14 +35,70 @@ defmodule Homelab.ConfigTest do
 
   describe "single-choice driver resolution via Settings fallback" do
     test "returns nil when Application env is nil and no Setting is stored" do
-      original = Application.get_env(:homelab, :orchestrator)
-      Application.put_env(:homelab, :orchestrator, nil)
-      on_exit(fn -> Application.put_env(:homelab, :orchestrator, original) end)
+      original = Application.get_env(:homelab, :gateway)
+      Application.put_env(:homelab, :gateway, nil)
+      on_exit(fn -> Application.put_env(:homelab, :gateway, original) end)
 
       Homelab.Settings.init_cache()
-      Homelab.Settings.delete("orchestrator")
+      Homelab.Settings.delete("gateway")
 
-      assert Config.orchestrator() == nil
+      # Categories other than :orchestrator still resolve to nil with nothing set.
+      assert Config.gateway() == nil
+    end
+  end
+
+  # The orchestrator is the exception: it used to be pinned in the application env,
+  # which outranks Settings — making the Settings control a no-op and leaving no way
+  # off Swarm. With the pin gone, the operator's choice must win, and an instance with
+  # nothing recorded must not be guessed wrong (calling a Swarm host "Docker Engine"
+  # disowns its running services).
+  describe "orchestrator/0 selection" do
+    setup do
+      original = Application.get_env(:homelab, :orchestrator)
+      Application.put_env(:homelab, :orchestrator, nil)
+      Process.put(:docker_client, Homelab.Mocks.DockerClient)
+      Homelab.Settings.init_cache()
+      Homelab.Settings.delete("orchestrator")
+      Config.reset_inferred_orchestrator()
+
+      on_exit(fn ->
+        Application.put_env(:homelab, :orchestrator, original)
+        Config.reset_inferred_orchestrator()
+      end)
+
+      :ok
+    end
+
+    defp stub_swarm(state) do
+      Mox.stub(Homelab.Mocks.DockerClient, :get, fn "/info", _opts ->
+        {:ok, %{"Swarm" => %{"LocalNodeState" => state}}}
+      end)
+    end
+
+    test "the operator's Settings choice wins — this is the way off Swarm" do
+      Homelab.Settings.set("orchestrator", "docker_engine")
+      stub_swarm("active")
+
+      # Even on a swarm-active daemon, an explicit choice of Docker Engine is honoured.
+      assert Config.orchestrator() == Homelab.Orchestrators.DockerEngine
+
+      Homelab.Settings.set("orchestrator", "docker_swarm")
+      assert Config.orchestrator() == Homelab.Orchestrators.DockerSwarm
+    end
+
+    test "with nothing recorded, infers Swarm from a swarm-active daemon" do
+      stub_swarm("active")
+      assert Config.orchestrator() == Homelab.Orchestrators.DockerSwarm
+    end
+
+    test "with nothing recorded, infers Docker Engine from a non-swarm daemon" do
+      stub_swarm("inactive")
+      assert Config.orchestrator() == Homelab.Orchestrators.DockerEngine
+    end
+
+    test "never returns nil — every deploy path depends on it" do
+      stub_swarm("inactive")
+      refute is_nil(Config.orchestrator())
     end
   end
 
