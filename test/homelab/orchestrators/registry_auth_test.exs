@@ -70,8 +70,11 @@ defmodule Homelab.Orchestrators.RegistryAuthTest do
     # about the auth header, so let the networks already exist.
     setup do
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
-        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "overlay"}}
       end)
 
       :ok

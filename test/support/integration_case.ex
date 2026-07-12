@@ -44,7 +44,7 @@ defmodule Homelab.IntegrationCase do
   """
   def docker_available? do
     case Homelab.Docker.Client.get("/info") do
-      {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}} = info} ->
+      {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}} = info} ->
         {:ok, info}
 
       {:ok, %{"Swarm" => %{"LocalNodeState" => state}}} ->

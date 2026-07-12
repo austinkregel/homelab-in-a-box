@@ -33,8 +33,17 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       test_pid = self()
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => swarm_state}}}
-        _path, _opts -> {:error, {:not_found, %{}}}
+        "/info", _opts ->
+          {:ok,
+           %{
+             "Swarm" => %{
+               "LocalNodeState" => swarm_state,
+               "ControlAvailable" => swarm_state == "active"
+             }
+           }}
+
+        _path, _opts ->
+          {:error, {:not_found, %{}}}
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)

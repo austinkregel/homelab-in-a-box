@@ -286,8 +286,11 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     # present as overlays; the tests below that care re-stub :get themselves.
     setup do
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
-        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "overlay"}}
       end)
 
       :ok
@@ -358,11 +361,16 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
-        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "overlay"}}
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "overlay"}}
+
         # The service conflicted on create but cannot be inspected — converging is
         # impossible, so the deploy must fail rather than report a phantom success.
-        "/services/" <> _, _opts -> {:error, {:not_found, %{}}}
+        "/services/" <> _, _opts ->
+          {:error, {:not_found, %{}}}
       end)
 
       expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", _body, _opts ->
@@ -419,8 +427,11 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       spec = build_spec() |> put_in([:labels, "traefik.enable"], "true")
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
-        "/networks/" <> _, _opts -> {:error, {:not_found, %{}}}
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+
+        "/networks/" <> _, _opts ->
+          {:error, {:not_found, %{}}}
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
@@ -453,7 +464,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
 
       stub(Homelab.Mocks.DockerClient, :get, fn
         "/info", _opts ->
-          {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
 
         "/networks/" <> _, _opts ->
           {:ok, %{"Driver" => "bridge", "Containers" => %{"abc" => %{"Name" => "legacy-app"}}}}
@@ -480,7 +491,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
 
       stub(Homelab.Mocks.DockerClient, :get, fn
         "/info", _opts ->
-          {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
 
         "/networks/" <> _, _opts ->
           {:ok, %{"Driver" => "overlay"}}
@@ -515,8 +526,11 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       spec = build_spec()
 
       stub(Homelab.Mocks.DockerClient, :get, fn
-        "/info", _opts -> {:ok, %{"Swarm" => %{"LocalNodeState" => "active"}}}
-        "/networks/" <> _, _opts -> {:ok, %{"Driver" => "bridge", "Containers" => %{}}}
+        "/info", _opts ->
+          {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+
+        "/networks/" <> _, _opts ->
+          {:ok, %{"Driver" => "bridge", "Containers" => %{}}}
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
