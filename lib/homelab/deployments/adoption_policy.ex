@@ -28,8 +28,17 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   In-scope = the service has at least one **bind mount whose host path is under
   the adoption root** (default `<home>/homelab`, i.e. `~/homelab`; override with
   `HOMELAB_ADOPTION_ROOT` or Settings → Infrastructure), AND its name is not in
-  the self-exclusion list. Path matching normalizes Docker Desktop's `/host_mnt`
-  prefix so it works on both the Linux prod host and a macOS dev box.
+  the self-exclusion list, AND it is not **already managed by us**. Path matching
+  normalizes Docker Desktop's `/host_mnt` prefix so it works on both the Linux
+  prod host and a macOS dev box.
+
+  The already-managed check reads the `homelab.managed=true` label `SpecBuilder`
+  stamps on everything we deploy. It is not redundant with the name-based
+  self-exclusion list: an **adopted** container keeps serving the ORIGINAL data
+  from the ORIGINAL bind under the adoption root, under a name we did not choose
+  — so it matches the in-scope test perfectly and would be offered for adoption
+  again, forever. Adopting an already-adopted container would quiesce and cut over
+  a container the plane itself is running.
 
   We deliberately do NOT use volume-name prefixes for scope: names collide
   (`homelab-iab-*` is the plane's own DB, `homelab-development-*` is a dev
@@ -94,12 +103,26 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   defp default_root(suffix), do: Path.join(System.user_home() || "/root", suffix)
 
   @doc """
-  True if a service (its name + list of mounts) belongs to this homelab and is
-  therefore a candidate for adoption. A mount is `%{source:, target:, type:}`.
+  True if a service (its name + mounts + container labels) belongs to this homelab
+  and is therefore a candidate for adoption. A mount is `%{source:, target:, type:}`.
   """
-  def service_in_scope?(service_name, mounts) when is_list(mounts) do
-    not self_excluded?(service_name) and Enum.any?(mounts, &bind_under_root?/1)
+  def service_in_scope?(service_name, mounts, labels \\ %{}) when is_list(mounts) do
+    not already_managed?(labels) and not self_excluded?(service_name) and
+      Enum.any?(mounts, &bind_under_root?/1)
   end
+
+  @doc """
+  True if this container is one WE deployed — it carries the `homelab.managed`
+  label `SpecBuilder` stamps on every spec it builds.
+
+  This is the only reliable signal for an adopted container: it keeps the original
+  name and the original bind mounts, so nothing about its shape distinguishes it
+  from the unmanaged container it replaced.
+  """
+  def already_managed?(labels) when is_map(labels),
+    do: Map.get(labels, "homelab.managed") == "true"
+
+  def already_managed?(_labels), do: false
 
   defp self_excluded?(name) do
     down = String.downcase(name || "")
@@ -129,10 +152,10 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   default to `:preserve` unless a rebuildable rule (by service+path) or a
   rebuildable volume name matches.
   """
-  @spec classify_mount(String.t(), map(), [map()]) :: classification()
-  def classify_mount(service_name, mount, service_mounts) do
+  @spec classify_mount(String.t(), map(), [map()], map()) :: classification()
+  def classify_mount(service_name, mount, service_mounts, labels \\ %{}) do
     cond do
-      not service_in_scope?(service_name, service_mounts) ->
+      not service_in_scope?(service_name, service_mounts, labels) ->
         %{tier: :out_of_scope, reset_on_update: false}
 
       rule = matching_rule(service_name, mount) ->

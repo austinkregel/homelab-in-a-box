@@ -65,6 +65,49 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     end
   end
 
+  # An ADOPTED container is the adversarial case: it keeps the ORIGINAL name and mounts
+  # the ORIGINAL bind under the adoption root, so it passes every scope test there is.
+  # The label is the only thing that says "this one is already ours".
+  describe "already-managed containers are never re-adopted" do
+    @managed %{"homelab.managed" => "true"}
+
+    test "a container we deployed is out of scope despite a bind under the root" do
+      mounts = [bind("/srv/homelab/appdata/sonarr", "/config")]
+
+      # Same name, same mounts — only the label differs.
+      assert AdoptionPolicy.service_in_scope?("sonarr", mounts)
+      refute AdoptionPolicy.service_in_scope?("sonarr", mounts, @managed)
+    end
+
+    test "an adopted container keeps its original name, so the name list cannot catch it" do
+      mounts = [bind("/srv/homelab/appdata/pg", "/var/lib/postgresql/data")]
+
+      labels = Map.merge(@managed, %{"homelab.adopted" => "true"})
+
+      refute AdoptionPolicy.service_in_scope?("homelab-postgres", mounts, labels)
+    end
+
+    test "its mounts classify as out_of_scope, so no backup gate or sweep applies" do
+      m = bind("/srv/homelab/appdata/pg", "/var/lib/postgresql/data")
+
+      assert %{tier: :out_of_scope} =
+               AdoptionPolicy.classify_mount("homelab-postgres", m, [m], @managed)
+    end
+
+    test "already_managed? keys off the label we stamp, not the name" do
+      assert AdoptionPolicy.already_managed?(@managed)
+      refute AdoptionPolicy.already_managed?(%{"homelab.managed" => "false"})
+      refute AdoptionPolicy.already_managed?(%{"com.docker.compose.project" => "homelab"})
+      refute AdoptionPolicy.already_managed?(%{})
+      refute AdoptionPolicy.already_managed?(nil)
+    end
+
+    test "no labels at all is treated as unmanaged — the old stack has none" do
+      mounts = [bind("/srv/homelab/appdata/sonarr", "/config")]
+      assert AdoptionPolicy.service_in_scope?("sonarr", mounts, %{})
+    end
+  end
+
   describe "default is preserve" do
     test "an unclassified in-scope data dir is preserved" do
       m = bind("/srv/homelab/appdata/homelab-postgres", "/var/lib/postgresql/data")
