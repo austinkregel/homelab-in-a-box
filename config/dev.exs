@@ -79,8 +79,21 @@ config :homelab, HomelabWeb.Endpoint,
     ]
   ]
 
-# Use plain Docker Engine in dev (no Swarm required)
-config :homelab, orchestrator: Homelab.Orchestrators.DockerEngine
+# NOTE: :orchestrator is deliberately NOT pinned here.
+#
+# It used to be pinned to DockerEngine "because dev has no Swarm" — but that made the
+# environment a compile-time fact you had to maintain, and `Config.active_driver/2`
+# reads app env BEFORE Settings, so the pin also silently defeated the Settings
+# dropdown and made every orchestrator-conditional code path (Traefik's provider label,
+# the Swarm cluster panel) render its Engine branch on a Swarm host.
+#
+# It is unnecessary: `Config.orchestrator/0` falls through to `inferred_orchestrator/0`,
+# which asks the daemon whether it is in Swarm mode. A laptop daemon isn't, so dev gets
+# DockerEngine on its own; kratos is, so prod gets DockerSwarm. Nothing to edit, nothing
+# to keep in sync across branches.
+#
+# (config/test.exs still sets it, on purpose — that is how the Mox orchestrator is
+# injected, and tests must never reach a real daemon to find out what they are.)
 
 # Enable dev routes for dashboard and mailbox
 config :homelab, dev_routes: true
