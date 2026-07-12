@@ -64,12 +64,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   # For private (self-hosted registry) images, attach X-Registry-Auth so Swarm
   # distributes the credentials to worker nodes (the `--with-registry-auth`
   # equivalent). Public images get no header.
-  defp registry_auth_opts(image) do
-    case RegistryAuth.for_ref(image) do
-      nil -> []
-      header -> [headers: [header]]
-    end
-  end
+  defp registry_auth_opts(image), do: RegistryAuth.request_opts(image)
 
   # Images built in the Workbench live only in the local image store and have no
   # registry to pull from, so skip the pull for the local-build namespace.
