@@ -20,7 +20,10 @@ defmodule Homelab.Deployments.ConfigFormTest do
           "1" => %{"internal" => "8000", "role" => "web"}
         })
 
-      assert [%{"internal" => "8080", "role" => "other"}, %{"internal" => "8000", "role" => "web"}] =
+      assert [
+               %{"internal" => "8080", "role" => "other"},
+               %{"internal" => "8000", "role" => "web"}
+             ] =
                ports
 
       refute Enum.count(ports, &(&1["role"] == "web")) > 1,

@@ -43,7 +43,8 @@ defmodule Homelab.Catalog.Enrichers.MigrationDetectorTest do
   test "detects Laravel from /app/artisan" do
     stub_probe(["/app/artisan"])
 
-    assert {:ok, %{framework: :laravel, working_dir: "/app"}} = MigrationDetector.detect("some/img")
+    assert {:ok, %{framework: :laravel, working_dir: "/app"}} =
+             MigrationDetector.detect("some/img")
   end
 
   test "detects Rails and Django" do
