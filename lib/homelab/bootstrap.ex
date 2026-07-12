@@ -148,6 +148,40 @@ defmodule Homelab.Bootstrap do
     end
   end
 
+  @doc """
+  Records an explicit orchestrator selection when the database holds none.
+
+  The orchestrator used to be pinned in the application env, which `Config` reads
+  BEFORE Settings — so an instance can have run on Swarm its whole life with nothing
+  written down. Now that the pin is gone (it made the Settings control a no-op, and
+  left no way off Swarm), such an instance would fall back to whatever the default is
+  and quietly disown its running Swarm services.
+
+  So derive the current reality from the daemon and persist it, once. Idempotent: an
+  existing selection — including one the operator just changed — is never touched.
+  """
+  def backfill_orchestrator do
+    case Homelab.Settings.get("orchestrator") do
+      selected when is_binary(selected) and selected != "" ->
+        :ok
+
+      _ ->
+        module =
+          if Homelab.Docker.Network.swarm_active?(),
+            do: Homelab.Orchestrators.DockerSwarm,
+            else: Homelab.Orchestrators.DockerEngine
+
+        driver_id = module.driver_id()
+
+        Logger.info(
+          "Bootstrap: no orchestrator recorded; adopting #{driver_id} from the daemon's swarm state"
+        )
+
+        Homelab.Settings.set("orchestrator", driver_id)
+        :ok
+    end
+  end
+
   defp oidc_configured? do
     present? = fn key -> Homelab.Settings.get(key) not in [nil, ""] end
     present?.("oidc_issuer") and present?.("oidc_client_id")
