@@ -375,12 +375,12 @@ defmodule HomelabWeb.DeploymentLive do
       settings["ports"]
       |> Homelab.Deployments.ConfigForm.parse_ports()
       |> Enum.map(&Map.put(&1, "published", access == "host"))
-      |> mark_routed_port(settings["routed_port"])
 
     attrs = %{
       domain: domain,
       exposure_mode_override: exposure,
       ports_override: if(ports == [], do: nil, else: ports),
+      routed_port: parse_routed_port(settings["routed_port"]),
       proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
       health_check_override: health_override(deployment, settings)
@@ -1075,8 +1075,9 @@ defmodule HomelabWeb.DeploymentLive do
                         <input
                           type="radio"
                           name="settings[routed_port]"
-                          value={idx}
-                          checked={routed_port_index(@settings_ports) == idx}
+                          value={port["internal"]}
+                          checked={checked_routed_port(@deployment, @settings_ports) ==
+                            to_string(port["internal"])}
                           class="radio radio-xs radio-primary"
                         />
                         <span class="text-[10px] text-base-content/40 w-10">route</span>
@@ -1565,37 +1566,32 @@ defmodule HomelabWeb.DeploymentLive do
   defp tls_probe_impl,
     do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
 
-  # Which row the "route here" radio sits on. Mirrors SpecBuilder.primary_port/1 so the
-  # form shows the port Traefik would ACTUALLY use, not a different guess: the explicit
-  # web role, else the first non-optional port, else the first.
-  defp routed_port_index(ports) do
-    Enum.find_index(ports, &(&1["role"] == "web")) ||
-      Enum.find_index(ports, &(&1["optional"] != true)) ||
-      0
+  # Which radio is checked: the port Traefik will ACTUALLY forward to. A stored
+  # routed_port is the operator's decision and wins outright; only a deployment that
+  # has never made one falls back to SpecBuilder's guess (mirrored here so the form
+  # never shows a different port than the one the spec will use).
+  defp checked_routed_port(%{routed_port: port}, _ports) when is_integer(port),
+    do: to_string(port)
+
+  defp checked_routed_port(_deployment, ports) do
+    port =
+      Enum.find(ports, &(&1["role"] == "web")) ||
+        Enum.find(ports, &(&1["optional"] != true)) ||
+        List.first(ports)
+
+    to_string(port && port["internal"])
   end
 
-  # The routed port is the one Traefik's `loadbalancer.server.port` points at — the
-  # port the app actually listens on inside the container. Exactly one port carries
-  # role "web"; without an explicit choice the role is guessed from the port number,
-  # which is wrong for anything on a non-conventional port.
-  defp mark_routed_port(ports, index) when is_binary(index) and index != "" do
-    case Integer.parse(index) do
-      {chosen, _} ->
-        ports
-        |> Enum.with_index()
-        |> Enum.map(fn {port, idx} ->
-          Map.put(port, "role", if(idx == chosen, do: "web", else: demote_web(port["role"])))
-        end)
-
-      :error ->
-        ports
+  # The radio carries the port NUMBER, not its row index -- an index would silently
+  # re-point the proxy at a different port if the rows were ever reordered.
+  defp parse_routed_port(value) when is_binary(value) and value != "" do
+    case Integer.parse(value) do
+      {port, ""} -> port
+      _ -> nil
     end
   end
 
-  defp mark_routed_port(ports, _index), do: ports
-
-  defp demote_web("web"), do: "other"
-  defp demote_web(role), do: role
+  defp parse_routed_port(_value), do: nil
 
   # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
   # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
