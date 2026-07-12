@@ -54,6 +54,45 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "adoption root" do
+    alias Homelab.Deployments.AdoptionPolicy
+
+    # The adoption root is the ONE thing that decides whether discovery sees anything, and
+    # it had no UI -- so a scan that matched nothing looked like "nothing to import" rather
+    # than "you are looking in the wrong place". Its default is System.user_home() <>
+    # "/homelab", which inside the app's own container is /root/homelab: a path no host
+    # bind mount will ever start with.
+    test "the root can be set, and it changes what counts as adoptable", %{conn: conn} do
+      mounts = [%{type: "bind", source: "/home/austin/.homelab/plex/config", target: "/config"}]
+
+      refute AdoptionPolicy.service_in_scope?("plex", mounts),
+             "the default root should not match a real host path"
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      view
+      |> form("#adoption-root-form", adoption: %{"root" => "/home/austin/.homelab"})
+      |> render_submit()
+
+      assert AdoptionPolicy.adoption_root() == "/home/austin/.homelab"
+      assert AdoptionPolicy.service_in_scope?("plex", mounts)
+    end
+
+    test "a relative root is refused rather than silently matching nothing", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html =
+        view
+        |> form("#adoption-root-form", adoption: %{"root" => "~/.homelab"})
+        |> render_submit()
+
+      assert html =~ "absolute host path"
+      assert Homelab.Settings.get_cached("adoption_root") == nil
+    end
+  end
+
   describe "OIDC configuration" do
     @discovery %{
       "issuer" => "https://aut.hair",

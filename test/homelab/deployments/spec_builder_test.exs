@@ -493,6 +493,48 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert volume.source =~ "homelab-"
     end
 
+    # The pre-homelab stack is entirely FOLDER mounts, so a volumes editor that could only
+    # produce named volumes could not express it -- or match it.
+    test "a folder mount becomes a real bind, not a named volume" do
+      tenant = build_tenant()
+      template = build_template(%{volumes: []})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          volumes_override: [
+            %{
+              "container_path" => "/config",
+              "type" => "bind",
+              "source" => "/home/austin/.homelab/plex/config"
+            }
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert [%{type: "bind", source: "/home/austin/.homelab/plex/config", target: "/config"}] =
+               spec.volumes
+    end
+
+    # Docker reads a bare word as a NAMED VOLUME, not a path -- so a typo'd bind source does
+    # not error, it silently creates an empty volume and the app comes up with no data.
+    # Indistinguishable from data loss at a glance, so it must never reach the spec.
+    test "a folder mount with a non-absolute host path is refused" do
+      changeset =
+        Homelab.Deployments.Deployment.changeset(%Homelab.Deployments.Deployment{}, %{
+          tenant_id: 1,
+          app_template_id: 1,
+          volumes_override: [
+            %{"container_path" => "/config", "type" => "bind", "source" => "plex-config"}
+          ]
+        })
+
+      refute changeset.valid?
+
+      assert {message, _} = changeset.errors[:volumes_override]
+      assert message =~ "absolute host path"
+    end
+
     # nil = inherit, [] = deliberately none. Collapsing those is what silently repointed
     # Traefik at port 80 when ports_override was hard-coded to [].
     test "nil inherits the template's volumes; [] means deliberately none" do
