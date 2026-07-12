@@ -19,6 +19,9 @@ defmodule Homelab.Deployments.Deployment do
     field :health_check_override, :map
     # Reverse-proxy options (sticky sessions, &c).
     field :proxy_options, :map, default: %{}
+    # The container port the proxy forwards to. An explicit DECISION, never
+    # inferred -- see SpecBuilder.routed_port/1. nil = fall back to the heuristic.
+    field :routed_port, :integer
     field :computed_spec, :map
     field :last_reconciled_at, :utc_datetime
     field :error_message, :string
@@ -36,8 +39,8 @@ defmodule Homelab.Deployments.Deployment do
   @required_fields ~w(tenant_id app_template_id)a
   @optional_fields ~w(status external_id domain env_overrides ports_override
                       exposure_mode_override resource_limits_override
-                      health_check_override proxy_options computed_spec last_reconciled_at
-                      error_message)a
+                      health_check_override proxy_options routed_port computed_spec
+                      last_reconciled_at error_message)a
 
   def changeset(deployment, attrs) do
     deployment
@@ -45,6 +48,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_required(@required_fields)
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:exposure_mode_override, @exposure_modes)
+    |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
     |> unique_constraint([:tenant_id, :app_template_id])
