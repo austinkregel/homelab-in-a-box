@@ -57,6 +57,9 @@ defmodule Homelab.Catalog.AppTemplate do
     )
     |> validate_length(:slug, min: 2, max: 63)
     |> validate_length(:name, min: 1, max: 255)
+    # A template's volumes are inherited by every deployment of it, so a folder mount
+    # that loses its host `source` here mounts an empty volume for all of them at once.
+    |> Homelab.Deployments.VolumeSpec.validate_changeset(:volumes)
     |> unique_constraint(:slug)
   end
 end

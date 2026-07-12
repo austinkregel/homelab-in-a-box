@@ -2,6 +2,8 @@ defmodule Homelab.Deployments.Deployment do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Homelab.Deployments.VolumeSpec
+
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
   # Same set as AppTemplate.exposure_mode; stored as a string override here so a
   # single deployment can diverge from the (shared) template default.
@@ -55,7 +57,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_inclusion(:exposure_mode_override, @exposure_modes)
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
     |> validate_extra_routes()
-    |> validate_volumes_override()
+    |> VolumeSpec.validate_changeset(:volumes_override)
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
     |> unique_constraint([:tenant_id, :app_template_id])
@@ -104,71 +106,6 @@ defmodule Homelab.Deployments.Deployment do
 
   defp valid_port?(port) when is_integer(port), do: port > 0 and port < 65_536
   defp valid_port?(_port), do: false
-
-  # A volume is either a managed NAMED volume (Docker keeps the data, name derived from
-  # container_path) or a BIND of a host folder (the operator keeps the data where it
-  # already is). Both are legitimate; the existing homelab stack is entirely folder
-  # mounts, and adopting or matching it is impossible without binds.
-  #
-  # container_path must be absolute either way: a named volume's NAME is derived from it
-  # (SpecBuilder.volume_name/3), so a relative one produces a garbage name and silently
-  # mounts the wrong thing.
-  #
-  # A bind additionally needs an absolute host `source`. Docker would happily interpret a
-  # bare word as a NAMED VOLUME rather than a path -- so a typo'd bind source does not
-  # error, it quietly creates an empty volume and the app comes up with no data. That
-  # failure is indistinguishable from data loss at a glance, so it is refused here.
-  #
-  # Two volumes at the same container_path is rejected: Docker takes one and drops the
-  # other, and which one it takes is not something to leave to chance when the answer
-  # decides where an app's data lives.
-  defp validate_volumes_override(changeset) do
-    case get_change(changeset, :volumes_override) do
-      nil ->
-        changeset
-
-      volumes when is_list(volumes) ->
-        paths = Enum.map(volumes, & &1["container_path"])
-
-        changeset
-        |> then(fn cs -> Enum.reduce(volumes, cs, &validate_volume/2) end)
-        |> then(fn cs ->
-          if length(Enum.uniq(paths)) == length(paths),
-            do: cs,
-            else: add_error(cs, :volumes_override, "two volumes cannot mount at the same path")
-        end)
-
-      _ ->
-        add_error(changeset, :volumes_override, "must be a list")
-    end
-  end
-
-  defp validate_volume(vol, changeset) do
-    cond do
-      not valid_container_path?(vol["container_path"]) ->
-        add_error(
-          changeset,
-          :volumes_override,
-          "mount path must be absolute (got #{inspect(vol["container_path"])})"
-        )
-
-      vol["type"] == "bind" and not valid_container_path?(vol["source"]) ->
-        add_error(
-          changeset,
-          :volumes_override,
-          "a folder mount needs an absolute host path (got #{inspect(vol["source"])}) — " <>
-            "Docker reads a bare name as a named volume, so a typo would silently mount an empty one"
-        )
-
-      true ->
-        changeset
-    end
-  end
-
-  defp valid_container_path?(path) when is_binary(path),
-    do: String.starts_with?(path, "/") and String.trim(path) != "/"
-
-  defp valid_container_path?(_path), do: false
 
   @doc "All valid exposure-mode override values (strings)."
   def exposure_modes, do: @exposure_modes
