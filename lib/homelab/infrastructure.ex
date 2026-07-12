@@ -322,7 +322,7 @@ defmodule Homelab.Infrastructure do
         template =
           @system_templates
           |> Map.fetch!("traefik")
-          |> Map.update!(:command, &(&1 ++ acme_cmd))
+          |> Map.update!(:command, &(&1 ++ acme_cmd ++ swarm_provider_cmd()))
           |> Map.put(:env, ["CF_DNS_API_TOKEN=#{token}"])
 
         {:ok, template}
@@ -333,6 +333,25 @@ defmodule Homelab.Infrastructure do
         )
 
         {:error, :dns_token_missing}
+    end
+  end
+
+  # Under Swarm, Traefik reads labels from SERVICES, not from the task containers —
+  # a job the `docker` provider cannot do, since it only ever watches containers.
+  # The Swarm orchestrator puts the traefik.* labels on the service (where Swarm
+  # wants them), so without this provider the tasks Traefik sees carry no labels at
+  # all and a deployment's routers are silently never discovered.
+  #
+  # Gated on the DAEMON's swarm state rather than the selected orchestrator: the
+  # provider talks to the swarm API, so it is exactly usable when swarm is active,
+  # and it costs nothing while no services exist. `providers.docker` stays enabled
+  # alongside it — an adopted stack's containers are still plain containers and
+  # route by container label.
+  defp swarm_provider_cmd do
+    if Homelab.Docker.Network.swarm_active?() do
+      ["--providers.swarm=true", "--providers.swarm.exposedbydefault=false"]
+    else
+      []
     end
   end
 
@@ -543,19 +562,5 @@ defmodule Homelab.Infrastructure do
     :ok
   end
 
-  defp ensure_network(network_name) do
-    case Client.get("/networks/#{network_name}") do
-      {:ok, _} ->
-        :ok
-
-      {:error, {:not_found, _}} ->
-        case Client.post("/networks/create", %{"Name" => network_name, "Driver" => "bridge"}) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, {:network_create_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+  defp ensure_network(network_name), do: Homelab.Docker.Network.ensure(network_name)
 end
