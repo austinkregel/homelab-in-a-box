@@ -7,6 +7,8 @@ defmodule Homelab.Crypto do
   `secret_key_base`. The encoded payload is `Base.encode64(iv <> tag <> ciphertext)`.
   """
 
+  require Logger
+
   @doc "Encrypts `plaintext`, returning a Base64 `iv <> tag <> ciphertext` string."
   def encrypt(plaintext) when is_binary(plaintext) do
     secret = encryption_key()
@@ -18,12 +20,38 @@ defmodule Homelab.Crypto do
     Base.encode64(iv <> tag <> ciphertext)
   end
 
-  @doc "Decrypts a value produced by `encrypt/1`."
+  @doc """
+  Decrypts a value produced by `encrypt/1`, or returns `nil` if it cannot be
+  decrypted with the current key.
+
+  GCM verification fails — and `:crypto` returns the bare atom `:error` rather than
+  raising — whenever `secret_key_base` is not the one the value was encrypted with,
+  which happens if the persisted secret is lost (a recreated `homelab-iab-secrets`
+  volume) or SECRET_KEY_BASE is set to something new. Returning that atom to callers
+  is worse than useless: every caller here expects a binary, so `:error` would sail
+  on to be JSON-encoded as the string "error" and used as a *password*, turning a
+  key mismatch into an unexplainable 401 from a registry. Fail loudly, return nil.
+  """
   def decrypt(encoded) when is_binary(encoded) do
     secret = encryption_key()
     decoded = Base.decode64!(encoded)
     <<iv::binary-16, tag::binary-16, ciphertext::binary>> = decoded
-    :crypto.crypto_one_time_aead(:aes_256_gcm, secret, iv, ciphertext, "", tag, false)
+
+    case :crypto.crypto_one_time_aead(:aes_256_gcm, secret, iv, ciphertext, "", tag, false) do
+      plaintext when is_binary(plaintext) ->
+        plaintext
+
+      :error ->
+        Logger.error("""
+        [Crypto] A stored secret could not be decrypted with the current \
+        secret_key_base. It was encrypted with a different key — most likely the \
+        `homelab-iab-secrets` volume was recreated, or SECRET_KEY_BASE changed. \
+        Secrets saved before that point are unrecoverable and must be re-entered \
+        (Settings → Registries / Identity).\
+        """)
+
+        nil
+    end
   end
 
   defp encryption_key do
