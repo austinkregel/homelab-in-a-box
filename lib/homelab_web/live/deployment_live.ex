@@ -426,10 +426,18 @@ defmodule HomelabWeb.DeploymentLive do
       |> volume_rows_from_params()
       |> Enum.reject(fn vol -> String.trim(vol["container_path"] || "") == "" end)
       |> Enum.map(fn vol ->
-        %{
+        base = %{
           "container_path" => String.trim(vol["container_path"]),
+          "type" => vol["type"],
           "description" => vol["description"] || ""
         }
+
+        # Only a bind carries a source. A named volume's source is DERIVED from its mount
+        # path (SpecBuilder.volume_name/3), so persisting a stale one here would pin the
+        # volume to a path it no longer mounts at.
+        if vol["type"] == "bind",
+          do: Map.put(base, "source", String.trim(vol["source"] || "")),
+          else: base
       end)
 
     case apply_config(deployment, %{volumes_override: volumes}) do
@@ -1582,6 +1590,22 @@ defmodule HomelabWeb.DeploymentLive do
                 :for={{vol, idx} <- Enum.with_index(@volumes_rows)}
                 class="flex items-center gap-2"
               >
+                <select
+                  name={"volumes[#{idx}][type]"}
+                  class="w-32 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2"
+                >
+                  <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
+                  <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
+                </select>
+                <input
+                  :if={vol["type"] == "bind"}
+                  type="text"
+                  name={"volumes[#{idx}][source]"}
+                  value={vol["source"]}
+                  placeholder="/home/you/.homelab/app/data"
+                  class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                />
+                <span :if={vol["type"] == "bind"} class="text-[10px] text-base-content/40">→</span>
                 <input
                   type="text"
                   name={"volumes[#{idx}][container_path]"}
@@ -1590,11 +1614,12 @@ defmodule HomelabWeb.DeploymentLive do
                   class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
                 />
                 <input
+                  :if={vol["type"] != "bind"}
                   type="text"
                   name={"volumes[#{idx}][description]"}
                   value={vol["description"]}
                   placeholder="what it holds (optional)"
-                  class="w-48 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2 text-base-content/60"
+                  class="w-40 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2 text-base-content/60"
                 />
                 <button
                   type="button"
@@ -1617,10 +1642,19 @@ defmodule HomelabWeb.DeploymentLive do
 
               <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2">
                 <p class="text-[11px] text-base-content/70 leading-snug">
-                  Saving recreates the container. A volume's name is derived from its mount
-                  path, so <strong>changing a path does not move the data</strong> — it mounts a
-                  new, empty volume and leaves the old one behind. Removing a row detaches the
-                  volume but does not delete it.
+                  <strong>Managed</strong>
+                  — Docker owns the data in a named volume. Its name is derived from the mount
+                  path, so <strong>changing that path does not move the data</strong>: it mounts
+                  a new, empty volume and leaves the old one behind.
+                </p>
+                <p class="text-[11px] text-base-content/70 leading-snug">
+                  <strong>Folder</strong>
+                  — mounts a host directory you already have; this is how the pre-homelab stack
+                  works. The path is on the <em>host</em>, not inside this container.
+                </p>
+                <p class="text-[11px] text-base-content/70 leading-snug">
+                  Saving recreates the container. Removing a row detaches the volume; it does
+                  not delete it.
                 </p>
               </div>
 
@@ -1881,12 +1915,21 @@ defmodule HomelabWeb.DeploymentLive do
 
   # Volume rows, as the Volumes tab holds them. `target` is the shape a spec-built
   # volume carries; `container_path` the shape the template and the override carry.
+  # A volume is either a managed NAMED volume (Docker owns the data) or a BIND of a host
+  # folder (the data stays where it already is). The existing homelab stack is entirely
+  # folder mounts, so a volumes editor that could only make named volumes could not
+  # express it.
   defp volume_rows(volumes) do
     volumes
     |> List.wrap()
     |> Enum.map(fn vol ->
+      source = vol["source"] || ""
+
       %{
         "container_path" => vol["container_path"] || vol["target"] || "",
+        # An existing volume carrying a source is a bind unless it says otherwise.
+        "type" => vol["type"] || if(source != "", do: "bind", else: "volume"),
+        "source" => source,
         "description" => vol["description"] || ""
       }
     end)
@@ -1900,6 +1943,8 @@ defmodule HomelabWeb.DeploymentLive do
     |> Enum.map(fn {_idx, row} ->
       %{
         "container_path" => row["container_path"] || "",
+        "type" => row["type"] || "volume",
+        "source" => row["source"] || "",
         "description" => row["description"] || ""
       }
     end)
