@@ -6,6 +6,7 @@ defmodule HomelabWeb.SettingsLive do
   alias Homelab.Accounts
   alias Homelab.Docker.Client, as: DockerClient
   alias Homelab.Infrastructure.DaemonFacts
+  alias Homelab.Deployments.AdoptionPolicy
   alias Homelab.Infrastructure.SwarmSettings
 
   @sections [
@@ -206,13 +207,37 @@ defmodule HomelabWeb.SettingsLive do
          |> assign(:import_services, services)
          |> assign(:import_selected, MapSet.new(Enum.map(services, & &1.name)))
          |> assign(:import_plan, nil)
-         |> assign(:import_error, nil)}
+         |> assign(:import_error, nil)
+         |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+         |> assign(:adoption_total, container_total())}
 
       {:error, reason} ->
         {:noreply,
          socket
          |> assign(:import_services, [])
          |> assign(:import_error, "Discovery failed: #{inspect(reason)}")}
+    end
+  end
+
+  # The adoption root is the ONE setting that decides whether discovery sees anything, and
+  # it had no UI at all -- so a scan that matched nothing looked like "you have nothing to
+  # import" rather than "you are looking in the wrong place".
+  #
+  # It is compared against the HOST paths Docker reports for bind mounts, so it must be a
+  # host path. The default is System.user_home() <> "/homelab", which inside this
+  # container resolves to /root/homelab -- a path no host bind will ever start with.
+  def handle_event("save_adoption_root", %{"adoption" => %{"root" => root}}, socket) do
+    root = String.trim(root)
+
+    if String.starts_with?(root, "/") do
+      Settings.set("adoption_root", root, category: "adoption")
+
+      {:noreply,
+       socket
+       |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+       |> put_flash(:info, "Adoption root set to #{root}. Re-scan to discover.")}
+    else
+      {:noreply, put_flash(socket, :error, "The adoption root must be an absolute host path.")}
     end
   end
 
@@ -586,6 +611,8 @@ defmodule HomelabWeb.SettingsLive do
 
   defp load_section_data(socket, "import") do
     socket
+    |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+    |> assign_new(:adoption_total, fn -> nil end)
     |> assign_new(:import_services, fn -> nil end)
     |> assign_new(:import_selected, fn -> MapSet.new() end)
     |> assign_new(:import_plan, fn -> nil end)
@@ -744,6 +771,15 @@ defmodule HomelabWeb.SettingsLive do
   # operator would never think to register.
   defp oidc_redirect_uri do
     HomelabWeb.Endpoint.url() <> "/auth/oidc/callback"
+  end
+
+  # How many containers the scan looked at, so "found nothing" can distinguish "you have
+  # no containers" from "none of your 14 containers matched the root".
+  defp container_total do
+    case DockerClient.get("/containers/json?all=true") do
+      {:ok, list} when is_list(list) -> length(list)
+      _ -> nil
+    end
   end
 
   # Clearing the issuer turns enforcement OFF, which is a legitimate thing to do -- it is
@@ -1975,8 +2011,9 @@ defmodule HomelabWeb.SettingsLive do
         <div>
           <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
           <p class="text-sm text-base-content/50">
-            Discover containers under your existing <code>~/homelab</code>
-            stack and migrate them into managed, plane-owned volumes. Preview the plan, then Apply to run it — your original containers are kept and never deleted.
+            Discover containers whose folders live under the adoption root below, and migrate
+            them into managed, plane-owned volumes. Preview the plan, then Apply — your
+            original containers are kept and never deleted.
           </p>
         </div>
         <button
@@ -1988,11 +2025,57 @@ defmodule HomelabWeb.SettingsLive do
         </button>
       </div>
 
+      <.form
+        for={%{}}
+        as={:adoption}
+        id="adoption-root-form"
+        phx-submit="save_adoption_root"
+        class="rounded-lg bg-base-200/50 p-3 space-y-2"
+      >
+        <label class="block text-xs font-medium text-base-content/70">Adoption root</label>
+        <div class="flex items-center gap-2">
+          <input
+            type="text"
+            name="adoption[root]"
+            value={@adoption_root}
+            placeholder="/home/you/.homelab"
+            class="flex-1 rounded-lg bg-base-100 border-0 text-sm font-mono text-base-content py-2 px-3"
+          />
+          <.button
+            type="submit"
+            label="Save"
+            class="px-3 py-2 rounded-lg bg-base-content/10 text-sm font-medium whitespace-nowrap"
+          />
+        </div>
+        <p class="text-[10px] text-base-content/40 leading-snug">
+          A container is adoptable when one of its <strong>folder mounts</strong>
+          lives under this path. This is a <strong>host</strong>
+          path — it is matched against the source Docker reports, not against anything inside this container. The default
+          (<code>~/homelab</code>) resolves to <code>/root/homelab</code>
+          in here, which no host mount will ever match, so it almost always needs setting.
+        </p>
+      </.form>
+
       <div
         :if={@import_error}
         class="rounded-lg bg-error/10 border border-error/20 p-3 text-sm text-error"
       >
         {@import_error}
+      </div>
+
+      <div
+        :if={@import_services == [] && is_nil(@import_error)}
+        class="rounded-lg bg-warning/10 border border-warning/20 p-3 text-sm text-base-content/80"
+      >
+        <p class="font-medium mb-1">Nothing adoptable found.</p>
+        <p class="text-xs leading-snug">
+          Scanned <strong>{@adoption_total || 0}</strong>
+          container(s); none had a folder mount under <code class="font-mono">{@adoption_root}</code>
+          . Either the root above is wrong, or the old stack's containers no longer exist —
+          adoption reads containers from Docker, not <code>docker-compose.yml</code>
+          files, so a stack that has been <code>compose down</code>ed has nothing left to
+          discover. Bring it back up first; your folders are untouched.
+        </p>
       </div>
 
       <p
