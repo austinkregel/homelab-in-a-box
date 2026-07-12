@@ -17,6 +17,8 @@ defmodule Homelab.Deployments.Deployment do
     field :exposure_mode_override, :string
     field :resource_limits_override, :map
     field :health_check_override, :map
+    # Reverse-proxy options (sticky sessions, &c).
+    field :proxy_options, :map, default: %{}
     field :computed_spec, :map
     field :last_reconciled_at, :utc_datetime
     field :error_message, :string
@@ -34,7 +36,7 @@ defmodule Homelab.Deployments.Deployment do
   @required_fields ~w(tenant_id app_template_id)a
   @optional_fields ~w(status external_id domain env_overrides ports_override
                       exposure_mode_override resource_limits_override
-                      health_check_override computed_spec last_reconciled_at
+                      health_check_override proxy_options computed_spec last_reconciled_at
                       error_message)a
 
   def changeset(deployment, attrs) do
