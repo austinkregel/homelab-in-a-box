@@ -11,7 +11,11 @@ config :homelab,
   ecto_repos: [Homelab.Repo, Homelab.ObanRepo],
   generators: [timestamp_type: :utc_datetime],
   base_domain: "homelab.local",
-  orchestrator: Homelab.Orchestrators.DockerSwarm,
+  # NOTE: :orchestrator is deliberately NOT set here. `Config.active_driver/2` reads
+  # the application env BEFORE Settings, so pinning it would override the operator's
+  # choice in Settings → Orchestrator and make that control a no-op — leaving no way
+  # off Swarm. The selection lives in Settings; `Bootstrap.backfill_orchestrator/0`
+  # records one on first boot. Tests still pin it (config/test.exs) to inject a mock.
   docker_client: Homelab.Docker.ReqClient,
   identity_broker: Homelab.IdentityBrokers.GenericOidc,
   gateway: Homelab.Gateways.Traefik,
