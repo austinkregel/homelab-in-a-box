@@ -4,6 +4,7 @@ defmodule Homelab.Docker.RegistryAuthTest do
   use Homelab.DataCase, async: false
 
   alias Homelab.Docker.RegistryAuth
+  alias Homelab.Settings
 
   setup do
     prev_domain = Application.get_env(:homelab, :base_domain)
@@ -46,12 +47,71 @@ defmodule Homelab.Docker.RegistryAuthTest do
 
     test "returns nil for public images" do
       assert RegistryAuth.for_ref("nginx:latest") == nil
+      # No ghcr_token configured here, so GHCR contributes no credentials either.
       assert RegistryAuth.for_ref("ghcr.io/owner/app:1.0") == nil
     end
 
     test "returns nil when credentials are absent" do
       Application.delete_env(:homelab, :registry_credentials)
       assert RegistryAuth.for_ref("registry.example.com/homelab-built/app:1.0") == nil
+    end
+  end
+
+  # A configured registry driver advertising :pull_auth (GHCR) must also hand its
+  # credentials to the daemon. This was implemented but never called: a private GHCR
+  # package was pulled anonymously and 401'd.
+  describe "for_ref/1 — third-party registries (GHCR)" do
+    # config/test.exs narrows :registries to DockerHub; production carries all three.
+    setup do
+      prev = Application.get_env(:homelab, :registries)
+
+      Application.put_env(:homelab, :registries, [
+        Homelab.Registries.DockerHub,
+        Homelab.Registries.GHCR
+      ])
+
+      on_exit(fn -> restore(:registries, prev) end)
+      :ok
+    end
+
+    defp decode({"X-Registry-Auth", encoded}) do
+      encoded |> Base.url_decode64!(padding: false) |> Jason.decode!()
+    end
+
+    test "authenticates a private GHCR image with the configured token" do
+      Settings.set("ghcr_token", "ghp_secret", encrypt: true)
+
+      auth = RegistryAuth.for_ref("ghcr.io/austinkregel/aut.hair:latest")
+      refute is_nil(auth), "a private GHCR image must be pulled WITH credentials"
+
+      assert %{
+               "username" => "token",
+               "password" => "ghp_secret",
+               "serveraddress" => "ghcr.io"
+             } = decode(auth)
+    end
+
+    test "uses the configured GitHub username when one is set" do
+      Settings.set("ghcr_token", "ghp_secret", encrypt: true)
+      Settings.set("ghcr_username", "austinkregel")
+
+      assert %{"username" => "austinkregel", "password" => "ghp_secret"} =
+               "ghcr.io/austinkregel/aut.hair:latest" |> RegistryAuth.for_ref() |> decode()
+    end
+
+    test "does not leak the GHCR token onto refs that are not GHCR's" do
+      Settings.set("ghcr_token", "ghp_secret", encrypt: true)
+
+      assert RegistryAuth.for_ref("nginx:latest") == nil
+      # A lookalike host that merely starts with the same characters is not ghcr.io.
+      assert RegistryAuth.for_ref("ghcr.io.evil.example/owner/app:1.0") == nil
+    end
+
+    test "the self-hosted registry still wins for its own refs" do
+      Settings.set("ghcr_token", "ghp_secret", encrypt: true)
+
+      assert %{"username" => "bob", "serveraddress" => "registry.example.com"} =
+               "registry.example.com/homelab-built/app:1.0" |> RegistryAuth.for_ref() |> decode()
     end
   end
 end
