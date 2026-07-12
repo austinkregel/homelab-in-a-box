@@ -13,6 +13,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
   @behaviour Homelab.Behaviours.Orchestrator
 
   alias Homelab.Docker.Client
+  alias Homelab.Docker.Network
 
   @impl true
   def driver_id, do: "docker_engine"
@@ -365,21 +366,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   # --- Network Management ---
 
-  defp ensure_network(network_name) do
-    case Client.get("/networks/#{network_name}") do
-      {:ok, _} ->
-        :ok
-
-      {:error, {:not_found, _}} ->
-        case Client.post("/networks/create", %{"Name" => network_name, "Driver" => "bridge"}) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, {:network_create_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+  defp ensure_network(network_name), do: Network.ensure_for_workload(network_name)
 
   defp container_networks(service_id) do
     case Client.get("/containers/#{service_id}/json") do
