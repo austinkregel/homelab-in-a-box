@@ -30,6 +30,8 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_auth, "public")
       |> assign(:settings_ports, [])
       |> assign(:settings_routes, [])
+      |> assign(:volumes_edit_mode, false)
+      |> assign(:volumes_rows, [])
       |> assign(:settings_memory_mb, "")
       |> assign(:settings_cpu_shares, "")
       |> assign(:settings_health_path, "")
@@ -383,6 +385,68 @@ defmodule HomelabWeb.DeploymentLive do
     {:noreply, assign(socket, :settings_ports, ports)}
   end
 
+  def handle_event("start_volumes_edit", _params, socket) do
+    rows = volume_rows(Access.effective_volumes(socket.assigns.deployment))
+
+    {:noreply,
+     socket
+     |> assign(:volumes_edit_mode, true)
+     |> assign(:volumes_rows, rows)}
+  end
+
+  def handle_event("cancel_volumes_edit", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:volumes_edit_mode, false)
+     |> assign(:volumes_rows, [])}
+  end
+
+  # Keep rows in assigns as the user types, so add/remove don't discard edits.
+  def handle_event("volumes_changed", %{"volumes" => volumes}, socket) do
+    {:noreply, assign(socket, :volumes_rows, volume_rows_from_params(volumes))}
+  end
+
+  def handle_event("volumes_changed", _params, socket), do: {:noreply, socket}
+
+  def handle_event("add_volume", _params, socket) do
+    blank = %{"container_path" => "", "description" => ""}
+    {:noreply, assign(socket, :volumes_rows, socket.assigns.volumes_rows ++ [blank])}
+  end
+
+  def handle_event("remove_volume", %{"index" => idx}, socket) do
+    rows = List.delete_at(socket.assigns.volumes_rows, String.to_integer(idx))
+    {:noreply, assign(socket, :volumes_rows, rows)}
+  end
+
+  def handle_event("save_volumes", params, socket) do
+    deployment = socket.assigns.deployment
+
+    volumes =
+      params["volumes"]
+      |> volume_rows_from_params()
+      |> Enum.reject(fn vol -> String.trim(vol["container_path"] || "") == "" end)
+      |> Enum.map(fn vol ->
+        %{
+          "container_path" => String.trim(vol["container_path"]),
+          "description" => vol["description"] || ""
+        }
+      end)
+
+    case apply_config(deployment, %{volumes_override: volumes}) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign_readiness()
+         |> assign(:volumes_edit_mode, false)
+         |> assign(:volumes_rows, [])
+         |> put_flash(:info, "Volumes updated — recreating the container.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
   def handle_event("settings_add_route", _params, socket) do
     blank = %{"path_prefix" => "", "port" => ""}
     {:noreply, assign(socket, :settings_routes, socket.assigns.settings_routes ++ [blank])}
@@ -628,7 +692,6 @@ defmodule HomelabWeb.DeploymentLive do
 
         <%!-- Overview tab --%>
         <div :if={@active_tab == "overview"} class="space-y-4">
-          <.tls_card tls={@tls} domain={@deployment.domain} />
           <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="flex items-center gap-5">
               <div class="w-14 h-14 rounded-lg bg-primary/10 flex items-center justify-center overflow-hidden">
@@ -693,7 +756,7 @@ defmodule HomelabWeb.DeploymentLive do
               </button>
             </div>
           </div>
-
+          <.tls_card tls={@tls} domain={@deployment.domain} />
           <div
             :if={@deployment.status == :failed && @deployment.error_message}
             class="rounded-lg bg-error/10 border border-error/20 px-4 py-3 flex items-start gap-3"
@@ -1486,11 +1549,90 @@ defmodule HomelabWeb.DeploymentLive do
           :if={@active_tab == "volumes"}
           class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
         >
-          <div class="px-4 py-3 border-b border-base-content/5">
+          <div class="px-4 py-3 border-b border-base-content/5 flex items-center justify-between">
             <h3 class="text-sm font-semibold text-base-content">Volumes</h3>
+            <button
+              :if={!@volumes_edit_mode}
+              type="button"
+              phx-click="start_volumes_edit"
+              class="text-xs text-primary hover:underline cursor-pointer"
+            >
+              Edit
+            </button>
+            <button
+              :if={@volumes_edit_mode}
+              type="button"
+              phx-click="cancel_volumes_edit"
+              class="text-xs text-base-content/50 hover:underline cursor-pointer"
+            >
+              Cancel
+            </button>
           </div>
           <div class="p-4">
-            <table class="w-full text-sm">
+            <.form
+              :if={@volumes_edit_mode}
+              for={%{}}
+              as={:volumes}
+              id="volumes-form"
+              phx-change="volumes_changed"
+              phx-submit="save_volumes"
+              class="space-y-3"
+            >
+              <div
+                :for={{vol, idx} <- Enum.with_index(@volumes_rows)}
+                class="flex items-center gap-2"
+              >
+                <input
+                  type="text"
+                  name={"volumes[#{idx}][container_path]"}
+                  value={vol["container_path"]}
+                  placeholder="/var/www/html/storage"
+                  class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                />
+                <input
+                  type="text"
+                  name={"volumes[#{idx}][description]"}
+                  value={vol["description"]}
+                  placeholder="what it holds (optional)"
+                  class="w-48 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2 text-base-content/60"
+                />
+                <button
+                  type="button"
+                  phx-click="remove_volume"
+                  phx-value-index={idx}
+                  class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
+                  aria-label={"Remove volume #{vol["container_path"]}"}
+                >
+                  <.icon name="hero-trash" class="size-3.5" />
+                </button>
+              </div>
+
+              <button
+                type="button"
+                phx-click="add_volume"
+                class="text-xs text-primary hover:underline cursor-pointer"
+              >
+                + Add volume
+              </button>
+
+              <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2">
+                <p class="text-[11px] text-base-content/70 leading-snug">
+                  Saving recreates the container. A volume's name is derived from its mount
+                  path, so <strong>changing a path does not move the data</strong>
+                  — it mounts a
+                  new, empty volume and leaves the old one behind. Removing a row detaches the
+                  volume but does not delete it.
+                </p>
+              </div>
+
+              <.button
+                type="submit"
+                label="Save"
+                class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
+              />
+            </.form>
+
+            <table :if={!@volumes_edit_mode} class="w-full text-sm">
               <thead>
                 <tr class="border-b border-base-content/10">
                   <th class="text-left py-2 font-medium text-base-content/70">Name</th>
@@ -1499,7 +1641,7 @@ defmodule HomelabWeb.DeploymentLive do
               </thead>
               <tbody>
                 <tr
-                  :for={vol <- @deployment.app_template.volumes || []}
+                  :for={vol <- Access.effective_volumes(@deployment)}
                   class="border-b border-base-content/5"
                 >
                   <td class="py-2 font-mono text-base-content/70">
@@ -1512,7 +1654,7 @@ defmodule HomelabWeb.DeploymentLive do
               </tbody>
             </table>
             <p
-              :if={(@deployment.app_template.volumes || []) == []}
+              :if={!@volumes_edit_mode and Access.effective_volumes(@deployment) == []}
               class="text-sm text-base-content/50 py-4"
             >
               No volumes configured.
