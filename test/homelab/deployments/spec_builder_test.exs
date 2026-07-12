@@ -469,6 +469,107 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  describe "extra routes (a second protocol on a second port)" do
+    # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
+    # wss://aut.hair/app -- 443, path /app -- and the HTTP server does not speak the
+    # websocket protocol, so every handshake died on 8000 until /app could be pointed
+    # at 6001.
+    test "a path route reaches a different container port than the app" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      # The websocket route: same host, specific path, DIFFERENT backend port.
+      assert spec.labels["traefik.http.routers.aut-hair-app.rule"] ==
+               "Host(`aut.hair`) && PathPrefix(`/app`)"
+
+      assert spec.labels["traefik.http.services.aut-hair-app.loadbalancer.server.port"] == "6001"
+
+      # ...and the app route is untouched.
+      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "8000"
+    end
+
+    # THE trap. Traefik auto-links a router to a same-named service only while the
+    # workload defines exactly ONE. Add a second and every router must name its service,
+    # or Traefik rejects the whole workload -- so adding a websocket route would take
+    # down the HTTP route that was already working.
+    test "every router names its service, so a second route cannot break the first" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.routers.aut-hair.service"] == "aut-hair"
+      assert spec.labels["traefik.http.routers.aut-hair-app.service"] == "aut-hair-app"
+    end
+
+    # The service label is emitted even with no extra routes, so that ADDING one later is
+    # never the change that breaks routing.
+    test "the base router names its service even when there are no extra routes" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{domain: "aut.hair", extra_routes: []})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["traefik.http.routers.aut-hair.service"] == "aut-hair"
+    end
+
+    # Traefik's default priority IS the rule length, and Host && PathPrefix is strictly
+    # longer than the Host it extends -- so the specific route outranks the catch-all by
+    # construction, with no priority number to keep in sync with a longer domain.
+    test "the path rule is strictly longer than the host rule it must outrank" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      base = spec.labels["traefik.http.routers.aut-hair.rule"]
+      path = spec.labels["traefik.http.routers.aut-hair-app.rule"]
+
+      assert String.length(path) > String.length(base)
+      refute Map.has_key?(spec.labels, "traefik.http.routers.aut-hair-app.priority")
+    end
+
+    test "a nested path becomes a valid router name" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          extra_routes: [%{"path_prefix" => "/apps/events", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.routers.aut-hair-apps-events.rule"] ==
+               "Host(`aut.hair`) && PathPrefix(`/apps/events`)"
+    end
+  end
+
   describe "per-deployment config overrides" do
     test "ports_override wins over the template ports" do
       tenant = build_tenant()

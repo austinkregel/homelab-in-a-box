@@ -1429,6 +1429,61 @@ defmodule HomelabWeb.DeploymentLiveTest do
                reloaded.app_template.ports
     end
 
+    # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
+    # wss://aut.hair/app on 443, so /app must reach 6001 -- the model could only express
+    # one backend port, and every websocket handshake landed on the HTTP server.
+    test "an extra path route persists and reaches a different container port",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+      render_click(view, "settings_add_route")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "proxy",
+          "domain" => "aut.hair",
+          "routes" => %{"0" => %{"path_prefix" => "/app", "port" => "6001"}}
+        }
+      )
+      |> render_submit()
+
+      reloaded = Homelab.Deployments.get_deployment!(dep.id)
+      assert [%{"path_prefix" => "/app", "port" => 6001}] = reloaded.extra_routes
+    end
+
+    test "a half-filled route row is dropped rather than saved broken",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+      render_click(view, "settings_add_route")
+      render_click(view, "settings_add_route")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "proxy",
+          "domain" => "aut.hair",
+          "routes" => %{
+            "0" => %{"path_prefix" => "/app", "port" => "6001"},
+            "1" => %{"path_prefix" => "/half", "port" => ""}
+          }
+        }
+      )
+      |> render_submit()
+
+      reloaded = Homelab.Deployments.get_deployment!(dep.id)
+      assert [%{"path_prefix" => "/app"}] = reloaded.extra_routes
+    end
+
     test "switching to Host ports persists the container->host binding and recreates",
          %{conn: conn, deployment: dep} do
       Homelab.Mocks.Orchestrator
