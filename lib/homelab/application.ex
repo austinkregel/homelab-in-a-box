@@ -21,6 +21,10 @@ defmodule Homelab.Application do
       {DNSCluster, query: Application.get_env(:homelab, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Homelab.PubSub},
       {Task.Supervisor, name: Homelab.Workers.TaskSupervisor, max_children: 10},
+      # Separate from the workers' pool: a TLS probe is per-open-page UI work, and
+      # borrowing the bounded worker supervisor would let a handful of open deployment
+      # pages starve real background jobs.
+      {Task.Supervisor, name: Homelab.TlsProbeSupervisor},
       Homelab.Services.ActivityLog,
       Homelab.MigrationRunner,
       # Oban starts after migrations so its job table exists.
