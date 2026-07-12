@@ -39,9 +39,31 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       case Client.post("/services/create", body, registry_auth_opts(spec.image)) do
         {:ok, %{"ID" => id}} -> {:ok, id}
         {:ok, body} when is_map(body) -> {:ok, body["ID"] || body["id"]}
-        {:error, {:conflict, _}} -> {:error, :already_exists}
+        {:error, {:conflict, _}} -> converge_existing(spec)
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  # A service by this name already exists — a redeploy, or a re-run of the deploy
+  # step. Creating is not the only way to reach the desired state, and bailing out
+  # with :already_exists made the step non-idempotent: nothing handled that error, so
+  # a redeploy simply failed and the service kept its stale spec (stale labels, stale
+  # image). DockerEngine has always converged here by replacing the container; Swarm
+  # can do better and roll the new spec onto the existing service in place.
+  #
+  # Docker accepts a service NAME anywhere it takes an id, so the name from the spec
+  # is enough to find it.
+  defp converge_existing(spec) do
+    require Logger
+    Logger.info("[DockerSwarm] Service #{spec.service_name} exists — updating it in place")
+
+    with :ok <- update(spec.service_name, spec),
+         {:ok, service} <- Client.get("/services/#{spec.service_name}") do
+      {:ok, service["ID"] || service["id"]}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :already_exists}
     end
   end
 
