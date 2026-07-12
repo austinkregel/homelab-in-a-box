@@ -20,9 +20,9 @@ defmodule Homelab.Deployments.SpecBuilder do
     * **Ingress network** (`Infrastructure.internal_network/0`, `homelab-iab-internal`)
       — the shared network Traefik lives on. Only a ROUTED tier (a proxy
       `exposure_mode` WITH a domain, i.e. `traefik.enable=true`) is additionally
-      attached to it, by the orchestrator. The routing label
-      `traefik.docker.network` points here so Traefik resolves the backend over
-      ingress.
+      attached to it, by the orchestrator. The routing label (`traefik.swarm.network`
+      under Swarm, `traefik.docker.network` otherwise — never both) points here so
+      Traefik resolves the backend over ingress.
 
   So: `web` is dual-homed (app net + ingress); `:service` datastores stay on the app
   net only. Sharing a datastore across apps is done by multi-homing it onto the
@@ -335,11 +335,15 @@ defmodule Homelab.Deployments.SpecBuilder do
     base = %{
       "traefik.enable" => "true",
       # A routed workload is multi-homed (its own app network + the ingress
-      # network), so Traefik must be told which one to reach the backend on. The
-      # label is provider-specific and each provider ignores the other's, so both
-      # are emitted: `docker` for standalone containers, `swarm` for services.
-      "traefik.docker.network" => network,
-      "traefik.swarm.network" => network,
+      # network), so Traefik must be told which one to reach the backend on.
+      #
+      # Emit EXACTLY ONE of the provider-specific forms. Traefik does not ignore the
+      # other provider's label — it rejects a workload carrying both outright
+      # ("both Docker and Swarm labels are defined") and skips it, leaving the app
+      # unrouted. Which one is right follows how the workload is deployed: a Swarm
+      # service is discovered by the swarm provider, a plain container by the docker
+      # one.
+      network_label_key() => network,
       "traefik.http.routers.#{router}.rule" => "Host(`#{domain}`)",
       "traefik.http.routers.#{router}.entrypoints" => "web,websecure",
       "traefik.http.routers.#{router}.tls" => "true",
@@ -348,6 +352,16 @@ defmodule Homelab.Deployments.SpecBuilder do
     }
 
     Map.merge(base, exposure_middleware_labels(router, exposure))
+  end
+
+  # Keyed off the ORCHESTRATOR, not the daemon: Traefik runs both providers on a
+  # swarm-enabled daemon, and what decides which one discovers this workload is
+  # whether we deploy it as a Swarm service or as a plain container.
+  defp network_label_key do
+    case Homelab.Config.orchestrator() do
+      Homelab.Orchestrators.DockerSwarm -> "traefik.swarm.network"
+      _ -> "traefik.docker.network"
+    end
   end
 
   defp exposure_middleware_labels(router, "sso_protected") do
