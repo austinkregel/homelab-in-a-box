@@ -42,6 +42,9 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           user: String.t() | nil,
           restart_policy: String.t() | nil,
           managed: boolean(),
+          compose_project: String.t() | nil,
+          compose_service: String.t() | nil,
+          aliases: [String.t()],
           in_scope: boolean(),
           mounts: [mount()]
         }
@@ -60,9 +63,56 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           {:ok, cap} -> [cap]
           _ -> []
         end)
+        |> expand_compose_scope()
 
       {:ok, captures}
     end
+  end
+
+  @doc """
+  Promotes the compose SIBLINGS of any in-scope container into scope.
+
+  Scope is otherwise decided per-container, by "does it have a bind under the adoption
+  root". That is a fine test for the anchor of a stack, and a terrible one for the rest
+  of it: a compose stack's data services routinely have no bind at all — Sail's redis,
+  minio and meilisearch keep everything in named volumes, and mailpit keeps nothing.
+
+  Adopting only the containers that happen to hold a bind therefore HALF-adopts the
+  stack, which is worse than not adopting it. The adopted half moves onto the plane's
+  network, the other half stays on the compose network, and the app loses every sibling
+  it reaches by service name.
+
+  `com.docker.compose.project` is the precise, first-class statement that these
+  containers are one stack. If any member of a project is in scope, they all are — and
+  their mounts are re-tiered accordingly, since a sibling cannot derive its own verdict
+  from its own (bind-less) mounts.
+  """
+  def expand_compose_scope(captures) when is_list(captures) do
+    anchors =
+      captures
+      |> Enum.filter(& &1.in_scope)
+      |> Enum.map(& &1.compose_project)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    Enum.map(captures, fn capture ->
+      cond do
+        capture.in_scope -> capture
+        capture.managed -> capture
+        is_nil(capture.compose_project) -> capture
+        not MapSet.member?(anchors, capture.compose_project) -> capture
+        true -> promote(capture)
+      end
+    end)
+  end
+
+  defp promote(capture) do
+    mounts =
+      Enum.map(capture.mounts, fn m ->
+        Map.merge(m, AdoptionPolicy.tier_for(capture.name, m, true))
+      end)
+
+    %{capture | in_scope: true, mounts: mounts}
   end
 
   @doc "Captures only the in-scope (adoptable) containers."
@@ -109,10 +159,42 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       user: blank_to_nil(Map.get(config, "User")),
       restart_policy: host_config |> Map.get("RestartPolicy", %{}) |> Map.get("Name"),
       managed: AdoptionPolicy.already_managed?(labels),
+      # The stack this container belongs to, and the name its SIBLINGS reach it by.
+      # `compose_service` is the load-bearing one: an app's config says `DB_HOST=mysql`,
+      # not `DB_HOST=marketplace-mysql-1`. Adopting a container renames it, so without
+      # carrying this through as a network alias the stack loses its own DNS.
+      compose_project: blank_to_nil(Map.get(labels, "com.docker.compose.project")),
+      compose_service: blank_to_nil(Map.get(labels, "com.docker.compose.service")),
+      aliases: network_aliases(inspect, labels, name),
       in_scope: in_scope,
       mounts: classified
     }
   end
+
+  # Every name this container answers to on its current networks, so the managed
+  # replacement can answer to them too. Docker's own endpoint aliases first (compose sets
+  # the service name there), then the compose service label, then the container name.
+  defp network_aliases(inspect, labels, name) do
+    endpoint_aliases =
+      inspect
+      |> Map.get("NetworkSettings", %{})
+      |> Kernel.||(%{})
+      |> Map.get("Networks", %{})
+      |> Kernel.||(%{})
+      |> Enum.flat_map(fn {_net, cfg} -> (is_map(cfg) && Map.get(cfg, "Aliases")) || [] end)
+
+    [Map.get(labels, "com.docker.compose.service"), name]
+    |> Enum.concat(endpoint_aliases)
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
+    # A container's own short id shows up as an alias and is meaningless to a replacement.
+    |> Enum.reject(&short_id?(&1, Map.get(inspect, "Id")))
+    |> Enum.uniq()
+  end
+
+  defp short_id?(alias_name, id) when is_binary(id),
+    do: String.starts_with?(id, alias_name) and byte_size(alias_name) >= 8
+
+  defp short_id?(_alias_name, _id), do: false
 
   # Volume mounts: the adoption "source" is the volume NAME (pinned verbatim,
   # including anonymous hash ids); the host `_data` dir is kept as `mountpoint`.

@@ -166,8 +166,21 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   """
   @spec classify_mount(String.t(), map(), [map()], map()) :: classification()
   def classify_mount(service_name, mount, service_mounts, labels \\ %{}) do
+    tier_for(service_name, mount, service_in_scope?(service_name, service_mounts, labels))
+  end
+
+  @doc """
+  Classifies one mount given an ALREADY-DECIDED scope verdict.
+
+  Scope is not always a property of the container alone: a compose sibling is in scope
+  because a *different* container in its project has a bind under the adoption root
+  (see `AdoptionDiscovery.expand_compose_scope/1`). Such a service cannot re-derive its
+  own verdict from its own mounts, so it is handed the answer.
+  """
+  @spec tier_for(String.t(), map(), boolean()) :: classification()
+  def tier_for(service_name, mount, in_scope?) do
     cond do
-      not service_in_scope?(service_name, service_mounts, labels) ->
+      not in_scope? ->
         %{tier: :out_of_scope, reset_on_update: false}
 
       rule = matching_rule(service_name, mount) ->

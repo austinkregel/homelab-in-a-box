@@ -504,6 +504,120 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
       assert cap.name == "homelab-sonarr"
     end
 
+    # A compose stack's data services routinely have NO bind at all — Sail's redis, minio
+    # and meilisearch keep everything in named volumes. Adopting only the containers that
+    # happen to hold a bind half-adopts the stack: the adopted half moves onto the plane's
+    # network, the rest stays behind, and the app loses every sibling it reaches by name.
+    test "a compose sibling with no bind of its own is pulled into scope by its project" do
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        case path do
+          "/containers/json?all=true" ->
+            {:ok, [%{"Id" => "app"}, %{"Id" => "redis"}, %{"Id" => "stranger"}]}
+
+          # The anchor: a bind under the adoption root.
+          "/containers/app/json" ->
+            {:ok,
+             inspect_json(%{
+               "Id" => "app",
+               "Name" => "/marketplace-laravel.test-1",
+               "Config" => %{
+                 "Image" => "marketplace/app",
+                 "User" => "",
+                 "Labels" => %{
+                   "com.docker.compose.project" => "marketplace",
+                   "com.docker.compose.service" => "laravel.test"
+                 }
+               },
+               "Mounts" => [
+                 %{
+                   "Type" => "bind",
+                   "Source" => "/srv/homelab/marketplace",
+                   "Destination" => "/var/www/html",
+                   "RW" => true
+                 }
+               ]
+             })}
+
+          # Same project, no bind — invisible on its own, and holding the real data.
+          "/containers/redis/json" ->
+            {:ok,
+             inspect_json(%{
+               "Id" => "redis",
+               "Name" => "/marketplace-redis-1",
+               "Config" => %{
+                 "Image" => "redis:7",
+                 "User" => "",
+                 "Labels" => %{
+                   "com.docker.compose.project" => "marketplace",
+                   "com.docker.compose.service" => "redis"
+                 }
+               },
+               "Mounts" => [
+                 %{
+                   "Type" => "volume",
+                   "Name" => "marketplace_sail-redis",
+                   "Source" => "/var/lib/docker/volumes/marketplace_sail-redis/_data",
+                   "Destination" => "/data",
+                   "RW" => true
+                 }
+               ]
+             })}
+
+          # A DIFFERENT project, also bind-less. Must NOT be dragged in.
+          "/containers/stranger/json" ->
+            {:ok,
+             inspect_json(%{
+               "Id" => "stranger",
+               "Name" => "/other-redis-1",
+               "Config" => %{
+                 "Image" => "redis:7",
+                 "User" => "",
+                 "Labels" => %{"com.docker.compose.project" => "other"}
+               },
+               "Mounts" => []
+             })}
+        end
+      end)
+
+      assert {:ok, captures} = AdoptionDiscovery.discover_in_scope()
+      names = Enum.map(captures, & &1.name) |> Enum.sort()
+
+      assert names == ["marketplace-laravel.test-1", "marketplace-redis-1"]
+
+      # And the promoted sibling's data is re-tiered — it cannot derive its own verdict
+      # from its own (bind-less) mounts, so it is handed the answer.
+      redis = Enum.find(captures, &(&1.name == "marketplace-redis-1"))
+      assert [%{tier: :preserve, source: "marketplace_sail-redis"}] = redis.mounts
+    end
+
+    test "capture carries the names the rest of the stack reaches it by" do
+      body =
+        inspect_json(%{
+          "Name" => "/marketplace-mysql-1",
+          "Config" => %{
+            "Image" => "mysql:8.4",
+            "User" => "",
+            "Labels" => %{
+              "com.docker.compose.project" => "marketplace",
+              "com.docker.compose.service" => "mysql"
+            }
+          },
+          "NetworkSettings" => %{
+            "Networks" => %{"marketplace_sail" => %{"Aliases" => ["mysql", "abc123def456"]}}
+          }
+        })
+
+      cap = AdoptionDiscovery.capture(body)
+
+      assert cap.compose_project == "marketplace"
+      assert cap.compose_service == "mysql"
+
+      # The app's config says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Both must
+      # survive the rename.
+      assert "mysql" in cap.aliases
+      assert "marketplace-mysql-1" in cap.aliases
+    end
+
     test "capture records whether a container is already ours" do
       body =
         inspect_json(%{
