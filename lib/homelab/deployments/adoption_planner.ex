@@ -71,6 +71,8 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       restart_policy: capture.restart_policy,
       container_id: capture.id || capture.name,
       aliases: Map.get(capture, :aliases, []),
+      command: Map.get(capture, :command),
+      entrypoint: Map.get(capture, :entrypoint),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
@@ -98,7 +100,12 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # The cutover renames the container. Its siblings do not know that: an app's config
       # says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Carry the names it already
       # answers to onto the replacement, or adopting a stack severs its own DNS.
-      network_aliases: Map.get(review, :aliases, [])
+      network_aliases: Map.get(review, :aliases, []),
+      # Run what the original ran. Falling back to the image default is not a safe
+      # default: minio's overridden `command` exits (loud), redis's `--requirepass` does
+      # not (silent -- an unauthenticated redis, reported as adopted).
+      command: Map.get(review, :command),
+      entrypoint: Map.get(review, :entrypoint)
     }
 
     {phase1, phase2} = phases(strategy, name, container, review, targets)

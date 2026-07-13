@@ -31,6 +31,8 @@ defmodule Homelab.Behaviours.Orchestrator do
           # this stays vendor-intent, not an API payload.
           optional(:gpu) => map() | nil,
           optional(:network_aliases) => [String.t()],
+          optional(:command) => [String.t()] | nil,
+          optional(:entrypoint) => [String.t()] | nil,
           optional(:user) => String.t() | nil
         }
 

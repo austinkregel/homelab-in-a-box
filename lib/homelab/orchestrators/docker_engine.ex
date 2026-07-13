@@ -316,7 +316,16 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_user(Map.get(spec, :user))
     |> maybe_put_gpu(Map.get(spec, :gpu))
     |> maybe_put_aliases(spec)
+    |> maybe_put_list("Cmd", Map.get(spec, :command))
+    |> maybe_put_list("Entrypoint", Map.get(spec, :entrypoint))
   end
+
+  # nil = let the image's own default apply. Adoption sets these to what the ORIGINAL
+  # container ran, which a compose file routinely overrides.
+  defp maybe_put_list(payload, _key, nil), do: payload
+  defp maybe_put_list(payload, _key, []), do: payload
+  defp maybe_put_list(payload, key, value) when is_list(value), do: Map.put(payload, key, value)
+  defp maybe_put_list(payload, _key, _value), do: payload
 
   # NetworkMode alone gives the container exactly one name on the network: its own. An
   # adopted container is RENAMED, so its siblings — which reach it by its compose service

@@ -44,6 +44,8 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           managed: boolean(),
           compose_project: String.t() | nil,
           compose_service: String.t() | nil,
+          command: [String.t()] | nil,
+          entrypoint: [String.t()] | nil,
           aliases: [String.t()],
           in_scope: boolean(),
           mounts: [mount()]
@@ -166,6 +168,16 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       compose_project: blank_to_nil(Map.get(labels, "com.docker.compose.project")),
       compose_service: blank_to_nil(Map.get(labels, "com.docker.compose.service")),
       aliases: network_aliases(inspect, labels, name),
+      # What the container actually RUNS. `Config.Cmd` on an inspect is the EFFECTIVE
+      # command — the image's default unless the compose file overrode it — so capturing
+      # it verbatim reproduces the original either way.
+      #
+      # Not capturing it is not a loud failure. minio's `command: minio server ...` is
+      # overridden, and the image default exits immediately (caught). redis's
+      # `--requirepass` is overridden, and the image default comes up FINE — as an
+      # unauthenticated redis, reported as a successful adoption.
+      command: empty_to_nil(Map.get(config, "Cmd")),
+      entrypoint: empty_to_nil(Map.get(config, "Entrypoint")),
       in_scope: in_scope,
       mounts: classified
     }
@@ -225,6 +237,10 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
 
   defp anonymous_volume?(name) when is_binary(name), do: Regex.match?(@anonymous_volume_re, name)
   defp anonymous_volume?(_), do: false
+
+  defp empty_to_nil([]), do: nil
+  defp empty_to_nil(list) when is_list(list), do: list
+  defp empty_to_nil(_value), do: nil
 
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(nil), do: nil

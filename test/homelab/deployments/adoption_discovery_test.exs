@@ -618,6 +618,42 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
       assert "marketplace-mysql-1" in cap.aliases
     end
 
+    # Not capturing the command is not a loud failure, which is what makes it dangerous.
+    # minio's overridden `command` exits immediately and is caught by verify_integrity.
+    # redis's `--requirepass` override does NOT: the image default comes up perfectly
+    # happily, as an UNAUTHENTICATED redis, and the adoption reports success.
+    test "capture records what the container actually runs" do
+      cap =
+        AdoptionDiscovery.capture(
+          inspect_json(%{
+            "Name" => "/marketplace-redis-1",
+            "Config" => %{
+              "Image" => "redis:7.4-alpine",
+              "User" => "",
+              "Cmd" => ["redis-server", "--requirepass", "password", "--protected-mode", "yes"],
+              "Entrypoint" => ["docker-entrypoint.sh"]
+            }
+          })
+        )
+
+      assert cap.command == [
+               "redis-server",
+               "--requirepass",
+               "password",
+               "--protected-mode",
+               "yes"
+             ]
+
+      assert cap.entrypoint == ["docker-entrypoint.sh"]
+    end
+
+    test "no command means the image default, not an empty command" do
+      cap = AdoptionDiscovery.capture(inspect_json(%{"Config" => %{"Image" => "x", "Cmd" => []}}))
+
+      assert cap.command == nil
+      assert cap.entrypoint == nil
+    end
+
     test "capture records whether a container is already ours" do
       body =
         inspect_json(%{

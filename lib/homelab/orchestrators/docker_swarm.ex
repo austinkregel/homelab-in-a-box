@@ -433,7 +433,17 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     base
     |> maybe_put_user(Map.get(spec, :user))
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
+    # Swarm's names are INVERTED relative to the Engine's: ContainerSpec.Command is the
+    # ENTRYPOINT, and ContainerSpec.Args is the command. Swapping them silently runs the
+    # entrypoint as an argument to itself.
+    |> maybe_put_list("Command", Map.get(spec, :entrypoint))
+    |> maybe_put_list("Args", Map.get(spec, :command))
   end
+
+  defp maybe_put_list(spec, _key, nil), do: spec
+  defp maybe_put_list(spec, _key, []), do: spec
+  defp maybe_put_list(spec, key, value) when is_list(value), do: Map.put(spec, key, value)
+  defp maybe_put_list(spec, _key, _value), do: spec
 
   # Preserve an adopted container's uid:gid; omitted for greenfield deploys.
   defp maybe_put_user(spec, user) when is_binary(user) and user != "",

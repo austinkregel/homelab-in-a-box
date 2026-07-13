@@ -24,6 +24,12 @@ defmodule Homelab.Catalog.AppTemplate do
     # renamed by the plane, so without these every sibling that reached it by its compose
     # service name (`DB_HOST=mysql`) silently loses it.
     field :network_aliases, {:array, :string}, default: []
+
+    # What the container RUNS. nil = the image default. A compose file routinely overrides
+    # this, and an adopted service running the image default is not the service that was
+    # adopted -- silently, if the default happens to stay up.
+    field :command, {:array, :string}
+    field :entrypoint, {:array, :string}
     field :ports, {:array, :map}, default: []
     field :resource_limits, :map, default: %{}
     field :backup_policy, :map, default: %{}
@@ -49,7 +55,7 @@ defmodule Homelab.Catalog.AppTemplate do
 
   @required_fields ~w(slug name version image)a
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
-                      volumes network_aliases ports resource_limits backup_policy health_check depends_on
+                      volumes network_aliases command entrypoint ports resource_limits backup_policy health_check depends_on
                       source source_id logo_url category auth_mode user)a
 
   def changeset(app_template, attrs) do

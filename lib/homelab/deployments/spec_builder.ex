@@ -93,6 +93,9 @@ defmodule Homelab.Deployments.SpecBuilder do
         # Extra names this container answers to on its network. Adoption fills these with
         # the original's compose service name, so the rest of the stack keeps resolving it.
         network_aliases: template.network_aliases || [],
+        # nil = the image's default. Adoption sets these to what the original actually ran.
+        command: template.command,
+        entrypoint: template.entrypoint,
         labels: Map.merge(base_labels, routing_labels),
         replicas: 1,
         memory_limit: memory_limit_bytes(Access.effective_resource_limits(deployment)),

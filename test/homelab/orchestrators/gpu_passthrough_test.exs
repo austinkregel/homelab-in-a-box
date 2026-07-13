@@ -85,6 +85,51 @@ defmodule Homelab.Orchestrators.NetworkAliasTest do
     refute Map.has_key?(payload, "NetworkingConfig")
   end
 
+  test "DockerEngine runs what the original ran" do
+    capture_create("/containers/create?name=homelab_dev_adopted-marketplace-mysql-1")
+
+    spec =
+      spec([])
+      |> Map.put(:command, ["redis-server", "--requirepass", "password"])
+      |> Map.put(:entrypoint, ["docker-entrypoint.sh"])
+
+    DockerEngine.deploy(spec)
+
+    assert_received {:payload, payload}
+    assert payload["Cmd"] == ["redis-server", "--requirepass", "password"]
+    assert payload["Entrypoint"] == ["docker-entrypoint.sh"]
+  end
+
+  test "DockerEngine omits Cmd entirely when there is none, so the image default applies" do
+    capture_create("/containers/create?name=homelab_dev_adopted-marketplace-mysql-1")
+
+    DockerEngine.deploy(Map.merge(spec([]), %{command: nil, entrypoint: nil}))
+
+    assert_received {:payload, payload}
+    refute Map.has_key?(payload, "Cmd")
+    refute Map.has_key?(payload, "Entrypoint")
+  end
+
+  # Swarm's names are INVERTED relative to the Engine's: ContainerSpec.Command is the
+  # ENTRYPOINT and Args is the command. Getting this backwards runs the entrypoint as an
+  # argument to itself.
+  test "DockerSwarm maps command -> Args and entrypoint -> Command" do
+    capture_create("/services/create")
+
+    spec =
+      spec([])
+      |> Map.put(:command, ["redis-server", "--requirepass", "password"])
+      |> Map.put(:entrypoint, ["docker-entrypoint.sh"])
+
+    DockerSwarm.deploy(spec)
+
+    assert_received {:payload, payload}
+    container_spec = payload["TaskTemplate"]["ContainerSpec"]
+
+    assert container_spec["Command"] == ["docker-entrypoint.sh"]
+    assert container_spec["Args"] == ["redis-server", "--requirepass", "password"]
+  end
+
   test "DockerSwarm puts the aliases on the primary network only" do
     capture_create("/services/create")
 
