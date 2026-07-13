@@ -253,6 +253,29 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert target["source"] == "/srv/homelab/appdata/pg"
     end
 
+    # Docker Desktop REPORTS a bind's source as /host_mnt/Users/... but only ACCEPTS
+    # /Users/... when creating one. Two things break on the raw value: the backup engine
+    # File.cp_r's it from inside our container, where /host_mnt exists nowhere; and the
+    # daemon reads it back as a NAME, mounting an empty named volume over the data.
+    test "a Docker Desktop /host_mnt path is normalized for both the saga and the mount" do
+      mount = %{
+        preserve_mount()
+        | source: "/host_mnt/srv/homelab/appdata/pg",
+          mountpoint: "/host_mnt/srv/homelab/appdata/pg"
+      }
+
+      plan =
+        AdoptionPlanner.build_plan([review_fixture(%{preserve: [mount]})], strategy: :in_place)
+
+      [service] = plan.services
+      [volume] = service.template_attrs.volumes
+      [target] = hd(plan.phase1).resource_handle["targets"]
+
+      assert volume["source"] == "/srv/homelab/appdata/pg"
+      assert target["source"] == "/srv/homelab/appdata/pg"
+      assert target["path"] == "/srv/homelab/appdata/pg"
+    end
+
     test ":migrate remains the default and is unchanged" do
       plan = AdoptionPlanner.build_plan([review_fixture()])
 

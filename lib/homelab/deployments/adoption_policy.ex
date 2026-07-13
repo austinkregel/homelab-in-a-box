@@ -137,6 +137,18 @@ defmodule Homelab.Deployments.AdoptionPolicy do
 
   defp bind_under_root?(_), do: false
 
+  @doc """
+  Strips Docker Desktop's `/host_mnt` prefix, yielding the path as it exists on the
+  HOST (and therefore as the plane sees it, when the host path is mounted in).
+
+  This is not only a scope-matching concern. The backup and copy engines `File.cp_r`
+  the target path from inside the plane's own container, so a `/host_mnt/...` path
+  handed to them is unreadable — it exists neither on the host nor in the container.
+  Every path that leaves discovery for a filesystem operation must come through here.
+  """
+  def normalize_host_path(path) when is_binary(path), do: strip_host_mount(path)
+  def normalize_host_path(path), do: path
+
   defp strip_host_mount(path) do
     Enum.reduce_while(@host_mount_prefixes, path, fn prefix, acc ->
       if String.starts_with?(acc, prefix <> "/"),

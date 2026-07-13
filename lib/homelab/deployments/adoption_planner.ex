@@ -12,7 +12,7 @@ defmodule Homelab.Deployments.AdoptionPlanner do
   caller (Settings "Import") previews the plan; execution happens in a later step.
   """
 
-  alias Homelab.Deployments.{AdoptionDiscovery, PermanentHome}
+  alias Homelab.Deployments.{AdoptionDiscovery, AdoptionPolicy, PermanentHome}
 
   @doc """
   Discovers in-scope containers and returns a per-service review model, or an error.
@@ -173,10 +173,16 @@ defmodule Homelab.Deployments.AdoptionPlanner do
   # sync TO. An in-place target has no permanent home, and "re-syncing" it would copy the
   # directory onto itself.
   defp target(service, mount, strategy) do
+    # Normalized: the backup and copy engines File.cp_r this path from inside the plane's
+    # own container. Docker Desktop reports a bind's source as `/host_mnt/Users/...`,
+    # which exists neither on the host nor in the container -- handing it to them
+    # verbatim fails the backup gate on every macOS adoption.
+    path = AdoptionPolicy.normalize_host_path(mount.mountpoint || mount.source)
+
     %{
       "name" => service,
-      "path" => mount.mountpoint || mount.source,
-      "source" => mount.mountpoint || mount.source,
+      "path" => path,
+      "source" => path,
       "container_path" => mount.target,
       "tier" => to_string(mount.tier),
       "strategy" => to_string(strategy)
@@ -195,10 +201,21 @@ defmodule Homelab.Deployments.AdoptionPlanner do
   # :in_place — reference exactly what the original container referenced: the host
   # directory for a bind, or the existing named volume for a volume. Either way the
   # managed container mounts the same bytes, and nothing is copied.
+  #
+  # A bind's source is normalized: Docker Desktop REPORTS a bind as `/host_mnt/Users/...`
+  # but only ACCEPTS `/Users/...` when creating the mount. Passing back what it gave us
+  # would have the daemon read `/host_mnt/...` as a name, not a path -- a named volume,
+  # empty, in place of the operator's data.
   defp volume_entry(_service, mount, :in_place) do
+    source =
+      case to_string(mount.type) do
+        "bind" -> AdoptionPolicy.normalize_host_path(mount.source)
+        _ -> mount.source
+      end
+
     %{
       "container_path" => mount.target,
-      "source" => mount.source,
+      "source" => source,
       "type" => to_string(mount.type)
     }
   end
