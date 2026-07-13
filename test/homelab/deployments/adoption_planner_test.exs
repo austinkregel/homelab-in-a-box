@@ -276,6 +276,15 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert target["path"] == "/srv/homelab/appdata/pg"
     end
 
+    test "the managed template keeps the names the rest of the stack calls it by" do
+      review = review_fixture(%{aliases: ["mysql", "marketplace-mysql-1"]})
+      plan = AdoptionPlanner.build_plan([review], strategy: :in_place)
+
+      [service] = plan.services
+
+      assert service.template_attrs.network_aliases == ["mysql", "marketplace-mysql-1"]
+    end
+
     test ":migrate remains the default and is unchanged" do
       plan = AdoptionPlanner.build_plan([review_fixture()])
 

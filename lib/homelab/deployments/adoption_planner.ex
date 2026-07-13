@@ -70,6 +70,7 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       user: capture.user,
       restart_policy: capture.restart_policy,
       container_id: capture.id || capture.name,
+      aliases: Map.get(capture, :aliases, []),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
@@ -93,7 +94,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # Host exposure so the cutover container can bind the original's host ports
       # (spec_builder only binds host ports in :host mode).
       exposure_mode: :host,
-      volumes: Enum.map(review.preserve, &volume_entry(name, &1, strategy))
+      volumes: Enum.map(review.preserve, &volume_entry(name, &1, strategy)),
+      # The cutover renames the container. Its siblings do not know that: an app's config
+      # says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Carry the names it already
+      # answers to onto the replacement, or adopting a stack severs its own DNS.
+      network_aliases: Map.get(review, :aliases, [])
     }
 
     {phase1, phase2} = phases(strategy, name, container, review, targets)

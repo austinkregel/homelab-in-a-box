@@ -20,6 +20,10 @@ defmodule Homelab.Catalog.AppTemplate do
     field :default_env, :map, default: %{}
     field :required_env, {:array, :string}, default: []
     field :volumes, {:array, :map}, default: []
+    # Names this service must keep answering to on its network. An adopted container is
+    # renamed by the plane, so without these every sibling that reached it by its compose
+    # service name (`DB_HOST=mysql`) silently loses it.
+    field :network_aliases, {:array, :string}, default: []
     field :ports, {:array, :map}, default: []
     field :resource_limits, :map, default: %{}
     field :backup_policy, :map, default: %{}
@@ -45,7 +49,7 @@ defmodule Homelab.Catalog.AppTemplate do
 
   @required_fields ~w(slug name version image)a
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
-                      volumes ports resource_limits backup_policy health_check depends_on
+                      volumes network_aliases ports resource_limits backup_policy health_check depends_on
                       source source_id logo_url category auth_mode user)a
 
   def changeset(app_template, attrs) do

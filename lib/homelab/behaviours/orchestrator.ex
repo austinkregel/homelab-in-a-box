@@ -30,6 +30,7 @@ defmodule Homelab.Behaviours.Orchestrator do
           # reserve a generic resource and let a runtime hook do the injection -- so
           # this stays vendor-intent, not an API payload.
           optional(:gpu) => map() | nil,
+          optional(:network_aliases) => [String.t()],
           optional(:user) => String.t() | nil
         }
 
