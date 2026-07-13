@@ -378,7 +378,12 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
 
   describe "deploy/1 — failure branches" do
     test "returns {:error, {:pull_failed, image, reason}} when the image pull fails" do
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      # ...and the daemon does not already hold the image. A pull failure alone is not
+      # fatal when it does — see the locally-built case below.
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/images/" <> _rest, _opts -> {:error, {:not_found, "no such image"}}
+        _path, _opts -> {:ok, %{}}
+      end)
 
       expect(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
         {:error, :timeout}
@@ -386,6 +391,24 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
 
       assert {:error, {:pull_failed, "nginx:latest", :timeout}} =
                DockerEngine.deploy(base_spec())
+    end
+
+    # An ADOPTED container is by definition already running its image, and a stack that
+    # builds its own has no registry to pull from. Failing the pull rolled the cutover
+    # back on an image the daemon was holding the whole time.
+    test "a pull failure is survivable when the daemon already holds the image" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
+        {:error, :unauthorized}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, _body, _opts -> {:ok, %{"Id" => "c123"}}
+        _path, _body, _opts -> {:ok, %{}}
+      end)
+
+      assert {:ok, "c123"} = DockerEngine.deploy(base_spec())
     end
 
     test "propagates a container create failure" do

@@ -121,8 +121,19 @@ defmodule Homelab.Orchestrators.DockerSwarm do
         :ok
 
       {:error, reason} ->
-        Logger.error("[DockerSwarm] Failed to pull image #{image}: #{inspect(reason)}")
-        {:error, {:pull_failed, image, reason}}
+        # See DockerEngine.pull_image/1: an adopted or locally-built image has no registry
+        # to be pulled from, and failing here rolls the cutover back on an image the
+        # daemon is already holding.
+        if Homelab.Docker.Image.present?(image) do
+          Logger.warning(
+            "[DockerSwarm] Could not pull #{image} (#{inspect(reason)}) — using the local image"
+          )
+
+          :ok
+        else
+          Logger.error("[DockerSwarm] Failed to pull image #{image}: #{inspect(reason)}")
+          {:error, {:pull_failed, image, reason}}
+        end
     end
   end
 
@@ -436,7 +447,16 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   defp maybe_put_healthcheck(spec, _healthcheck), do: spec
 
   defp build_networks(spec) do
-    primary = [%{"Target" => spec.network}]
+    # Aliases go on the PRIMARY network only: that is where the rest of an adopted stack
+    # lives, and it is the name its siblings resolve. Putting them on the shared routing
+    # network would let two tenants' services claim the same name.
+    primary = [
+      case Map.get(spec, :network_aliases, []) do
+        [] -> %{"Target" => spec.network}
+        aliases -> %{"Target" => spec.network, "Aliases" => aliases}
+      end
+    ]
+
     bridges = Enum.map(Map.get(spec, :bridge_networks, []), &%{"Target" => &1})
 
     routing =

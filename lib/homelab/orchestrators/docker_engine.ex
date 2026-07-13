@@ -273,8 +273,20 @@ defmodule Homelab.Orchestrators.DockerEngine do
         :ok
 
       {:error, reason} ->
-        Logger.error("[DockerEngine] Failed to pull image #{image}: #{inspect(reason)}")
-        {:error, {:pull_failed, image, reason}}
+        # A pull failure is not fatal if the daemon already holds the image. An ADOPTED
+        # container is by definition running its image, and for any stack that builds its
+        # own there is no registry to pull it from -- so failing here rolled the cutover
+        # back on an image that was sitting in the local store the whole time.
+        if Homelab.Docker.Image.present?(image) do
+          Logger.warning(
+            "[DockerEngine] Could not pull #{image} (#{inspect(reason)}) — using the local image"
+          )
+
+          :ok
+        else
+          Logger.error("[DockerEngine] Failed to pull image #{image}: #{inspect(reason)}")
+          {:error, {:pull_failed, image, reason}}
+        end
     end
   end
 
@@ -303,6 +315,26 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
     |> maybe_put_user(Map.get(spec, :user))
     |> maybe_put_gpu(Map.get(spec, :gpu))
+    |> maybe_put_aliases(spec)
+  end
+
+  # NetworkMode alone gives the container exactly one name on the network: its own. An
+  # adopted container is RENAMED, so its siblings — which reach it by its compose service
+  # name — lose it. Aliases are how it keeps answering to what the rest of the stack calls
+  # it. They must be set at CREATE time: attaching them later means a window in which the
+  # stack's DNS is broken.
+  defp maybe_put_aliases(payload, spec) do
+    case Map.get(spec, :network_aliases, []) do
+      [] ->
+        payload
+
+      aliases ->
+        Map.put(payload, "NetworkingConfig", %{
+          "EndpointsConfig" => %{
+            spec.network => %{"Aliases" => aliases}
+          }
+        })
+    end
   end
 
   # The Engine can pass a device straight through -- the one thing Swarm cannot do at

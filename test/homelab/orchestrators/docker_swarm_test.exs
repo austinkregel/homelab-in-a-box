@@ -393,6 +393,12 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     test "short-circuits with {:pull_failed, ...} when the image pull fails" do
       spec = build_spec()
 
+      # ...and the daemon does not already hold the image.
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/images/" <> _rest, _opts -> {:error, {:not_found, "no such image"}}
+        _path, _opts -> {:ok, %{}}
+      end)
+
       expect(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
         {:error, :nope}
       end)
