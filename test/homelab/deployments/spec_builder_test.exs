@@ -814,4 +814,88 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       refute spec.labels["traefik.enable"]
     end
   end
+
+  describe "GPU" do
+    test "no GPU by default" do
+      tenant = build_tenant()
+      template = build_template()
+      {:ok, spec} = SpecBuilder.build(build_deployment(tenant, template))
+
+      assert spec.gpu == nil
+      refute Map.has_key?(spec.env, "NVIDIA_VISIBLE_DEVICES")
+    end
+
+    test "a GPU request rides in resource_limits — no migration needed" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          resource_limits: %{
+            "memory_mb" => 512,
+            "cpu_shares" => 1024,
+            "gpu" => %{"vendor" => "nvidia"}
+          }
+        })
+
+      {:ok, spec} = SpecBuilder.build(build_deployment(tenant, template))
+
+      assert spec.gpu.vendor == "nvidia"
+      assert spec.gpu.kind == "NVIDIA-GPU"
+      # Memory/CPU still flow — the GPU key rides alongside them, it does not replace them.
+      assert spec.memory_limit == 512 * 1_048_576
+    end
+
+    # Under Swarm this env var is the ONLY thing that puts a device in the container: the
+    # generic-resource reservation just picks the node. Without it the task schedules onto
+    # kratos and starts, with no GPU inside — which surfaces hours later as an inference
+    # error and looks like a broken image.
+    test "sets the vendor's visible-devices var, which is what the runtime hook reads" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{resource_limits: %{"gpu" => %{"vendor" => "nvidia", "devices" => "0"}}})
+
+      {:ok, spec} = SpecBuilder.build(build_deployment(tenant, template))
+
+      assert spec.env["NVIDIA_VISIBLE_DEVICES"] == "0"
+    end
+
+    test "amd gets its own var" do
+      tenant = build_tenant()
+      template = build_template(%{resource_limits: %{"gpu" => %{"vendor" => "amd"}}})
+
+      {:ok, spec} = SpecBuilder.build(build_deployment(tenant, template))
+
+      assert spec.env["AMD_VISIBLE_DEVICES"] == "all"
+    end
+
+    test "an operator's env override still wins — we never clobber a hand-pinned device" do
+      tenant = build_tenant()
+      template = build_template(%{resource_limits: %{"gpu" => %{"vendor" => "nvidia"}}})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          env_overrides: %{"NVIDIA_VISIBLE_DEVICES" => "GPU-45cbf7b3"}
+        })
+
+      {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.env["NVIDIA_VISIBLE_DEVICES"] == "GPU-45cbf7b3"
+    end
+
+    test "a deployment override can add a GPU the template never asked for" do
+      tenant = build_tenant()
+      template = build_template()
+
+      deployment =
+        build_deployment(tenant, template, %{
+          resource_limits_override: %{"memory_mb" => 2048, "gpu" => %{"vendor" => "amd"}}
+        })
+
+      {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.gpu.vendor == "amd"
+      assert spec.memory_limit == 2048 * 1_048_576
+    end
+  end
 end

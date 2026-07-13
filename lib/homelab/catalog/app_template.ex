@@ -60,6 +60,7 @@ defmodule Homelab.Catalog.AppTemplate do
     # A template's volumes are inherited by every deployment of it, so a folder mount
     # that loses its host `source` here mounts an empty volume for all of them at once.
     |> Homelab.Deployments.VolumeSpec.validate_changeset(:volumes)
+    |> Homelab.Deployments.GpuSpec.validate_changeset(:resource_limits)
     |> unique_constraint(:slug)
   end
 end

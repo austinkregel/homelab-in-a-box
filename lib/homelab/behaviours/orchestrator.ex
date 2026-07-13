@@ -24,7 +24,13 @@ defmodule Homelab.Behaviours.Orchestrator do
           optional(:bridge_networks) => [String.t()],
           optional(:ports) => [map()],
           optional(:service_mode) => boolean(),
-          optional(:health_check) => map() | nil
+          optional(:health_check) => map() | nil,
+          # A normalized `Homelab.Deployments.GpuSpec`. Each driver satisfies it with
+          # its OWN mechanism -- Engine passes the device directly, Swarm can only
+          # reserve a generic resource and let a runtime hook do the injection -- so
+          # this stays vendor-intent, not an API payload.
+          optional(:gpu) => map() | nil,
+          optional(:user) => String.t() | nil
         }
 
   @type service_status :: %{

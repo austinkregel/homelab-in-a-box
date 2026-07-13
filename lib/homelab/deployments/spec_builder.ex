@@ -37,6 +37,7 @@ defmodule Homelab.Deployments.SpecBuilder do
 
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Access
+  alias Homelab.Deployments.GpuSpec
 
   @type service_spec :: %{
           service_name: String.t(),
@@ -76,13 +77,15 @@ defmodule Homelab.Deployments.SpecBuilder do
       base_labels = build_labels(template, tenant, deployment)
       routing_labels = build_routing_labels(deployment, Homelab.Infrastructure.internal_network())
 
+      gpu = GpuSpec.parse(Access.effective_resource_limits(deployment))
+
       spec = %{
         service_name: service_name(tenant, template),
         image: template.image,
         # Preserve the adopted container's uid:gid (never chown adopted data). nil
         # for greenfield deploys, which run as the image's default user.
         user: template.user,
-        env: build_env(template, tenant, deployment),
+        env: build_env(template, tenant, deployment, gpu),
         volumes: build_volumes(template, tenant, Access.effective_volumes(deployment)),
         ports: ports,
         network: primary_network,
@@ -91,6 +94,10 @@ defmodule Homelab.Deployments.SpecBuilder do
         replicas: 1,
         memory_limit: memory_limit_bytes(Access.effective_resource_limits(deployment)),
         cpu_limit: cpu_limit_nanocpus(Access.effective_resource_limits(deployment)),
+        # Vendor INTENT, not an API payload: Engine passes the device directly, Swarm
+        # can only reserve a generic resource and let a runtime hook inject it. The
+        # drivers translate. nil = no GPU.
+        gpu: gpu,
         tenant_id: to_string(tenant.id),
         deployment_id: to_string(deployment.id),
         service_mode: service_mode?,
@@ -206,14 +213,28 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> String.replace(~r/[^a-z0-9_.-]/, "_")
   end
 
-  defp build_env(template, tenant, deployment) do
+  defp build_env(template, tenant, deployment, gpu) do
     base_env = template.default_env || %{}
     oidc_env = if template.auth_integration, do: oidc_env_vars(tenant, template), else: %{}
     overrides = deployment.env_overrides || %{}
 
     base_env
     |> Map.merge(oidc_env)
+    |> Map.merge(gpu_env(gpu))
     |> Map.merge(overrides)
+  end
+
+  # The visible-devices var is what the vendor runtime hook actually reads to decide
+  # which GPUs to inject. Under Swarm it is the ONLY injection mechanism (the generic
+  # resource merely schedules the task onto a GPU node), so it is not optional there.
+  #
+  # Merged BEFORE env_overrides, so an operator can still pin a specific device by
+  # hand without us clobbering them on the next save.
+  defp gpu_env(nil), do: %{}
+
+  defp gpu_env(gpu) do
+    {key, value} = GpuSpec.visible_devices_env(gpu)
+    %{key => value}
   end
 
   defp oidc_env_vars(tenant, template) do

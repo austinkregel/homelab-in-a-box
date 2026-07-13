@@ -2,6 +2,7 @@ defmodule Homelab.Deployments.Deployment do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Homelab.Deployments.GpuSpec
   alias Homelab.Deployments.VolumeSpec
 
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
@@ -58,6 +59,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
     |> validate_extra_routes()
     |> VolumeSpec.validate_changeset(:volumes_override)
+    |> GpuSpec.validate_changeset(:resource_limits_override)
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
     |> unique_constraint([:tenant_id, :app_template_id])
