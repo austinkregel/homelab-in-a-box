@@ -12,6 +12,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   alias Homelab.Docker.Client
   alias Homelab.Docker.Network
   alias Homelab.Docker.RegistryAuth
+  alias Homelab.Infrastructure.GpuFacts
 
   # Must match Homelab.Infrastructure's backbone network (namespaced to avoid
   # colliding with an existing stack's `homelab-internal`).
@@ -28,11 +29,15 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
   @impl true
   def deploy(spec) do
-    # Pull FIRST, then ensure the networks immediately before create — same race
-    # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
-    # which a freshly-created (empty) network can be swept by a racing cleanup or
-    # prune before anything attaches to it.
-    with :ok <- pull_image(spec.image),
+    # GPU preflight runs BEFORE the pull: an unschedulable GPU request does not fail in
+    # Swarm, it hangs `pending` forever with an empty error field, and we would otherwise
+    # spend a multi-gigabyte image pull on a task that can never be placed.
+    with :ok <- preflight_gpu(spec),
+         # Pull FIRST, then ensure the networks immediately before create — same race
+         # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
+         # which a freshly-created (empty) network can be swept by a racing cleanup or
+         # prune before anything attaches to it.
+         :ok <- pull_image(spec.image),
          :ok <- ensure_networks(spec) do
       body = build_service_create_payload(spec)
 
@@ -42,6 +47,13 @@ defmodule Homelab.Orchestrators.DockerSwarm do
         {:error, {:conflict, _}} -> converge_existing(spec)
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  defp preflight_gpu(spec) do
+    case GpuFacts.preflight_swarm(Map.get(spec, :gpu)) do
+      :ok -> :ok
+      {:error, message} -> {:error, {:gpu_unschedulable, message}}
     end
   end
 
@@ -350,12 +362,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       "UpdateConfig" => build_update_config(spec),
       "TaskTemplate" => %{
         "ContainerSpec" => build_container_spec(spec),
-        "Resources" => %{
-          "Limits" => %{
-            "MemoryBytes" => spec.memory_limit,
-            "NanoCPUs" => spec.cpu_limit
-          }
-        },
+        "Resources" => build_resources(spec),
         "Networks" => networks,
         "RestartPolicy" => %{
           "Condition" => "on-failure",
@@ -371,6 +378,39 @@ defmodule Homelab.Orchestrators.DockerSwarm do
       "EndpointSpec" => build_endpoint_spec(spec.ports)
     }
     |> maybe_add_mounts(spec)
+  end
+
+  # Swarm CANNOT pass a device. `--device` / `DeviceRequests` are rejected in swarm mode,
+  # and the device-support proposal (moby/swarmkit#2682) has been open since 2018 with no
+  # road map. A GPU is reachable only as a GENERIC RESOURCE the node advertises in its
+  # daemon.json -- and reserving it is *scheduling only*. It picks a node with a free GPU;
+  # it does not put a device in the container. The actual injection is done by the vendor
+  # runtime hook (nvidia-container-runtime / amd-container-runtime), which must be the
+  # node's default-runtime, reading the visible-devices env var SpecBuilder set.
+  #
+  # If the Kind does not match the node's advertisement byte-for-byte, Swarm does not
+  # error -- the task sits pending forever. GpuFacts.preflight_swarm/1 refuses the deploy
+  # before that can happen.
+  defp build_resources(spec) do
+    limits = %{
+      "MemoryBytes" => spec.memory_limit,
+      "NanoCPUs" => spec.cpu_limit
+    }
+
+    case Map.get(spec, :gpu) do
+      nil ->
+        %{"Limits" => limits}
+
+      %{kind: kind, count: count} ->
+        %{
+          "Limits" => limits,
+          "Reservations" => %{
+            "GenericResources" => [
+              %{"DiscreteResourceSpec" => %{"Kind" => kind, "Value" => count}}
+            ]
+          }
+        }
+    end
   end
 
   defp build_container_spec(spec) do

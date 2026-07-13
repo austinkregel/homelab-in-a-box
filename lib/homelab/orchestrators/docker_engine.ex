@@ -14,6 +14,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   alias Homelab.Docker.Client
   alias Homelab.Docker.Network
+  alias Homelab.Deployments.GpuSpec
 
   @impl true
   def driver_id, do: "docker_engine"
@@ -301,6 +302,55 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_exposed_ports(exposed_ports)
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
     |> maybe_put_user(Map.get(spec, :user))
+    |> maybe_put_gpu(Map.get(spec, :gpu))
+  end
+
+  # The Engine can pass a device straight through -- the one thing Swarm cannot do at
+  # all. The two vendors take entirely different routes to it.
+  defp maybe_put_gpu(payload, nil), do: payload
+
+  # NVIDIA goes through the container toolkit's device-request negotiation rather than
+  # a raw device node: the driver injects the libraries and the /dev/nvidia* nodes that
+  # match the requested capability. `Count: -1` is the API's "every GPU".
+  defp maybe_put_gpu(payload, %{vendor: "nvidia"} = gpu) do
+    request =
+      if GpuSpec.specific_devices?(gpu) do
+        %{"Driver" => "nvidia", "DeviceIDs" => GpuSpec.device_ids(gpu)}
+      else
+        %{"Driver" => "nvidia", "Count" => -1}
+      end
+
+    put_in_host_config(payload, "DeviceRequests", [
+      Map.put(request, "Capabilities", [["gpu"]])
+    ])
+  end
+
+  # AMD/ROCm needs no toolkit: the GPU is reachable as two plain device nodes. /dev/kfd
+  # is the compute interface and /dev/dri holds the render nodes; ROCm needs BOTH, and a
+  # container with only one of them fails in a way that looks like a driver bug.
+  #
+  # `devices` cannot narrow this on the Engine -- /dev/dri is a directory and passing it
+  # passes every render node in it. Narrowing is left to AMD_VISIBLE_DEVICES (set on the
+  # spec's env), which the AMD container runtime honors when it is installed. Without
+  # that runtime the container simply sees every GPU, which is the documented ROCm
+  # behaviour and not something we should pretend to have prevented.
+  defp maybe_put_gpu(payload, %{vendor: "amd"}) do
+    devices =
+      Enum.map(["/dev/kfd", "/dev/dri"], fn path ->
+        %{"PathOnHost" => path, "PathInContainer" => path, "CgroupPermissions" => "rwm"}
+      end)
+
+    payload
+    |> put_in_host_config("Devices", devices)
+    # Without membership of the video/render groups the device nodes are present but
+    # unreadable, and ROCm reports "no permission" rather than "no device".
+    |> put_in_host_config("GroupAdd", ["video", "render"])
+  end
+
+  defp maybe_put_gpu(payload, _gpu), do: payload
+
+  defp put_in_host_config(payload, key, value) do
+    Map.update!(payload, "HostConfig", &Map.put(&1, key, value))
   end
 
   # Preserve an adopted container's uid:gid. Omitted for greenfield deploys so the
