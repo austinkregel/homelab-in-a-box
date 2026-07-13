@@ -35,6 +35,11 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:volumes_rows, [])
       |> assign(:settings_memory_mb, "")
       |> assign(:settings_cpu_shares, "")
+      |> assign(:settings_gpu_vendor, "")
+      |> assign(:settings_gpu_count, "")
+      |> assign(:settings_gpu_devices, "")
+      |> assign(:settings_gpu_kind, "")
+      |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
       |> assign(:resource_stats, nil)
@@ -339,6 +344,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_routes, editable_routes(deployment.extra_routes))
      |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
      |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
+     |> assign_gpu_settings(limits)
      |> assign(:settings_health_path, health["path"] || "")
      |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)}
   end
@@ -359,6 +365,15 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_sticky, settings["sticky"] == "true")
      |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
      |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
+     # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
+     # round-trip on every change or picking NVIDIA would collapse the form again.
+     |> assign(:settings_gpu_vendor, settings["gpu_vendor"] || socket.assigns.settings_gpu_vendor)
+     |> assign(:settings_gpu_count, settings["gpu_count"] || socket.assigns.settings_gpu_count)
+     |> assign(
+       :settings_gpu_devices,
+       settings["gpu_devices"] || socket.assigns.settings_gpu_devices
+     )
+     |> assign(:settings_gpu_kind, settings["gpu_kind"] || socket.assigns.settings_gpu_kind)
      |> assign(
        :settings_health_path,
        settings["health_path"] || socket.assigns.settings_health_path
@@ -1366,6 +1381,89 @@ defmodule HomelabWeb.DeploymentLive do
                       />
                     </div>
                   </div>
+
+                  <%!-- GPU. A reservation, not a limit: it decides WHICH NODE the task
+                        lands on, and whether a device is in the container at all. --%>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">GPU</label>
+                      <select
+                        name="settings[gpu_vendor]"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      >
+                        <option value="" selected={@settings_gpu_vendor in [nil, ""]}>None</option>
+                        <option value="nvidia" selected={@settings_gpu_vendor == "nvidia"}>
+                          NVIDIA
+                        </option>
+                        <option value="amd" selected={@settings_gpu_vendor == "amd"}>
+                          AMD (ROCm)
+                        </option>
+                      </select>
+                    </div>
+                    <div :if={@settings_gpu_vendor in ["nvidia", "amd"]} class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">Devices</label>
+                      <input
+                        type="text"
+                        name="settings[gpu_devices]"
+                        value={@settings_gpu_devices}
+                        placeholder="all"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono py-1.5 px-2.5"
+                      />
+                    </div>
+                  </div>
+
+                  <div :if={@settings_gpu_vendor in ["nvidia", "amd"]} class="grid grid-cols-2 gap-3">
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">GPUs to reserve</label>
+                      <input
+                        type="number"
+                        min="1"
+                        name="settings[gpu_count]"
+                        value={@settings_gpu_count}
+                        placeholder="1"
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
+                      />
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <label class="text-[10px] text-base-content/40">
+                        Swarm resource kind
+                      </label>
+                      <input
+                        type="text"
+                        name="settings[gpu_kind]"
+                        value={@settings_gpu_kind}
+                        list="gpu-kinds"
+                        placeholder={Homelab.Deployments.GpuSpec.default_kind(@settings_gpu_vendor)}
+                        class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono py-1.5 px-2.5"
+                      />
+                      <datalist id="gpu-kinds">
+                        <option :for={kind <- @gpu_advertised_kinds} value={kind}></option>
+                      </datalist>
+                    </div>
+                  </div>
+
+                  <div
+                    :if={@settings_gpu_vendor in ["nvidia", "amd"]}
+                    class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2 space-y-1"
+                  >
+                    <p class="text-[11px] text-base-content/70 leading-snug">
+                      <strong>Swarm cannot pass a device.</strong>
+                      A GPU is reachable only as a generic resource the node declares in its
+                      <code class="font-mono">daemon.json</code>
+                      — the reservation decides which node the task lands on, and the vendor
+                      runtime (set as that node's <code class="font-mono">default-runtime</code>)
+                      is what actually puts the device in the container.
+                    </p>
+                    <p :if={@gpu_advertised_kinds == []} class="text-[11px] text-warning leading-snug">
+                      No node in this swarm currently advertises a GPU. Deploying this would
+                      leave the task pending forever, so it will be refused with the exact
+                      <code class="font-mono">daemon.json</code>
+                      change needed.
+                    </p>
+                    <p :if={@gpu_advertised_kinds != []} class="text-[11px] text-base-content/60">
+                      Nodes advertise: {Enum.join(@gpu_advertised_kinds, ", ")}
+                    </p>
+                  </div>
                   <div class="flex flex-col gap-1">
                     <label class="text-[10px] text-base-content/40">Health check path</label>
                     <input
@@ -1977,13 +2075,65 @@ defmodule HomelabWeb.DeploymentLive do
     limits =
       %{
         "memory_mb" => parse_pos_int(settings["memory_mb"]),
-        "cpu_shares" => parse_pos_int(settings["cpu_shares"])
+        "cpu_shares" => parse_pos_int(settings["cpu_shares"]),
+        "gpu" => gpu_override(settings)
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()
 
     if limits == %{}, do: nil, else: limits
   end
+
+  # The advertised kinds come from the CLUSTER, not from our conventions: Swarm matches
+  # the kind byte-for-byte against daemon.json, so offering the operator a guess would be
+  # offering them a task that hangs pending. Read once, on entering edit mode.
+  defp assign_gpu_settings(socket, limits) do
+    gpu = Homelab.Deployments.GpuSpec.parse(limits) || %{}
+
+    kinds =
+      case Homelab.Infrastructure.GpuFacts.advertised_kinds() do
+        {:ok, kinds} -> kinds
+        {:error, _reason} -> []
+      end
+
+    socket
+    |> assign(:settings_gpu_vendor, Map.get(gpu, :vendor, ""))
+    |> assign(:settings_gpu_count, to_string(Map.get(gpu, :count, "")))
+    |> assign(:settings_gpu_devices, Map.get(gpu, :devices, ""))
+    |> assign(:settings_gpu_kind, Map.get(gpu, :kind, ""))
+    |> assign(:gpu_advertised_kinds, kinds)
+  end
+
+  # A GPU is a resource reservation, so it rides in resource_limits — which is already a
+  # free-form map on both schemas, hence no migration. "none" means no GPU, not "inherit":
+  # the whole limits map is a wholesale override, so a half-map would silently drop the
+  # memory limit too.
+  defp gpu_override(settings) do
+    case settings["gpu_vendor"] do
+      vendor when vendor in ["nvidia", "amd"] ->
+        %{
+          "vendor" => vendor,
+          "count" => parse_pos_int(settings["gpu_count"]) || 1,
+          "devices" => blank_default(settings["gpu_devices"], "all"),
+          # Must match the node's daemon.json byte-for-byte under Swarm. Prefilled from
+          # what the cluster actually advertises, not from a convention we hope holds.
+          "kind" =>
+            blank_default(settings["gpu_kind"], Homelab.Deployments.GpuSpec.default_kind(vendor))
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp blank_default(value, default) when is_binary(value) do
+    case String.trim(value) do
+      "" -> default
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_default(_value, default), do: default
 
   # Build the healthcheck override. A blank path inherits the template; a path
   # merges onto the effective check so existing intervals/timeouts are kept.
