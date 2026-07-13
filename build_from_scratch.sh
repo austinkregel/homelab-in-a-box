@@ -54,6 +54,51 @@ for pair in ${HOMELAB_DISKS:-}; do
   echo "==> Exposing disk: ${pair} (read-only)"
 done
 
+# --- Adoption / migration roots -------------------------------------------
+#
+# Adoption does real filesystem work from INSIDE this container: the backup gate
+# File.cp_r's each preserve target, and a :migrate copies it into the managed root.
+# Scope matching is a string compare against the daemon's bind sources, but reading
+# the bytes is not — so every path the saga touches must be mounted here, at the
+# SAME absolute path the daemon reports. Without that, discovery finds the stack and
+# the backup gate then fails on every target.
+#
+#   HOMELAB_ADOPTION_ROOT — host dir delimiting which binds are in scope (read-only:
+#                           we only ever READ the original data; the adopted container
+#                           mounts it itself, via the daemon, not through us).
+#   HOMELAB_MANAGED_ROOT  — where :migrate puts the copy. The daemon device-binds this
+#                           path on the HOST, so it must exist on both sides at the
+#                           same path or the volume mounts empty.
+#   HOMELAB_BACKUP_ROOT   — where the backup gate writes. Defaults to the container's
+#                           temp dir, which does not outlive the container.
+ADOPTION_MOUNT_ARGS=()
+ADOPTION_ENV_ARGS=()
+
+if [ -n "${HOMELAB_ADOPTION_ROOT:-}" ]; then
+  ADOPTION_MOUNT_ARGS+=(-v "${HOMELAB_ADOPTION_ROOT}:${HOMELAB_ADOPTION_ROOT}:ro")
+  ADOPTION_ENV_ARGS+=(-e "HOMELAB_ADOPTION_ROOT=${HOMELAB_ADOPTION_ROOT}")
+  echo "==> Adoption root: ${HOMELAB_ADOPTION_ROOT} (read-only)"
+
+  # A named volume's data lives under the daemon's root, not on the host FS. To back
+  # up (or migrate) a service whose data is a named volume — Laravel Sail's mysql, for
+  # one — we must be able to read the volume's mountpoint.
+  ADOPTION_MOUNT_ARGS+=(-v /var/lib/docker/volumes:/var/lib/docker/volumes:ro)
+fi
+
+if [ -n "${HOMELAB_MANAGED_ROOT:-}" ]; then
+  mkdir -p "${HOMELAB_MANAGED_ROOT}"
+  ADOPTION_MOUNT_ARGS+=(-v "${HOMELAB_MANAGED_ROOT}:${HOMELAB_MANAGED_ROOT}")
+  ADOPTION_ENV_ARGS+=(-e "HOMELAB_MANAGED_ROOT=${HOMELAB_MANAGED_ROOT}")
+  echo "==> Managed root: ${HOMELAB_MANAGED_ROOT}"
+fi
+
+if [ -n "${HOMELAB_BACKUP_ROOT:-}" ]; then
+  mkdir -p "${HOMELAB_BACKUP_ROOT}"
+  ADOPTION_MOUNT_ARGS+=(-v "${HOMELAB_BACKUP_ROOT}:${HOMELAB_BACKUP_ROOT}")
+  ADOPTION_ENV_ARGS+=(-e "HOMELAB_BACKUP_ROOT=${HOMELAB_BACKUP_ROOT}")
+  echo "==> Backup root: ${HOMELAB_BACKUP_ROOT}"
+fi
+
 NETWORK="homelab-iab-internal"
 
 # Anything carrying `homelab.adopted=true` is an ADOPTED user service — e.g. a
@@ -133,6 +178,8 @@ if [ "$MODE" = "prod" ]; then
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v homelab-iab-secrets:/run/secrets \
     ${DISK_MOUNT_ARGS[@]+"${DISK_MOUNT_ARGS[@]}"} \
+    ${ADOPTION_MOUNT_ARGS[@]+"${ADOPTION_MOUNT_ARGS[@]}"} \
+    ${ADOPTION_ENV_ARGS[@]+"${ADOPTION_ENV_ARGS[@]}"} \
     -e HOMELAB_SEED_SETUP=true \
     -e HOMELAB_INSTANCE_NAME="${HOMELAB_INSTANCE_NAME}" \
     -e HOMELAB_BASE_DOMAIN="${HOMELAB_BASE_DOMAIN}" \
@@ -163,6 +210,8 @@ else
     -v "${SCRIPT_DIR}/priv:/app/priv" \
     -v "${SCRIPT_DIR}/assets:/app/assets" \
     ${DISK_MOUNT_ARGS[@]+"${DISK_MOUNT_ARGS[@]}"} \
+    ${ADOPTION_MOUNT_ARGS[@]+"${ADOPTION_MOUNT_ARGS[@]}"} \
+    ${ADOPTION_ENV_ARGS[@]+"${ADOPTION_ENV_ARGS[@]}"} \
     -e HOMELAB_SEED_SETUP=true \
     -e HOMELAB_INSTANCE_NAME="${HOMELAB_INSTANCE_NAME}" \
     -e HOMELAB_BASE_DOMAIN="${HOMELAB_BASE_DOMAIN}" \

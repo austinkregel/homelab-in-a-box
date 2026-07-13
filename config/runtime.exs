@@ -28,6 +28,14 @@ if managed_root = System.get_env("HOMELAB_MANAGED_ROOT") do
   config :homelab, :managed_root, managed_root
 end
 
+# Where the adoption backup gate writes its verified copies. It defaulted to the
+# system temp dir — INSIDE this container — so the one restorable copy standing
+# between an adoption and the operator's data disappeared with the container. Point
+# it at a mounted path that outlives us.
+if backup_root = System.get_env("HOMELAB_BACKUP_ROOT") do
+  config :homelab, :backup_root, backup_root
+end
+
 # The public base domain (e.g. homelab.kregel.dev). Config.base_domain/0 reads
 # this app-env; without it the value was permanently the "homelab.local" default,
 # regardless of HOMELAB_BASE_DOMAIN — which then flowed into deployment domains,
