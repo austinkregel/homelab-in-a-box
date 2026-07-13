@@ -339,6 +339,41 @@ defmodule HomelabWeb.DeployWizardLiveTest do
     end
   end
 
+  # Discovery is best-effort. It must never be able to take the FORM down with it.
+  describe "image inspection that fails" do
+    test "a failed inspection releases the editor instead of freezing it in a skeleton", %{
+      conn: conn,
+      template: template
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      # enrich/2 does not return an error, it RAISES — and the old code pattern-matched
+      # {:ok, _} on it inside an unlinked Task. The exception killed the task silently,
+      # :enrichment_complete never arrived, and @enriching stayed "inspecting" forever.
+      send(view.pid, {:enrichment_failed, %RuntimeError{message: "401 unauthorized"}})
+      html = render(view)
+
+      # The operator gets the form, and is told why it is empty.
+      assert html =~ "Add volume"
+      assert html =~ "configure its ports and volumes by hand"
+      refute html =~ "animate-pulse"
+    end
+
+    test "the editor is reachable even while inspection is still running", %{conn: conn} do
+      # The skeleton stands in for rows we are DISCOVERING, never for the editor: a slow
+      # (or hung) inspection must not leave the operator with no way to add a volume.
+      template = insert(:app_template, slug: "empty-app", volumes: [], ports: [])
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      send(view.pid, {:enrichment_progress, "inspecting"})
+      html = render(view)
+
+      assert html =~ "Add volume"
+      assert html =~ "Add port"
+    end
+  end
+
   describe "volume management" do
     test "add_volume adds a new empty volume entry", %{conn: conn, template: template} do
       {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
@@ -411,6 +446,91 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert [vol] = reloaded.volumes
       assert vol["type"] == "bind"
       assert vol["source"] == "/srv/homelab/app/storage"
+    end
+
+    # Deploy is submitted from the REVIEW step, whose form carries the volumes as hidden
+    # inputs. Those were rebuilt from container_path alone — so a folder mount configured
+    # on the config step was silently downgraded to an empty named volume at the last
+    # possible moment, after the operator had already confirmed it.
+    test "a folder mount survives the review step, where deploy is actually submitted", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      {:ok, updated} =
+        Homelab.Catalog.update_app_template(template, %{
+          volumes: [
+            %{
+              "container_path" => "/var/www/html/storage",
+              "type" => "bind",
+              "source" => "/srv/homelab/app/storage"
+            }
+          ]
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=review&template_id=#{updated.id}")
+
+      html = render(view)
+      assert html =~ ~s(name="volumes[0][type]")
+      assert html =~ ~s(name="volumes[0][source]")
+      assert html =~ "/srv/homelab/app/storage"
+
+      render_submit(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "app.example.com",
+        "exposure_mode" => "public",
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/var/www/html/storage",
+            "type" => "bind",
+            "source" => "/srv/homelab/app/storage"
+          }
+        },
+        "ports" => %{},
+        "env" => %{}
+      })
+
+      {:ok, reloaded} = Homelab.Catalog.get_app_template_by_slug(updated.slug)
+      assert [vol] = reloaded.volumes
+      assert vol["type"] == "bind"
+      assert vol["source"] == "/srv/homelab/app/storage"
+    end
+  end
+
+  # Discovery lands SECONDS after the operator reaches the config step — right when they
+  # are typing. It used to rebuild the env list wholesale from the template, throwing away
+  # everything entered so far. The form appeared to wipe itself, seemingly on whatever
+  # button had just been clicked.
+  describe "discovery landing mid-edit" do
+    test "keeps what the operator typed", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_change(view, "config_changed", %{
+        "env" => %{"0" => %{"key" => "APP_SECRET", "value" => "hunter2"}},
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      assert render(view) =~ "hunter2"
+
+      enriched = %CatalogEntry{
+        name: "TestApp",
+        source: "dockerhub",
+        full_ref: "testapp:latest",
+        required_ports: [],
+        required_volumes: [],
+        # Discovery reports the SAME key, with no value — the image only declares it.
+        default_env: %{},
+        required_env: ["APP_SECRET", "NEWLY_FOUND"]
+      }
+
+      send(view.pid, {:enrichment_complete, enriched})
+      html = render(view)
+
+      # The typed value survives...
+      assert html =~ "hunter2"
+      # ...and a newly-discovered key is still added.
+      assert html =~ "NEWLY_FOUND"
     end
   end
 

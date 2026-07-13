@@ -141,6 +141,30 @@ defmodule HomelabWeb.DeployWizardLive do
 
   defp maybe_prefill_from_domain(socket, _step), do: socket
 
+  # Enrichment runs in an UNLINKED Task, and it used to pattern-match `{:ok, enriched} =`
+  # on the result. An image we cannot inspect -- private, rate-limited, auth-walled, all
+  # ordinary outcomes for a registry SEARCH result -- returns {:error, _}, raising a
+  # MatchError that killed the task silently. No :enrichment_complete ever arrived, so
+  # `@enriching` stayed "inspecting" forever and the ports/volumes cards rendered a
+  # skeleton placeholder in place of their editors, permanently. The operator saw a
+  # shimmering box where the form should be and no way to add anything.
+  #
+  # A failed inspection is a non-event: we simply know nothing extra about the image.
+  # Say so, and give the operator the form.
+  defp enrichment_result(entry, pid) do
+    case MetadataEnricher.enrich(entry, progress: pid) do
+      {:ok, enriched} -> {:enrichment_complete, enriched}
+      other -> {:enrichment_failed, other}
+    end
+  rescue
+    # enrich/2 does not return an error -- it RAISES, somewhere down in the registry
+    # HTTP calls. Which is precisely why the old `{:ok, enriched} =` match was fatal:
+    # the exception took the unlinked Task with it and no message was ever sent.
+    error -> {:enrichment_failed, error}
+  catch
+    :exit, reason -> {:enrichment_failed, {:exit, reason}}
+  end
+
   defp start_enrichment_for_template(template) do
     pid = self()
 
@@ -171,8 +195,7 @@ defmodule HomelabWeb.DeployWizardLive do
         pulls: 0
       }
 
-      {:ok, enriched} = MetadataEnricher.enrich(entry, progress: pid)
-      send(pid, {:enrichment_complete, enriched})
+      send(pid, enrichment_result(entry, pid))
     end)
   end
 
@@ -219,8 +242,7 @@ defmodule HomelabWeb.DeployWizardLive do
     pid = self()
 
     Task.start(fn ->
-      {:ok, enriched} = MetadataEnricher.enrich(entry, progress: pid)
-      send(pid, {:enrichment_complete, enriched})
+      send(pid, enrichment_result(entry, pid))
     end)
 
     socket =
@@ -288,8 +310,7 @@ defmodule HomelabWeb.DeployWizardLive do
             pulls: 0
           }
 
-          {:ok, enriched} = MetadataEnricher.enrich(entry, progress: pid)
-          send(pid, {:enrichment_complete, enriched})
+          send(pid, enrichment_result(entry, pid))
         end)
       end
 
@@ -1001,10 +1022,17 @@ defmodule HomelabWeb.DeployWizardLive do
     if template do
       updated_template = merge_template_with_enrichment(template, enriched_entry)
 
+      # Discovery lands SECONDS after the operator reaches this step, by which time they
+      # may already be typing. Rebuilding the env list wholesale from the template threw
+      # away everything they had entered -- the form appeared to wipe itself for no
+      # reason, mid-keystroke. Ports and volumes were already merged; env was not.
       env_vars =
-        build_env_var_list(
-          updated_template.default_env || %{},
-          updated_template.required_env || []
+        merge_env_vars(
+          socket.assigns.env_vars,
+          build_env_var_list(
+            updated_template.default_env || %{},
+            updated_template.required_env || []
+          )
         )
 
       existing_port_internals = MapSet.new(socket.assigns.ports, fn p -> p["internal"] end)
@@ -1031,13 +1059,10 @@ defmodule HomelabWeb.DeployWizardLive do
       existing_vol_paths =
         MapSet.new(socket.assigns.volumes, fn v -> v["container_path"] || v["path"] end)
 
-      enriched_vols =
-        Enum.map(enriched_entry.required_volumes, fn v ->
-          %{
-            "container_path" => v["path"] || v["container_path"],
-            "description" => v["description"]
-          }
-        end)
+      # Through VolumeSpec: a discovered volume can legitimately carry a type/source (a
+      # compose-derived entry does), and rebuilding it from container_path alone would
+      # downgrade a folder mount to an empty named volume.
+      enriched_vols = VolumeSpec.parse(enriched_entry.required_volumes)
 
       new_vols =
         Enum.reject(enriched_vols, fn v ->
@@ -1062,6 +1087,22 @@ defmodule HomelabWeb.DeployWizardLive do
 
   def handle_info({:enrichment_progress, stage}, socket) do
     {:noreply, assign(socket, :enriching, stage)}
+  end
+
+  # Discovery failed. That is not a deploy failure -- it just means we learned nothing
+  # extra about the image, and the operator configures it by hand. Clearing :enriching is
+  # what releases the ports/volumes editors from their skeleton state.
+  def handle_info({:enrichment_failed, reason}, socket) do
+    require Logger
+    Logger.info("[DeployWizard] Image inspection failed, configure by hand: #{inspect(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:enriching, nil)
+     |> put_flash(
+       :info,
+       "Couldn't inspect that image — configure its ports and volumes by hand below."
+     )}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -1681,9 +1722,9 @@ defmodule HomelabWeb.DeployWizardLive do
               <.icon name="hero-signal-mini" class="size-4 text-info" /> Ports
               <.section_enrichment_badge stage={@enriching} affects="inspecting" />
             </h3>
-            <%= if @enriching == "inspecting" && @ports == [] do %>
-              <.skeleton_rows count={2} />
-            <% else %>
+            <%!-- Placeholder for rows still being discovered — never for the editor. --%>
+            <.skeleton_rows :if={@enriching == "inspecting" && @ports == []} count={2} />
+            <div>
               <p
                 :if={@exposure_mode == "host"}
                 class="text-[11px] text-base-content/40 mb-2 leading-snug"
@@ -1782,7 +1823,7 @@ defmodule HomelabWeb.DeployWizardLive do
                   <.icon name="hero-plus-mini" class="size-3.5" /> Add port
                 </button>
               </div>
-            <% end %>
+            </div>
           </div>
 
           <%!-- Volumes --%>
@@ -1797,9 +1838,12 @@ defmodule HomelabWeb.DeployWizardLive do
               <.icon name="hero-circle-stack-mini" class="size-4 text-secondary" /> Volumes
               <.section_enrichment_badge stage={@enriching} affects="inspecting" />
             </h3>
-            <%= if @enriching == "inspecting" && @volumes == [] do %>
-              <.skeleton_rows count={1} />
-            <% else %>
+            <%!-- The skeleton stands in for rows we are still DISCOVERING; it must never
+                  stand in for the editor itself. Gating the whole card on enrichment left
+                  an operator staring at a shimmer with no way to add a volume, and if
+                  enrichment never finished, that was permanent. --%>
+            <.skeleton_rows :if={@enriching == "inspecting" && @volumes == []} count={1} />
+            <div>
               <div class="space-y-2">
                 <div
                   :for={{vol, idx} <- Enum.with_index(@volumes)}
@@ -1882,7 +1926,7 @@ defmodule HomelabWeb.DeployWizardLive do
                   <.icon name="hero-plus-mini" class="size-3.5" /> Add volume
                 </button>
               </div>
-            <% end %>
+            </div>
           </div>
         </div>
 
@@ -2569,6 +2613,16 @@ defmodule HomelabWeb.DeployWizardLive do
                   name={"volumes[#{idx}][container_path]"}
                   value={vol["path"] || vol["container_path"] || ""}
                 />
+                <%!-- type/source must ride along. Deploy is submitted from THIS form, so
+                      a folder mount configured on the previous step died right here: the
+                      hidden inputs rebuilt it from container_path alone and SpecBuilder
+                      then minted an empty named volume in its place. --%>
+                <input type="hidden" name={"volumes[#{idx}][type]"} value={vol["type"] || ""} />
+                <input
+                  type="hidden"
+                  name={"volumes[#{idx}][source]"}
+                  value={vol["source"] || ""}
+                />
                 <input
                   type="hidden"
                   name={"volumes[#{idx}][description]"}
@@ -2580,6 +2634,9 @@ defmodule HomelabWeb.DeployWizardLive do
                   value={to_string(vol["optional"] || false)}
                 />
                 <.icon name="hero-circle-stack-mini" class="size-2.5 text-secondary" />
+                <span :if={vol["type"] == "bind"} class="text-base-content/40">
+                  {vol["source"]} →
+                </span>
                 {vol["path"] || vol["container_path"]}
               </span>
             </div>
@@ -2748,6 +2805,20 @@ defmodule HomelabWeb.DeployWizardLive do
               type="hidden"
               name={"volumes[#{idx}][container_path]"}
               value={vol["path"] || vol["container_path"] || ""}
+            />
+            <%!-- Same as the review form: without these, deploying from Visual mode
+                  silently downgrades every folder mount to an empty named volume. --%>
+            <input
+              :for={{vol, idx} <- Enum.with_index(@volumes)}
+              type="hidden"
+              name={"volumes[#{idx}][type]"}
+              value={vol["type"] || ""}
+            />
+            <input
+              :for={{vol, idx} <- Enum.with_index(@volumes)}
+              type="hidden"
+              name={"volumes[#{idx}][source]"}
+              value={vol["source"] || ""}
             />
             <input
               :for={env <- @env_vars}
@@ -3004,6 +3075,30 @@ defmodule HomelabWeb.DeployWizardLive do
     merge_indexed(existing, params, fn row, p ->
       row |> put_present(p, "key") |> put_present(p, "value")
     end)
+  end
+
+  # What the operator typed WINS over what discovery found. A discovered key they have
+  # not touched is added; a discovered key they HAVE filled in keeps their value. A key
+  # they added themselves is never dropped just because the image did not mention it.
+  defp merge_env_vars(existing, discovered) do
+    typed = MapSet.new(existing, & &1["key"])
+
+    new_keys = Enum.reject(discovered, &MapSet.member?(typed, &1["key"]))
+
+    # Carry `required` forward from discovery so a newly-known required var still
+    # announces itself, without touching the value.
+    required = MapSet.new(discovered, & &1["key"])
+
+    existing
+    |> Enum.map(fn env ->
+      if MapSet.member?(required, env["key"]) do
+        found = Enum.find(discovered, &(&1["key"] == env["key"]))
+        Map.put(env, "required", found["required"] || env["required"] || false)
+      else
+        env
+      end
+    end)
+    |> Kernel.++(new_keys)
   end
 
   defp merge_indexed(existing, params, fun) when is_map(params) and is_list(existing) do
