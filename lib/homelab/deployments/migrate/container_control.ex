@@ -106,7 +106,18 @@ defmodule Homelab.Deployments.Migrate.ContainerControl do
         end
 
       for %{"HostPort" => host_port} <- host_list || [], host_port not in [nil, ""] do
-        %{"internal" => port, "external" => host_port, "protocol" => proto}
+        # `published: true` is not decoration. SpecBuilder.bind_host_ports/1 binds only the
+        # ports carrying it, so without it every imported binding was silently dropped and
+        # the adopted service came up unreachable on the very ports it used to serve.
+        #
+        # A port we read out of the original's HostConfig.PortBindings is, by definition,
+        # one the operator published on the host.
+        %{
+          "internal" => port,
+          "external" => host_port,
+          "protocol" => proto,
+          "published" => true
+        }
       end
     end)
   end

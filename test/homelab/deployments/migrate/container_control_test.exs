@@ -94,7 +94,16 @@ defmodule Homelab.Deployments.Migrate.ContainerControlTest do
       end)
 
       assert {:ok, bindings} = ContainerControl.port_bindings("c1")
-      assert %{"internal" => "5432", "external" => "5432", "protocol" => "tcp"} in bindings
+      # `published` is load-bearing: SpecBuilder binds only the ports carrying it, so an
+      # imported binding without it is silently dropped and the adopted service comes up
+      # unreachable. A port read out of the original's HostConfig.PortBindings IS published.
+      assert %{
+               "internal" => "5432",
+               "external" => "5432",
+               "protocol" => "tcp",
+               "published" => true
+             } in bindings
+
       refute Enum.any?(bindings, &(&1["internal"] == "9000"))
     end
 

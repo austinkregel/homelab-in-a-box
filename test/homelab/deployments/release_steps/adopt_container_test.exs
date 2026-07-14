@@ -46,7 +46,9 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
     @impl true
     def port_bindings(id) do
       send(pid(), {:port_bindings, id})
-      {:ok, [%{"internal" => "5432", "external" => "5432", "protocol" => "tcp"}]}
+
+      {:ok,
+       [%{"internal" => "5432", "external" => "5432", "protocol" => "tcp", "published" => true}]}
     end
 
     defp pid, do: Application.get_env(:homelab, :adopt_test_pid)
@@ -209,6 +211,27 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
     # No permanent home was created, and the original data is untouched.
     refute File.exists?(PermanentHome.backing_dir("homelab-pg", "/var/lib/postgresql/data"))
     assert File.read!(Path.join(src, "data.txt")) == "important"
+  end
+
+  # SpecBuilder binds only the ports flagged `published`. An imported binding that loses
+  # the flag is silently dropped, and the adopted service comes up unreachable on the very
+  # ports it used to serve — with nothing anywhere saying so.
+  test "an imported host port is actually bound on the replacement", %{
+    deployment: deployment,
+    targets: targets
+  } do
+    test_pid = self()
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec ->
+      send(test_pid, {:spec_ports, spec.ports})
+      {:ok, "new-managed-id"}
+    end)
+
+    {s, ctx} = step(deployment, targets)
+    assert {:ok, _handle} = AdoptContainer.run(s, ctx)
+
+    assert_received {:spec_ports, ports}
+    assert [%{internal: "5432", external: "5432"}] = ports
   end
 
   defmodule ExplodingEngine do
