@@ -107,7 +107,7 @@ defmodule Homelab.Deployments.SpecBuilder do
 
       spec = %{
         service_name: service_name(tenant, template),
-        image: template.image,
+        image: Access.effective_image(deployment),
         # Preserve the adopted container's uid:gid (never chown adopted data). nil
         # for greenfield deploys, which run as the image's default user.
         user: template.user,
