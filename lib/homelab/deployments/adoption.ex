@@ -49,7 +49,8 @@ defmodule Homelab.Deployments.Adoption do
     steps = service.phase1 ++ service.phase2
 
     with {:ok, template} <- upsert_template(service.template_attrs),
-         {:ok, deployment} <- get_or_create_deployment(tenant_id, template.id),
+         {:ok, deployment} <-
+           get_or_create_deployment(tenant_id, template.id, service[:deployment_attrs] || %{}),
          :ok <- ensure_no_active_release(deployment.id),
          {:ok, release} <- plan(deployment, steps, service) do
       # Enqueue after the release is committed (Oban lives on ObanRepo; the worker
@@ -66,18 +67,23 @@ defmodule Homelab.Deployments.Adoption do
     end
   end
 
-  defp get_or_create_deployment(tenant_id, app_template_id) do
+  defp get_or_create_deployment(tenant_id, app_template_id, attrs) do
     case Repo.get_by(Deployment, tenant_id: tenant_id, app_template_id: app_template_id) do
       nil ->
-        Deployments.create_deployment(%{
-          tenant_id: tenant_id,
-          app_template_id: app_template_id,
-          status: :pending
-        })
+        Deployments.create_deployment(
+          Map.merge(attrs, %{
+            tenant_id: tenant_id,
+            app_template_id: app_template_id,
+            status: :pending
+          })
+        )
 
       %Deployment{status: :running, external_id: ext} = _dep when is_binary(ext) ->
         {:error, :already_adopted}
 
+      # A re-run reuses the existing row rather than reapplying `attrs`. The captured
+      # properties describe the ORIGINAL container, and by now the operator may have
+      # deliberately changed them -- a re-run should not quietly revert that.
       %Deployment{} = dep ->
         {:ok, dep}
     end

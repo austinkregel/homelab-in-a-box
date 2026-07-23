@@ -114,10 +114,34 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     {phase1, phase2} = phases(strategy, name, container, review, targets)
 
     %{
-      service: %{name: name, template_attrs: template_attrs, targets: targets},
+      service: %{
+        name: name,
+        template_attrs: template_attrs,
+        deployment_attrs: deployment_attrs(review),
+        targets: targets
+      },
       phase1: phase1,
       phase2: phase2
     }
+  end
+
+  # Per-DEPLOYMENT properties of the original, as distinct from what the template
+  # describes. The restart policy was already captured off the live container and then
+  # dropped on the floor, so adopting an `always` container silently downgraded it to
+  # the platform default of on-failure/3 -- and the operator found out at the next host
+  # reboot, when a service that used to come back did not.
+  #
+  # `"no"` is carried through like any other policy, NOT treated as "unset". A one-shot
+  # container that is supposed to run once and stay stopped would, under the platform
+  # default of on-failure/3, restart-loop instead -- the same class of mistake as
+  # falling back to an image's default command.
+  #
+  # Only a genuinely absent policy keeps the platform default.
+  defp deployment_attrs(review) do
+    case Map.get(review, :restart_policy) do
+      policy when policy in [nil, ""] -> %{}
+      policy -> %{restart_policy_override: policy}
+    end
   end
 
   # :migrate copies the bytes first (phase 1), while the old stack stays up, then cuts
