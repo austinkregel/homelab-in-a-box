@@ -427,6 +427,50 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert {:ok, "svc_net"} = DockerSwarm.deploy(spec)
     end
 
+    # A task in the host's namespace has no endpoint on any overlay, so `host` is the
+    # only network it can name — and `host` is predefined, so nothing is created for it.
+    test "a host-network service attaches to `host` and to nothing else" do
+      spec =
+        build_spec()
+        |> Map.put(:host_network, true)
+        |> Map.put(:network, "host")
+        |> Map.put(:network_aliases, ["mysql"])
+        |> put_in([:labels, "traefik.enable"], "true")
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        assert get_in(body, ["TaskTemplate", "Networks"]) == [%{"Target" => "host"}]
+        {:ok, %{"ID" => "svc_host"}}
+      end)
+
+      assert {:ok, "svc_host"} = DockerSwarm.deploy(spec)
+    end
+
+    test "never tries to create the predefined host network" do
+      test_pid = self()
+
+      spec = build_spec() |> Map.put(:host_network, true) |> Map.put(:network, "host")
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        send(test_pid, {:get, path})
+        {:ok, %{"Swarm" => %{"LocalNodeState" => "active", "ControlAvailable" => true}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/networks/create", body, _opts ->
+          flunk("must not create a predefined network: #{inspect(body)}")
+
+        "/services/create", _body, _opts ->
+          {:ok, %{"ID" => "svc"}}
+      end)
+
+      assert {:ok, "svc"} = DockerSwarm.deploy(spec)
+      refute_received {:get, "/networks/host"}
+    end
+
     test "creates every missing network as an ATTACHABLE OVERLAY before creating the service" do
       test_pid = self()
 
