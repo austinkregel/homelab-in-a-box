@@ -7,6 +7,22 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
 
   alias Homelab.Deployments.{Access, Deployment, SpecBuilder}
 
+  # SpecBuilder reaches Config.base_domain/0, which falls through to Settings and the
+  # DB when no app-env override is set. These are pure struct-in/spec-out tests with no
+  # sandbox connection, so pin it rather than depending on another file having done so.
+  setup do
+    previous = Application.get_env(:homelab, :base_domain)
+    Application.put_env(:homelab, :base_domain, "test.local")
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:homelab, :base_domain, previous),
+        else: Application.delete_env(:homelab, :base_domain)
+    end)
+
+    :ok
+  end
+
   defp tenant do
     %Homelab.Tenants.Tenant{id: 1, slug: "friends", name: "Friends", status: :active, settings: %{}}
   end
