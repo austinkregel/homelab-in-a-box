@@ -105,9 +105,13 @@ defmodule Homelab.Networking do
     |> Repo.insert()
   end
 
+  @doc """
+  Edits an existing zone. Uses `DnsZone.update_changeset/2`, which holds `name`
+  immutable — the records and domains scoped to this zone all hang off that name.
+  """
   def update_dns_zone(%DnsZone{} = zone, attrs) do
     zone
-    |> DnsZone.changeset(attrs)
+    |> DnsZone.update_changeset(attrs)
     |> Repo.update()
   end
 
