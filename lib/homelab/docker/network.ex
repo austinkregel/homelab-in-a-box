@@ -27,6 +27,13 @@ defmodule Homelab.Docker.Network do
   @bridge %{"Driver" => "bridge"}
   @overlay %{"Driver" => "overlay", "Attachable" => true}
 
+  # Docker's built-in networks. They always exist, they are never ours to create, and
+  # they are not removable — `ensure_for_workload/1` would otherwise read `host`'s
+  # driver as "not the driver I wanted", find nothing attached (the daemon reports no
+  # container list for it) and try to recreate the host network out from under the
+  # daemon.
+  @predefined ~w(host none bridge)
+
   @doc """
   The `/networks/create` attributes this daemon needs: an attachable overlay when this
   node can drive Swarm, otherwise a bridge.
@@ -45,6 +52,8 @@ defmodule Homelab.Docker.Network do
   happy on a bridge or on an attachable overlay.
   """
   @spec ensure(String.t()) :: :ok | {:error, term()}
+  def ensure(name) when name in @predefined, do: :ok
+
   def ensure(name) do
     case inspect_network(name) do
       {:ok, _network} -> :ok
@@ -62,8 +71,13 @@ defmodule Homelab.Docker.Network do
   place, so it has to be recreated. That is only safe while nothing is attached, so
   a network with live containers on it is reported rather than torn out from under
   them.
+
+  Docker's predefined networks (`host`, `none`, `bridge`) short-circuit: a host-network
+  workload names `host` here, and that network is neither creatable nor removable.
   """
   @spec ensure_for_workload(String.t()) :: :ok | {:error, term()}
+  def ensure_for_workload(name) when name in @predefined, do: :ok
+
   def ensure_for_workload(name) do
     case inspect_network(name) do
       :not_found ->
