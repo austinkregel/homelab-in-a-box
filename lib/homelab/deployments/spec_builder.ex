@@ -59,9 +59,12 @@ defmodule Homelab.Deployments.SpecBuilder do
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.GpuSpec
 
+  @type image_source :: :registry | :local
+
   @type service_spec :: %{
           service_name: String.t(),
           image: String.t(),
+          image_source: image_source(),
           user: String.t() | nil,
           env: map(),
           volumes: [map()],
@@ -108,6 +111,9 @@ defmodule Homelab.Deployments.SpecBuilder do
       spec = %{
         service_name: service_name(tenant, template),
         image: Access.effective_image(deployment),
+        # Whether this image MUST come from a registry. Decides what a failed pull
+        # means -- see image_source/1.
+        image_source: image_source(deployment, template),
         # Preserve the adopted container's uid:gid (never chown adopted data). nil
         # for greenfield deploys, which run as the image's default user.
         user: template.user,
@@ -150,6 +156,29 @@ defmodule Homelab.Deployments.SpecBuilder do
       }
 
       {:ok, spec}
+    end
+  end
+
+  # Whether the image MUST be pulled, which is what a failed pull means.
+  #
+  # `:local` is not a convenience — it is a statement that the image has no registry
+  # behind it. An ADOPTED container is by definition already running its image, and a
+  # Workbench build exists only in the daemon's local store. Failing those rolls a
+  # cutover back on an image the daemon was holding the whole time.
+  #
+  # Everything else is `:registry`, and a failed pull is fatal. This used to be decided
+  # on the error path instead — any pull failure was survivable if the daemon happened
+  # to hold *something* under that ref — so a version change could report success while
+  # running exactly the image it was meant to replace.
+  #
+  # An explicit image_override forces `:registry` whatever the source. An operator who
+  # names a ref wants THAT ref; silently running a stale local image is never the right
+  # answer, including when upgrading an adopted app off its adopted image.
+  defp image_source(deployment, template) do
+    cond do
+      Access.image_overridden?(deployment) -> :registry
+      template.source in ["adopted", "built"] -> :local
+      true -> :registry
     end
   end
 
