@@ -100,6 +100,27 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   # equivalent). Public images get no header.
   defp registry_auth_opts(image), do: RegistryAuth.request_opts(image)
 
+  # Swarm's restart vocabulary is narrower than Engine's: `none` / `on-failure` / `any`.
+  #
+  # `unless-stopped` has no Swarm equivalent and maps to `any`. The distinction is
+  # meaningless here anyway — "unless the OPERATOR stopped it" is an Engine concept, and
+  # under Swarm stopping a service means scaling it to zero or removing it, which the
+  # manager already honours without a restart condition to say so.
+  #
+  # `MaxAttempts` is only meaningful for `on-failure`; unbounded is the point of `any`.
+  defp build_restart_policy(spec) do
+    case Map.get(spec, :restart_policy) || "on-failure" do
+      "on-failure" ->
+        %{"Condition" => "on-failure", "MaxAttempts" => 3, "Delay" => 5_000_000_000}
+
+      "no" ->
+        %{"Condition" => "none"}
+
+      policy when policy in ["always", "unless-stopped"] ->
+        %{"Condition" => "any", "Delay" => 5_000_000_000}
+    end
+  end
+
   # See DockerEngine.image_source/1: absent means `:registry`, so a spec that does not
   # say fails closed rather than silently running whatever is in the local store.
   defp image_source(spec), do: Map.get(spec, :image_source, :registry)
@@ -380,11 +401,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
         "ContainerSpec" => build_container_spec(spec),
         "Resources" => build_resources(spec),
         "Networks" => networks,
-        "RestartPolicy" => %{
-          "Condition" => "on-failure",
-          "MaxAttempts" => 3,
-          "Delay" => 5_000_000_000
-        }
+        "RestartPolicy" => build_restart_policy(spec)
       },
       "Mode" => %{
         "Replicated" => %{
