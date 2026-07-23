@@ -16,6 +16,9 @@ defmodule Homelab.Deployments.Deployment do
     field :domain, :string
     field :env_overrides, :map, default: %{}
     # Per-deployment overrides (nil = inherit the app_template default).
+    # The image is here rather than on the template because templates are SHARED:
+    # moving one deployment to a new version must not move every other tenant's.
+    field :image_override, :string
     field :ports_override, {:array, :map}
     field :volumes_override, {:array, :map}
     field :exposure_mode_override, :string
@@ -45,7 +48,7 @@ defmodule Homelab.Deployments.Deployment do
   end
 
   @required_fields ~w(tenant_id app_template_id)a
-  @optional_fields ~w(status external_id domain env_overrides ports_override
+  @optional_fields ~w(status external_id domain env_overrides image_override ports_override
                       volumes_override exposure_mode_override resource_limits_override
                       health_check_override proxy_options routed_port extra_routes
                       computed_spec last_reconciled_at error_message)a
@@ -57,12 +60,49 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:exposure_mode_override, @exposure_modes)
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
+    |> normalize_image_override()
+    |> validate_image_override()
     |> validate_extra_routes()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
     |> unique_constraint([:tenant_id, :app_template_id])
+  end
+
+  # "" is what an emptied form field posts, and it is NOT a value -- it means "go back to
+  # the catalog default". Storing it would make `effective_image/1` hand the daemon a blank
+  # image, so collapse it to nil, the same way a cleared ports editor means inherit.
+  defp normalize_image_override(changeset) do
+    case get_change(changeset, :image_override) do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> put_change(changeset, :image_override, nil)
+          trimmed -> put_change(changeset, :image_override, trimmed)
+        end
+
+      _ ->
+        changeset
+    end
+  end
+
+  # A malformed image ref does not fail here -- it fails four layers away, as a pull
+  # error inside a release step, reported as a failed deployment. The operator who typed
+  # it is long gone by then. Reject it in the form instead.
+  defp validate_image_override(changeset) do
+    case get_change(changeset, :image_override) do
+      nil ->
+        changeset
+
+      ref ->
+        case Homelab.Catalog.ImageRef.parse(ref) do
+          {:ok, _parsed} ->
+            changeset
+
+          {:error, :invalid} ->
+            add_error(changeset, :image_override, "is not a valid image reference")
+        end
+    end
   end
 
   # An extra route becomes a Traefik router rule and a load-balancer port. A malformed
