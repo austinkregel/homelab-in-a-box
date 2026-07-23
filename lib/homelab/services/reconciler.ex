@@ -440,12 +440,14 @@ defmodule Homelab.Services.Reconciler do
     new_flagged =
       Deployments.list_desired_states()
       |> Enum.reduce(state.flagged_bypass, fn deployment, flagged ->
-        if deployment.status == :running and has_host_ports?(deployment.app_template) and
+        bypass = bypass_kind(deployment)
+
+        if deployment.status == :running and bypass != nil and
              not MapSet.member?(flagged, deployment.id) do
           alert(
             :warning,
             "External port bypass",
-            "#{label(deployment)} publishes host ports, which are reachable without going through Traefik. Consider routing via Traefik instead.",
+            bypass_message(bypass, deployment),
             deployment.id
           )
 
@@ -458,10 +460,32 @@ defmodule Homelab.Services.Reconciler do
     %{state | flagged_bypass: new_flagged}
   end
 
-  defp has_host_ports?(%{exposure_mode: :service}), do: false
+  # Keyed off the EFFECTIVE exposure, not the template's: the per-deployment override is
+  # what actually decides how this deployment is reached, so reading the (shared)
+  # template default would audit a mode the deployment isn't in.
+  defp bypass_kind(deployment) do
+    case Access.effective_exposure(deployment) do
+      # Every port the container listens on is a host port — there is no published-flag
+      # to consult, and nothing narrower than "all of them" was ever requested.
+      :host_network ->
+        :host_network
 
-  defp has_host_ports?(template) do
-    Enum.any?(template.ports || [], &(&1["published"] == true))
+      :service ->
+        nil
+
+      _ ->
+        if Enum.any?(Access.effective_ports(deployment), &(&1["published"] == true)),
+          do: :host_ports,
+          else: nil
+    end
+  end
+
+  defp bypass_message(:host_network, deployment) do
+    "#{label(deployment)} runs on the host's network, so every port it listens on is reachable on the host without going through Traefik. Consider routing via Traefik instead, unless it needs host networking for discovery (mDNS/SSDP/DHCP)."
+  end
+
+  defp bypass_message(:host_ports, deployment) do
+    "#{label(deployment)} publishes host ports, which are reachable without going through Traefik. Consider routing via Traefik instead."
   end
 
   # --- Readiness ---
