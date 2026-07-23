@@ -25,7 +25,13 @@ defmodule Homelab.Deployments.ImageOverrideTest do
   end
 
   defp tenant do
-    %Homelab.Tenants.Tenant{id: 1, slug: "friends", name: "Friends", status: :active, settings: %{}}
+    %Homelab.Tenants.Tenant{
+      id: 1,
+      slug: "friends",
+      name: "Friends",
+      status: :active,
+      settings: %{}
+    }
   end
 
   defp template(overrides \\ %{}) do
@@ -186,7 +192,12 @@ defmodule Homelab.Deployments.ImageOverrideTest do
     test "a blank field means inherit, not a blank image" do
       # An emptied form field must clear the override. Storing "" would hand the
       # daemon an empty image string.
-      cs = Deployment.changeset(%Deployment{image_override: "nginx:1.25"}, base_attrs(%{image_override: ""}))
+      cs =
+        Deployment.changeset(
+          %Deployment{image_override: "nginx:1.25"},
+          base_attrs(%{image_override: ""})
+        )
+
       assert cs.valid?
       assert Ecto.Changeset.get_change(cs, :image_override) == nil
     end

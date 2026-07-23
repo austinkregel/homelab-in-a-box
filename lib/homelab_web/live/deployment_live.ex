@@ -147,7 +147,6 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-
   def handle_info({:metrics, _metrics}, socket) do
     {:noreply,
      socket
@@ -1263,8 +1262,7 @@ defmodule HomelabWeb.DeploymentLive do
                     class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
                   />
                   <p class="text-xs text-base-content/40">
-                    The catalog default is
-                    <span class="font-mono">{@deployment.app_template.image}</span>.
+                    The catalog default is <span class="font-mono">{@deployment.app_template.image}</span>.
                   </p>
                 </div>
 

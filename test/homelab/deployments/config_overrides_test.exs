@@ -24,7 +24,13 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
   end
 
   defp tenant do
-    %Homelab.Tenants.Tenant{id: 1, slug: "friends", name: "Friends", status: :active, settings: %{}}
+    %Homelab.Tenants.Tenant{
+      id: 1,
+      slug: "friends",
+      name: "Friends",
+      status: :active,
+      settings: %{}
+    }
   end
 
   defp template(overrides \\ %{}) do

@@ -112,7 +112,9 @@ defmodule Homelab.Deployments.Access do
   Not an inherited value: there is no template field for it. Before this was settable
   both drivers hardcoded `on-failure` with three attempts, so that stays the default.
   """
-  def effective_restart_policy(%Deployment{restart_policy_override: nil}), do: @default_restart_policy
+  def effective_restart_policy(%Deployment{restart_policy_override: nil}),
+    do: @default_restart_policy
+
   def effective_restart_policy(%Deployment{restart_policy_override: policy}), do: policy
 
   @doc "Effective replica count (nil = 1). Swarm only; Engine has no replicas."
@@ -130,7 +132,9 @@ defmodule Homelab.Deployments.Access do
   def effective_command(%Deployment{command_override: command}), do: command
 
   @doc "Effective entrypoint (override wins; nil = inherit the template)."
-  def effective_entrypoint(%Deployment{entrypoint_override: nil, app_template: t}), do: t.entrypoint
+  def effective_entrypoint(%Deployment{entrypoint_override: nil, app_template: t}),
+    do: t.entrypoint
+
   def effective_entrypoint(%Deployment{entrypoint_override: entrypoint}), do: entrypoint
 
   @doc "Effective network aliases (override wins; nil = inherit the template)."

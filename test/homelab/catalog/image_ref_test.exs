@@ -5,7 +5,8 @@ defmodule Homelab.Catalog.ImageRefTest do
 
   describe "parse/1 — registry vs namespace" do
     test "a bare official image has no registry and no tag" do
-      assert {:ok, %{registry: nil, path: "nginx", tag: nil, digest: nil}} = ImageRef.parse("nginx")
+      assert {:ok, %{registry: nil, path: "nginx", tag: nil, digest: nil}} =
+               ImageRef.parse("nginx")
     end
 
     test "a slash alone does not make the first component a registry" do

@@ -27,7 +27,12 @@ defmodule Homelab.Catalog.ImageRef do
 
   @default_registry "docker.io"
 
-  @type t :: %{registry: String.t() | nil, path: String.t(), tag: String.t() | nil, digest: String.t() | nil}
+  @type t :: %{
+          registry: String.t() | nil,
+          path: String.t(),
+          tag: String.t() | nil,
+          digest: String.t() | nil
+        }
 
   @doc """
   Splits a reference into its parts. `registry` is `nil` for an implicit Docker Hub
@@ -117,7 +122,9 @@ defmodule Homelab.Catalog.ImageRef do
   @doc "True when the reference names Docker Hub, explicitly or by omission."
   @spec docker_hub?(String.t() | nil) :: boolean()
   def docker_hub?(nil), do: true
-  def docker_hub?(registry), do: registry in [@default_registry, "index.docker.io", "registry-1.docker.io"]
+
+  def docker_hub?(registry),
+    do: registry in [@default_registry, "index.docker.io", "registry-1.docker.io"]
 
   # --- Private ---
 
