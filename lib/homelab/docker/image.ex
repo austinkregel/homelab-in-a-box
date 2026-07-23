@@ -11,6 +11,19 @@ defmodule Homelab.Docker.Image do
 
   The `homelab-built/` prefix used to be the only exception, which covered our own
   builds and nothing else.
+
+  ## When the drivers consult this
+
+  Only for a spec whose `image_source` is `:local` — which `SpecBuilder` sets for
+  adopted and Workbench-built deployments, and for nothing else.
+
+  It used to be consulted on *every* pull failure, which made the question "did the
+  daemon happen to already hold something under this ref?" rather than "is this image
+  supposed to come from a registry?". Those differ in exactly the case that matters:
+  changing a deployment's version. The new tag fails to pull, the daemon still holds
+  the OLD image under a ref that resolves, the deploy reports success, and the
+  operator is told they upgraded when they did not. A `:registry` image now fails
+  loudly instead.
   """
 
   alias Homelab.Docker.Client
