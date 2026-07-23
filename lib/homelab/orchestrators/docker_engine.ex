@@ -260,6 +260,15 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   # --- Image Management ---
 
+  # `MaximumRetryCount` is only meaningful for `on-failure`; the daemon rejects it as
+  # invalid alongside any other policy rather than ignoring it.
+  defp build_restart_policy(spec) do
+    case Map.get(spec, :restart_policy) || "on-failure" do
+      "on-failure" -> %{"Name" => "on-failure", "MaximumRetryCount" => 3}
+      name -> %{"Name" => name}
+    end
+  end
+
   # Whether this spec's image has a registry behind it. A spec that does not say is
   # treated as `:registry` -- fail closed, because the failure mode of guessing
   # `:local` is a deploy that reports success while running the wrong image.
@@ -317,7 +326,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
         "Memory" => spec.memory_limit,
         "NanoCpus" => spec.cpu_limit,
         "NetworkMode" => spec.network,
-        "RestartPolicy" => %{"Name" => "on-failure", "MaximumRetryCount" => 3},
+        "RestartPolicy" => build_restart_policy(spec),
         "Mounts" => mounts,
         "PortBindings" => port_bindings
       }
