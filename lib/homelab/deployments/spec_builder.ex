@@ -73,6 +73,7 @@ defmodule Homelab.Deployments.SpecBuilder do
           host_network: boolean(),
           labels: map(),
           replicas: pos_integer(),
+          restart_policy: String.t(),
           memory_limit: pos_integer(),
           cpu_limit: pos_integer(),
           tenant_id: String.t(),
@@ -130,12 +131,16 @@ defmodule Homelab.Deployments.SpecBuilder do
         # the original's compose service name, so the rest of the stack keeps resolving it.
         # Meaningless — and rejected by the daemon — on the host network, which has no
         # embedded DNS to register a name with.
-        network_aliases: if(host_network?, do: [], else: template.network_aliases || []),
+        network_aliases:
+          if(host_network?, do: [], else: Access.effective_network_aliases(deployment)),
         # nil = the image's default. Adoption sets these to what the original actually ran.
-        command: template.command,
-        entrypoint: template.entrypoint,
+        command: Access.effective_command(deployment),
+        entrypoint: Access.effective_entrypoint(deployment),
         labels: Map.merge(base_labels, routing_labels),
-        replicas: 1,
+        replicas: Access.effective_replicas(deployment),
+        # How the container behaves when it exits. Both drivers hardcoded on-failure/3
+        # before this could be chosen; that is still what nil resolves to.
+        restart_policy: Access.effective_restart_policy(deployment),
         memory_limit: memory_limit_bytes(Access.effective_resource_limits(deployment)),
         cpu_limit: cpu_limit_nanocpus(Access.effective_resource_limits(deployment)),
         # Vendor INTENT, not an API payload: Engine passes the device directly, Swarm
