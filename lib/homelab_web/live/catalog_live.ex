@@ -988,11 +988,14 @@ defmodule HomelabWeb.CatalogLive do
                     <option value="sso_protected">Reverse proxy — SSO</option>
                     <option value="private">Reverse proxy — private (LAN)</option>
                     <option value="host">Host ports (bind to host)</option>
+                    <option value="host_network">Host network (share the host's namespace)</option>
                     <option value="service">Internal only (no external access)</option>
                   </select>
                   <p class="text-[11px] text-base-content/30 mt-1.5">
                     Reverse proxy serves via Traefik at the domain above. Host ports bind the
-                    container's ports to the host instead. The two are mutually exclusive.
+                    container's ports to the host instead. Host network puts the container in the
+                    host's own network namespace — nothing is mapped, and it's what apps doing
+                    mDNS/SSDP discovery need. All are mutually exclusive.
                   </p>
                 </div>
 
