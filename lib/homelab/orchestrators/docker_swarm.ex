@@ -37,7 +37,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
          # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
          # which a freshly-created (empty) network can be swept by a racing cleanup or
          # prune before anything attaches to it.
-         :ok <- pull_image(spec.image),
+         :ok <- pull_image(spec.image, image_source(spec)),
          :ok <- ensure_networks(spec) do
       body = build_service_create_payload(spec)
 
@@ -100,15 +100,19 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   # equivalent). Public images get no header.
   defp registry_auth_opts(image), do: RegistryAuth.request_opts(image)
 
+  # See DockerEngine.image_source/1: absent means `:registry`, so a spec that does not
+  # say fails closed rather than silently running whatever is in the local store.
+  defp image_source(spec), do: Map.get(spec, :image_source, :registry)
+
   # Images built in the Workbench live only in the local image store and have no
   # registry to pull from, so skip the pull for the local-build namespace.
-  defp pull_image("homelab-built/" <> _ = image) do
+  defp pull_image("homelab-built/" <> _ = image, _source) do
     require Logger
     Logger.info("[DockerSwarm] Using locally-built image #{image} (skipping pull)")
     :ok
   end
 
-  defp pull_image(image) do
+  defp pull_image(image, source) do
     require Logger
     Logger.info("[DockerSwarm] Pulling image #{image}...")
 
@@ -121,10 +125,11 @@ defmodule Homelab.Orchestrators.DockerSwarm do
         :ok
 
       {:error, reason} ->
-        # See DockerEngine.pull_image/1: an adopted or locally-built image has no registry
-        # to be pulled from, and failing here rolls the cutover back on an image the
-        # daemon is already holding.
-        if Homelab.Docker.Image.present?(image) do
+        # See DockerEngine.pull_image/2: survivability is a property of the spec, not of
+        # what the daemon happens to hold. An adopted or locally-built image has no
+        # registry behind it; everything else must actually pull, or a version change
+        # reports success while running the image it was meant to replace.
+        if source == :local and Homelab.Docker.Image.present?(image) do
           Logger.warning(
             "[DockerSwarm] Could not pull #{image} (#{inspect(reason)}) — using the local image"
           )
