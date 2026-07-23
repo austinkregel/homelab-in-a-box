@@ -51,6 +51,28 @@ defmodule Homelab.Deployments.Access do
     end
   end
 
+  @doc """
+  The effective container image (override wins; nil = inherit the template).
+
+  The image used to come from the template ONLY, which meant the version a deployment
+  ran was decided once and never again — and editing the template to change it moved
+  every other tenant's deployment of that app at the same time.
+  """
+  def effective_image(%Deployment{image_override: nil, app_template: template}),
+    do: template.image
+
+  def effective_image(%Deployment{image_override: image}), do: image
+
+  @doc """
+  True when this deployment runs something other than its template's image.
+
+  The UI needs to distinguish "pinned to a version" from "following the catalog", and
+  the drivers need it to decide whether a failed pull may fall back to a local image:
+  an operator who named a ref wants THAT ref, never a stale local one.
+  """
+  def image_overridden?(%Deployment{image_override: nil}), do: false
+  def image_overridden?(%Deployment{}), do: true
+
   @doc "Effective ports (override wins; nil = inherit the template)."
   def effective_ports(%Deployment{ports_override: nil, app_template: template}),
     do: template.ports || []
