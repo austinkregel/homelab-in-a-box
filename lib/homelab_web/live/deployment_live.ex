@@ -44,6 +44,17 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
+      |> assign(:runtime_edit_mode, false)
+      |> assign(:runtime_restart_policy, "on-failure")
+      |> assign(:runtime_replicas, "1")
+      # "inherit" | "custom" per list field. An empty custom list is a real value ([],
+      # "run nothing"), which a blank textarea alone could not distinguish from inherit.
+      |> assign(:runtime_command_mode, "inherit")
+      |> assign(:runtime_command, "")
+      |> assign(:runtime_entrypoint_mode, "inherit")
+      |> assign(:runtime_entrypoint, "")
+      |> assign(:runtime_aliases_mode, "inherit")
+      |> assign(:runtime_aliases, "")
       |> assign(:version_edit_mode, false)
       |> assign(:version_image, "")
       # :idle | :loading | {:ok, [TagInfo]} | {:error, reason}. A registry that cannot
@@ -391,6 +402,63 @@ defmodule HomelabWeb.DeploymentLive do
 
   def handle_event("reset_version", _params, socket) do
     apply_version(socket, nil)
+  end
+
+  # --- Runtime (restart policy / replicas / command / entrypoint / aliases) ---
+
+  def handle_event("start_runtime_edit", _params, socket) do
+    d = socket.assigns.deployment
+
+    {:noreply,
+     socket
+     |> assign(:runtime_edit_mode, true)
+     |> assign(:runtime_restart_policy, Access.effective_restart_policy(d))
+     |> assign(:runtime_replicas, to_string(Access.effective_replicas(d)))
+     |> assign_list_field(:command, d.command_override)
+     |> assign_list_field(:entrypoint, d.entrypoint_override)
+     |> assign_list_field(:aliases, d.network_aliases_override)}
+  end
+
+  def handle_event("cancel_runtime_edit", _params, socket) do
+    {:noreply, assign(socket, :runtime_edit_mode, false)}
+  end
+
+  def handle_event("runtime_changed", %{"runtime" => runtime}, socket) do
+    {:noreply,
+     socket
+     |> assign(:runtime_restart_policy, runtime["restart_policy"])
+     |> assign(:runtime_replicas, runtime["replicas"])
+     |> assign(:runtime_command_mode, runtime["command_mode"])
+     |> assign(:runtime_command, runtime["command"])
+     |> assign(:runtime_entrypoint_mode, runtime["entrypoint_mode"])
+     |> assign(:runtime_entrypoint, runtime["entrypoint"])
+     |> assign(:runtime_aliases_mode, runtime["aliases_mode"])
+     |> assign(:runtime_aliases, runtime["aliases"])}
+  end
+
+  def handle_event("save_runtime", %{"runtime" => runtime}, socket) do
+    deployment = socket.assigns.deployment
+
+    attrs = %{
+      restart_policy_override: blank_to_nil(runtime["restart_policy"]),
+      replicas_override: parse_replicas(runtime["replicas"]),
+      command_override: parse_list_field(runtime["command_mode"], runtime["command"]),
+      entrypoint_override: parse_list_field(runtime["entrypoint_mode"], runtime["entrypoint"]),
+      network_aliases_override: parse_list_field(runtime["aliases_mode"], runtime["aliases"])
+    }
+
+    case apply_config(deployment, attrs) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign_readiness()
+         |> assign(:runtime_edit_mode, false)
+         |> put_flash(:info, "Runtime settings saved — recreating the container.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
   end
 
   # --- Settings (domain / exposure / ports) ---
@@ -1301,6 +1369,148 @@ defmodule HomelabWeb.DeploymentLive do
 
         <div
           :if={@active_tab == "settings"}
+          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden mb-4"
+        >
+          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+            <h3 class="text-sm font-semibold text-base-content">Runtime</h3>
+            <button
+              :if={!@runtime_edit_mode}
+              type="button"
+              phx-click="start_runtime_edit"
+              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+            >
+              Edit
+            </button>
+          </div>
+          <div class="p-4">
+            <%= if @runtime_edit_mode do %>
+              <.form
+                for={%{}}
+                id="runtime-form"
+                phx-change="runtime_changed"
+                phx-submit="save_runtime"
+                class="space-y-5"
+              >
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div class="flex flex-col gap-1.5">
+                    <label class="text-xs font-medium text-base-content/50">Restart policy</label>
+                    <select
+                      name="runtime[restart_policy]"
+                      class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option
+                        :for={
+                          {value, label} <- [
+                            {"on-failure", "On failure (up to 3 times)"},
+                            {"always", "Always"},
+                            {"unless-stopped", "Unless stopped"},
+                            {"no", "Never"}
+                          ]
+                        }
+                        value={value}
+                        selected={@runtime_restart_policy == value}
+                      >
+                        {label}
+                      </option>
+                    </select>
+                  </div>
+
+                  <div class="flex flex-col gap-1.5">
+                    <label class="text-xs font-medium text-base-content/50">Replicas</label>
+                    <input
+                      type="number"
+                      min="1"
+                      name="runtime[replicas]"
+                      value={@runtime_replicas}
+                      disabled={!swarm?()}
+                      class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
+                    />
+                    <p class="text-xs text-base-content/40">
+                      <%= if swarm?() do %>
+                        Not available with host ports or host networking — every task would
+                        bind the same port.
+                      <% else %>
+                        Docker Engine runs a single container; scaling needs Swarm.
+                      <% end %>
+                    </p>
+                  </div>
+                </div>
+
+                <.runtime_list_field
+                  name="command"
+                  label="Command"
+                  hint="What the container runs. One argument per line."
+                  mode={@runtime_command_mode}
+                  value={@runtime_command}
+                />
+                <.runtime_list_field
+                  name="entrypoint"
+                  label="Entrypoint"
+                  hint="Overrides the image's own entrypoint. One argument per line; custom-and-empty clears it."
+                  mode={@runtime_entrypoint_mode}
+                  value={@runtime_entrypoint}
+                />
+                <.runtime_list_field
+                  name="aliases"
+                  label="Network aliases"
+                  hint="Extra names siblings can reach this container by, one per line. Ignored on the host network."
+                  mode={@runtime_aliases_mode}
+                  value={@runtime_aliases}
+                />
+
+                <div class="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
+                  >
+                    Save &amp; recreate
+                  </button>
+                  <button
+                    type="button"
+                    phx-click="cancel_runtime_edit"
+                    class="px-3 py-1.5 rounded-lg bg-base-200 text-base-content/70 text-sm font-medium hover:bg-base-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </.form>
+            <% else %>
+              <dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                <div>
+                  <dt class="text-base-content/50 text-xs">Restart policy</dt>
+                  <dd class="text-base-content">
+                    {Access.effective_restart_policy(@deployment)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Replicas</dt>
+                  <dd class="text-base-content">{Access.effective_replicas(@deployment)}</dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Command</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_list(Access.effective_command(@deployment))}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Entrypoint</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_list(Access.effective_entrypoint(@deployment))}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Network aliases</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_list(Access.effective_network_aliases(@deployment))}
+                  </dd>
+                </div>
+              </dl>
+            <% end %>
+          </div>
+        </div>
+
+        <div
+          :if={@active_tab == "settings"}
           class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
         >
           <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
@@ -2196,6 +2406,76 @@ defmodule HomelabWeb.DeploymentLive do
   defp secret_key?(key) do
     upper = String.upcase(key)
     String.contains?(upper, "PASSWORD") or String.contains?(upper, "SECRET")
+  end
+
+  # An inherit/custom pair plus a textarea. The pair exists because a blank textarea
+  # alone cannot distinguish "use the catalog's" from "explicitly nothing", and for
+  # entrypoint those mean genuinely different things to Docker.
+  attr :name, :string, required: true
+  attr :label, :string, required: true
+  attr :hint, :string, required: true
+  attr :mode, :string, required: true
+  attr :value, :string, required: true
+
+  defp runtime_list_field(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-1.5">
+      <label class="text-xs font-medium text-base-content/50">{@label}</label>
+      <select
+        name={"runtime[#{@name}_mode]"}
+        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+      >
+        <option value="inherit" selected={@mode == "inherit"}>Inherit from catalog</option>
+        <option value="custom" selected={@mode == "custom"}>Custom</option>
+      </select>
+      <textarea
+        :if={@mode == "custom"}
+        name={"runtime[#{@name}]"}
+        rows="3"
+        class="rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+      >{@value}</textarea>
+      <p class="text-xs text-base-content/40">{@hint}</p>
+    </div>
+    """
+  end
+
+  defp swarm?, do: Homelab.Config.orchestrator() == Homelab.Orchestrators.DockerSwarm
+
+  defp format_list(nil), do: "—"
+  defp format_list([]), do: "(none)"
+  defp format_list(values), do: Enum.join(values, " ")
+
+  # One argument per line, not a shell string. Splitting `--flag "a b"` on whitespace
+  # gets it wrong, and the alternative is implementing shell quoting in a form field.
+  defp assign_list_field(socket, key, nil) do
+    socket
+    |> assign(:"runtime_#{key}_mode", "inherit")
+    |> assign(:"runtime_#{key}", "")
+  end
+
+  defp assign_list_field(socket, key, values) when is_list(values) do
+    socket
+    |> assign(:"runtime_#{key}_mode", "custom")
+    |> assign(:"runtime_#{key}", Enum.join(values, "\n"))
+  end
+
+  # "inherit" is nil; "custom" is a list, and an EMPTY custom list is a real value —
+  # clearing an image's entrypoint is a Docker instruction, not an absent setting.
+  defp parse_list_field("custom", text) do
+    (text || "")
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp parse_list_field(_inherit, _text), do: nil
+
+  # Blank means "the platform default", which is what nil resolves to.
+  defp parse_replicas(value) do
+    case Integer.parse(to_string(value)) do
+      {n, _rest} when n > 0 -> n
+      _ -> nil
+    end
   end
 
   # A version change is `apply_config/2` with a different image — the pull-and-converge
