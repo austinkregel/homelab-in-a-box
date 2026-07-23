@@ -10,6 +10,11 @@ defmodule Homelab.Deployments.Deployment do
   # single deployment can diverge from the (shared) template default.
   @exposure_modes ~w(private sso_protected public service host host_network)
 
+  # Docker Engine's `RestartPolicy.Name` vocabulary. Swarm has a narrower one
+  # (`none`/`on-failure`/`any`); the driver translates rather than the operator, since
+  # "restart this unless I stopped it" is the intent either way.
+  @restart_policies ~w(no on-failure always unless-stopped)
+
   schema "deployments" do
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :external_id, :string
@@ -24,6 +29,16 @@ defmodule Homelab.Deployments.Deployment do
     field :exposure_mode_override, :string
     field :resource_limits_override, :map
     field :health_check_override, :map
+    # nil = the platform default (on-failure, 3 attempts), which is what both drivers
+    # hardcoded before this was settable at all.
+    field :restart_policy_override, :string
+    # Swarm only; nil = 1. Docker Engine has no replicas.
+    field :replicas_override, :integer
+    # nil = inherit the template. [] is NOT nil here: an empty entrypoint clears the
+    # image's own, which is a real instruction rather than an absent value.
+    field :command_override, {:array, :string}
+    field :entrypoint_override, {:array, :string}
+    field :network_aliases_override, {:array, :string}
     # Reverse-proxy options (sticky sessions, &c).
     field :proxy_options, :map, default: %{}
     # The container port the proxy forwards to. An explicit DECISION, never
@@ -50,7 +65,9 @@ defmodule Homelab.Deployments.Deployment do
   @required_fields ~w(tenant_id app_template_id)a
   @optional_fields ~w(status external_id domain env_overrides image_override ports_override
                       volumes_override exposure_mode_override resource_limits_override
-                      health_check_override proxy_options routed_port extra_routes
+                      health_check_override restart_policy_override replicas_override
+                      command_override entrypoint_override network_aliases_override
+                      proxy_options routed_port extra_routes
                       computed_spec last_reconciled_at error_message)a
 
   def changeset(deployment, attrs) do
@@ -62,6 +79,8 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
     |> normalize_image_override()
     |> validate_image_override()
+    |> validate_inclusion(:restart_policy_override, @restart_policies)
+    |> validate_replicas()
     |> validate_extra_routes()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
@@ -104,6 +123,47 @@ defmodule Homelab.Deployments.Deployment do
         end
     end
   end
+
+  # Scaling past one task is a Swarm capability, and an operator asking for it on Docker
+  # Engine is asking for something that cannot happen. Silently running one container
+  # anyway would present as "I set 3 replicas and only one is serving" -- so say no here,
+  # where the number was typed, rather than dropping it inside the driver.
+  #
+  # Host ports and host networking are exclusive with replicas for a different reason:
+  # every task would bind the same port on the same host and all but one would fail to
+  # start, which Swarm reports as a task that keeps restarting rather than as a conflict.
+  defp validate_replicas(changeset) do
+    changeset
+    |> validate_number(:replicas_override, greater_than_or_equal_to: 1)
+    |> then(fn cs ->
+      case get_field(cs, :replicas_override) do
+        n when is_integer(n) and n > 1 -> validate_scalable(cs, n)
+        _ -> cs
+      end
+    end)
+  end
+
+  defp validate_scalable(changeset, _replicas) do
+    exposure = get_field(changeset, :exposure_mode_override)
+
+    cond do
+      Homelab.Config.orchestrator() == Homelab.Orchestrators.DockerEngine ->
+        add_error(changeset, :replicas_override, "requires Docker Swarm")
+
+      exposure in ["host", "host_network"] ->
+        add_error(
+          changeset,
+          :replicas_override,
+          "cannot be used with host ports or host networking"
+        )
+
+      true ->
+        changeset
+    end
+  end
+
+  @doc "All valid restart-policy values (strings)."
+  def restart_policies, do: @restart_policies
 
   # An extra route becomes a Traefik router rule and a load-balancer port. A malformed
   # one does not fail loudly -- Traefik silently declines to route it, and the app looks
