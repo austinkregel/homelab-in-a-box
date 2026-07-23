@@ -104,6 +104,54 @@ defmodule HomelabWeb.DomainsLiveTest do
       html = render_click(view, "delete_zone", %{"id" => to_string(zone.id)})
       assert html =~ "Zone deleted"
     end
+
+    # Moving a zone from manual to cloudflare used to mean deleting it and cascading
+    # away every record it held, for what is only a change of who answers for it.
+    test "a zone's provider is editable in place", %{conn: conn} do
+      zone =
+        insert(:dns_zone,
+          name: "movable.example.com",
+          provider: "manual",
+          sync_status: :synced
+        )
+
+      insert(:dns_record, dns_zone: zone, name: "keep", value: "10.0.0.1")
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "open_edit_zone", %{"id" => to_string(zone.id)})
+
+      view
+      |> form("#add-zone-form", %{
+        "zone" => %{"provider" => "cloudflare", "provider_zone_id" => "cf-123"}
+      })
+      |> render_submit()
+
+      updated = Homelab.Networking.get_dns_zone!(zone.id)
+      assert updated.provider == "cloudflare"
+      assert updated.provider_zone_id == "cf-123"
+      assert updated.name == "movable.example.com"
+
+      # What the old provider had published says nothing about the new one.
+      assert updated.sync_status == :pending
+
+      # And the records the delete-and-recreate dance used to destroy are still here.
+      assert length(Homelab.Networking.list_dns_records_for_zone(zone.id)) == 1
+    end
+
+    test "a zone's name is not editable, since its records hang off it", %{conn: conn} do
+      zone = insert(:dns_zone, name: "fixed.example.com", provider: "manual")
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "open_edit_zone", %{"id" => to_string(zone.id)})
+
+      # Posted directly rather than through the form: the input is disabled client-side,
+      # but the server is what has to refuse it.
+      render_submit(view, "save_zone", %{
+        "zone" => %{"name" => "renamed.example.com", "provider" => "manual"}
+      })
+
+      assert Homelab.Networking.get_dns_zone!(zone.id).name == "fixed.example.com"
+    end
   end
 
   describe "with existing zones" do
