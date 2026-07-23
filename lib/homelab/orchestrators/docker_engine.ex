@@ -226,6 +226,13 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # ingress — they live on the private app network only and are never publicly
   # reachable. (Cross-app sharing of a datastore is done by multi-homing it onto
   # the consuming app's network, not by parking it on the ingress mesh.)
+  #
+  # A host-network container is attached to nothing: it has no endpoint of its own, and
+  # `/networks/<n>/connect` on it fails outright ("container sharing network namespace
+  # with another container or host cannot be connected to any other network"). There is
+  # no route to publish for it either, so there is nothing this would accomplish.
+  defp maybe_connect_routing_network(_container_id, %{host_network: true}), do: :ok
+
   defp maybe_connect_routing_network(container_id, spec) do
     bridge_networks = Map.get(spec, :bridge_networks, [])
 
@@ -332,6 +339,13 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # name — lose it. Aliases are how it keeps answering to what the rest of the stack calls
   # it. They must be set at CREATE time: attaching them later means a window in which the
   # stack's DNS is broken.
+  #
+  # Not on the host network, though: an alias is a record in a user-defined network's
+  # embedded DNS, and the daemon rejects a create carrying one ("network-scoped alias is
+  # supported only for containers in user defined networks"). SpecBuilder already drops
+  # them for that mode; this makes it unrepresentable rather than merely unbuilt.
+  defp maybe_put_aliases(payload, %{host_network: true}), do: payload
+
   defp maybe_put_aliases(payload, spec) do
     case Map.get(spec, :network_aliases, []) do
       [] ->
