@@ -58,6 +58,34 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
     assert AdoptionDiscovery.capture(inspect_json(%{})).user == nil
   end
 
+  # HOW the container was reached, not just what it ran. A host-network original has no
+  # port bindings for the cutover's port import to read, so this is the only signal that
+  # it was reachable at all — and the only way the replacement keeps the broadcast /
+  # multicast traffic (mDNS, SSDP) that host networking exists for.
+  test "captures host networking from HostConfig.NetworkMode" do
+    cap =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "HostConfig" => %{"NetworkMode" => "host", "RestartPolicy" => %{"Name" => "always"}}
+        })
+      )
+
+    assert cap.host_network == true
+  end
+
+  test "a container on a user-defined or default network is not host-networked" do
+    for mode <- ["bridge", "homelab_tenant_friends", "container:other", nil] do
+      cap =
+        AdoptionDiscovery.capture(
+          inspect_json(%{
+            "HostConfig" => %{"NetworkMode" => mode, "RestartPolicy" => %{"Name" => "always"}}
+          })
+        )
+
+      refute cap.host_network, "NetworkMode #{inspect(mode)} is not host networking"
+    end
+  end
+
   test "a bind mount under root is captured and preserved" do
     cap =
       AdoptionDiscovery.capture(
