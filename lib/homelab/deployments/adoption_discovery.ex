@@ -47,6 +47,7 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           command: [String.t()] | nil,
           entrypoint: [String.t()] | nil,
           aliases: [String.t()],
+          host_network: boolean(),
           in_scope: boolean(),
           mounts: [mount()]
         }
@@ -178,6 +179,11 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       # unauthenticated redis, reported as a successful adoption.
       command: empty_to_nil(Map.get(config, "Cmd")),
       entrypoint: empty_to_nil(Map.get(config, "Entrypoint")),
+      # HOW it was reached, not just what it ran. A container on the host's network
+      # publishes no port bindings at all, so the port import has nothing to read: adopting
+      # one as a :host deployment produced a replacement on a private bridge, reachable on
+      # nothing, and the discovery traffic it existed for (mDNS/SSDP) silently stopped.
+      host_network: Map.get(host_config, "NetworkMode") == "host",
       in_scope: in_scope,
       mounts: classified
     }
