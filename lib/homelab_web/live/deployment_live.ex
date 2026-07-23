@@ -5,6 +5,8 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.Readiness
   alias Homelab.Deployments.VolumeSpec
+  alias Homelab.Catalog.ImageRef
+  alias Homelab.Catalog.Tags
   alias Homelab.Backups
   alias Homelab.Services.BackupScheduler
 
@@ -42,6 +44,11 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
+      |> assign(:version_edit_mode, false)
+      |> assign(:version_image, "")
+      # :idle | :loading | {:ok, [TagInfo]} | {:error, reason}. A registry that cannot
+      # list tags is not an error state — the free-text field is the real control.
+      |> assign(:available_tags, :idle)
       |> assign(:resource_stats, nil)
       |> assign(:traffic_stats, nil)
       |> assign(:tenants, [])
@@ -129,6 +136,7 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
+
   def handle_info({:metrics, _metrics}, socket) do
     {:noreply,
      socket
@@ -213,6 +221,17 @@ defmodule HomelabWeb.DeploymentLive do
      socket
      |> assign(:logs, logs)
      |> assign(:logs_loading, false)}
+  end
+
+  @impl true
+  def handle_async(:available_tags, {:ok, result}, socket) do
+    {:noreply, assign(socket, :available_tags, result)}
+  end
+
+  # A registry that crashes the fetch must not wedge the picker on "loading…" — the
+  # free-text field beside it still works.
+  def handle_async(:available_tags, {:exit, reason}, socket) do
+    {:noreply, assign(socket, :available_tags, {:error, {:exit, reason}})}
   end
 
   @impl true
@@ -324,6 +343,54 @@ defmodule HomelabWeb.DeploymentLive do
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
     end
+  end
+
+  # --- Version ---
+  #
+  # A separate card and a separate form from the rest of Settings, deliberately. Every
+  # other field here is a config tweak; changing the image is the one action that can
+  # replace the software the operator's data is sitting under.
+
+  def handle_event("start_version_edit", _params, socket) do
+    deployment = socket.assigns.deployment
+
+    {:noreply,
+     socket
+     |> assign(:version_edit_mode, true)
+     |> assign(:version_image, Access.effective_image(deployment))
+     |> load_available_tags()}
+  end
+
+  def handle_event("cancel_version_edit", _params, socket) do
+    {:noreply, assign(socket, version_edit_mode: false, available_tags: :idle)}
+  end
+
+  def handle_event("version_changed", %{"version" => %{"image" => image}}, socket) do
+    {:noreply, assign(socket, :version_image, image)}
+  end
+
+  # Picking from the tag list fills the text field rather than saving: the operator
+  # still confirms, and can still hand-edit what the picker produced.
+  def handle_event("select_tag", %{"tag" => tag}, socket) do
+    case ImageRef.with_tag(socket.assigns.version_image, tag) do
+      {:ok, image} -> {:noreply, assign(socket, :version_image, image)}
+      {:error, :invalid} -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("save_version", %{"version" => %{"image" => image}}, socket) do
+    deployment = socket.assigns.deployment
+    image = String.trim(image)
+
+    # Typing the catalog's own image back in means "follow the catalog", not "pin to
+    # what the catalog happens to say today".
+    override = if image == "" or image == deployment.app_template.image, do: nil, else: image
+
+    apply_version(socket, override)
+  end
+
+  def handle_event("reset_version", _params, socket) do
+    apply_version(socket, nil)
   end
 
   # --- Settings (domain / exposure / ports) ---
@@ -852,8 +919,29 @@ defmodule HomelabWeb.DeploymentLive do
               <h3 class="text-sm font-semibold text-base-content/70 mb-4">Details</h3>
               <dl class="space-y-3 text-sm">
                 <div>
-                  <dt class="text-base-content/50">Image</dt>
-                  <dd class="font-mono text-base-content">{@deployment.app_template.image}</dd>
+                  <dt class="text-base-content/50 flex items-center justify-between gap-2">
+                    <span>Image</span>
+                    <%!-- The image used to be a dead end here: displayed, never editable,
+                          with nothing to say where it could be changed. Matches the
+                          readiness checklist's "Fix →" affordance. --%>
+                    <button
+                      type="button"
+                      phx-click="switch_tab"
+                      phx-value-tab="settings"
+                      class="text-xs font-medium text-primary hover:text-primary/80 cursor-pointer"
+                    >
+                      Change →
+                    </button>
+                  </dt>
+                  <dd class="font-mono text-base-content">
+                    {Access.effective_image(@deployment)}
+                    <span
+                      :if={Access.image_overridden?(@deployment)}
+                      class="ml-1 px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-primary/10 text-primary"
+                    >
+                      Pinned
+                    </span>
+                  </dd>
                 </div>
                 <div>
                   <dt class="text-base-content/50">Domain</dt>
@@ -1072,6 +1160,145 @@ defmodule HomelabWeb.DeploymentLive do
         </div>
 
         <%!-- Settings tab (domain / exposure / ports) --%>
+        <div
+          :if={@active_tab == "settings"}
+          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden mb-4"
+        >
+          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
+            <h3 class="text-sm font-semibold text-base-content">Version</h3>
+            <button
+              :if={!@version_edit_mode}
+              type="button"
+              phx-click="start_version_edit"
+              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+            >
+              Change
+            </button>
+          </div>
+          <div class="p-4">
+            <%= if @version_edit_mode do %>
+              <.form
+                for={%{}}
+                id="version-form"
+                phx-change="version_changed"
+                phx-submit="save_version"
+                class="space-y-4"
+              >
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-base-content/50">Image reference</label>
+                  <input
+                    type="text"
+                    name="version[image]"
+                    value={@version_image}
+                    autocomplete="off"
+                    placeholder="gitlab/gitlab-ce:17.0.0"
+                    class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+                  />
+                  <p class="text-xs text-base-content/40">
+                    The catalog default is
+                    <span class="font-mono">{@deployment.app_template.image}</span>.
+                  </p>
+                </div>
+
+                <div :if={@available_tags != :idle} class="flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-base-content/50">
+                    Available versions
+                  </label>
+                  <p :if={@available_tags == :loading} class="text-xs text-base-content/40">
+                    Asking the registry…
+                  </p>
+                  <p
+                    :if={match?({:error, _}, @available_tags)}
+                    class="text-xs text-base-content/40"
+                  >
+                    The registry did not answer — type a tag above instead.
+                  </p>
+                  <div :if={match?({:ok, _}, @available_tags)} class="flex flex-wrap gap-1.5">
+                    <button
+                      :for={tag <- elem(@available_tags, 1)}
+                      type="button"
+                      phx-click="select_tag"
+                      phx-value-tag={tag.tag}
+                      class="px-2 py-1 rounded-md bg-base-200 text-xs font-mono text-base-content/70 hover:bg-primary/10 hover:text-primary transition-colors cursor-pointer"
+                      title={tag.last_updated && "Updated #{tag.last_updated}"}
+                    >
+                      {tag.tag}
+                    </button>
+                  </div>
+                </div>
+
+                <%!-- A version change is not a port tweak. Say what it costs BEFORE the
+                      operator commits, because the expensive half of this mistake
+                      (skipping an app's required intermediate versions) is not
+                      recoverable from this screen. --%>
+                <div class="rounded-lg bg-warning/5 border border-warning/20 p-3 space-y-1">
+                  <p class="text-xs font-medium text-warning">
+                    This recreates the container.
+                  </p>
+                  <p class="text-xs text-base-content/60">
+                    The app is briefly unavailable, and its data is left in place. Check the
+                    app's own upgrade notes first — some (GitLab, Nextcloud, Mastodon) must be
+                    upgraded one version at a time, and skipping releases can leave the install
+                    unrecoverable.
+                  </p>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
+                  >
+                    Save &amp; recreate
+                  </button>
+                  <button
+                    type="button"
+                    phx-click="cancel_version_edit"
+                    class="px-3 py-1.5 rounded-lg bg-base-200 text-base-content/70 text-sm font-medium hover:bg-base-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    :if={Access.image_overridden?(@deployment)}
+                    type="button"
+                    phx-click="reset_version"
+                    data-confirm="Reset to the catalog default and recreate the container?"
+                    class="ml-auto text-xs text-base-content/50 hover:text-base-content transition-colors cursor-pointer"
+                  >
+                    Reset to catalog default
+                  </button>
+                </div>
+              </.form>
+            <% else %>
+              <dl class="space-y-3 text-sm">
+                <div>
+                  <dt class="text-base-content/50 text-xs">Running</dt>
+                  <dd class="font-mono text-base-content flex items-center gap-2">
+                    {Access.effective_image(@deployment)}
+                    <span
+                      :if={Access.image_overridden?(@deployment)}
+                      class="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-primary/10 text-primary"
+                    >
+                      Pinned
+                    </span>
+                    <span
+                      :if={!Access.image_overridden?(@deployment)}
+                      class="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-base-200 text-base-content/50"
+                    >
+                      Catalog default
+                    </span>
+                  </dd>
+                </div>
+                <div :if={Access.image_overridden?(@deployment)}>
+                  <dt class="text-base-content/50 text-xs">Catalog default</dt>
+                  <dd class="font-mono text-base-content/50 text-xs">
+                    {@deployment.app_template.image}
+                  </dd>
+                </div>
+              </dl>
+            <% end %>
+          </div>
+        </div>
+
         <div
           :if={@active_tab == "settings"}
           class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
@@ -1969,6 +2196,49 @@ defmodule HomelabWeb.DeploymentLive do
   defp secret_key?(key) do
     upper = String.upcase(key)
     String.contains?(upper, "PASSWORD") or String.contains?(upper, "SECRET")
+  end
+
+  # A version change is `apply_config/2` with a different image — the pull-and-converge
+  # sequence was always there, it had just never been handed anything different to run.
+  defp apply_version(socket, override) do
+    deployment = socket.assigns.deployment
+
+    case apply_config(deployment, %{image_override: override}) do
+      {:ok, updated} ->
+        message =
+          if override,
+            do: "Now running #{override} — recreating the container.",
+            else: "Reset to the catalog default — recreating the container."
+
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign_readiness()
+         |> assign(version_edit_mode: false, available_tags: :idle)
+         |> put_flash(:info, message)}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  # `start_async` rather than a supervised Task: it is scoped to this LiveView, so a
+  # registry that hangs cannot outlive the page that asked, and the result arrives via
+  # `handle_async/3` whether the fetch returned or crashed. Same reasoning as the TLS
+  # probe's dedicated supervisor — per-open-page UI work must not borrow the bounded
+  # worker pool and starve real background jobs — reached a simpler way.
+  defp load_available_tags(socket) do
+    image = socket.assigns.version_image
+
+    if connected?(socket) and Tags.supported?(image) do
+      socket
+      |> assign(:available_tags, :loading)
+      |> start_async(:available_tags, fn -> Tags.available_for(image) end)
+    else
+      # Unsupported is not a failure: the free-text field is the real control, and the
+      # picker is a convenience on top of it.
+      assign(socket, :available_tags, :idle)
+    end
   end
 
   # Persists config attrs then recreates the container so the changes take effect.
