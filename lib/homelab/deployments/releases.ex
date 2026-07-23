@@ -238,6 +238,31 @@ defmodule Homelab.Deployments.Releases do
     if count == 1, do: {:ok, get_release!(id)}, else: :taken
   end
 
+  @doc """
+  Extends a lease `owner` ALREADY holds, without reading the release back.
+
+  Distinct from `acquire_lease/3` on purpose. Acquiring answers "may I take this?"
+  and grants an expired lease to whoever asks; renewing answers "do I still hold
+  this?" and must NOT resurrect a lease that has already been handed to someone
+  else — that would leave two runners both believing they own the release.
+
+  Returns `:ok`, or `:lost` if the lease is gone (expired and taken, or stolen).
+  Takes a bare id: the caller is a heartbeat that runs every few seconds for the
+  whole length of a step, so preloading the release and its steps each time would
+  be a lot of query for a single timestamp write.
+  """
+  def renew_lease(release_id, owner, ttl_seconds \\ @default_lease_seconds) do
+    now = utc_now()
+    expires = DateTime.add(now, ttl_seconds, :second)
+
+    {count, _} =
+      Release
+      |> where([r], r.id == ^release_id and r.lease_owner == ^owner)
+      |> Repo.update_all(set: [lease_expires_at: expires, updated_at: naive_now()])
+
+    if count == 1, do: :ok, else: :lost
+  end
+
   def lease_active?(%Release{lease_expires_at: nil}, _now), do: false
   def lease_active?(%Release{lease_expires_at: exp}, now), do: DateTime.compare(exp, now) == :gt
 
