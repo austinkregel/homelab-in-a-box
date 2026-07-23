@@ -833,6 +833,8 @@ defmodule HomelabWeb.Topology do
   defp format_exposure("sso_protected"), do: "SSO Protected"
   defp format_exposure("private"), do: "Private"
   defp format_exposure("service"), do: "Service"
+  defp format_exposure("host"), do: "Host ports"
+  defp format_exposure("host_network"), do: "Host network"
   defp format_exposure(other), do: to_string(other)
 
   defp image_short(nil), do: ""
