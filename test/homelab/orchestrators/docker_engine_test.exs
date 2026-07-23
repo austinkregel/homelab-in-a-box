@@ -466,6 +466,45 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     end
   end
 
+  describe "restart policy" do
+    defp create_body_for(spec) do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, body, _opts ->
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "c123"}}
+
+        _path, _body, _opts ->
+          {:ok, %{}}
+      end)
+
+      assert {:ok, "c123"} = DockerEngine.deploy(spec)
+      assert_received {:create_body, body}
+      body["HostConfig"]["RestartPolicy"]
+    end
+
+    test "a spec with no policy keeps the historical on-failure/3" do
+      assert %{"Name" => "on-failure", "MaximumRetryCount" => 3} = create_body_for(base_spec())
+    end
+
+    test "on-failure carries its retry count" do
+      policy = create_body_for(base_spec(%{restart_policy: "on-failure"}))
+      assert %{"Name" => "on-failure", "MaximumRetryCount" => 3} = policy
+    end
+
+    test "other policies omit the retry count the daemon would reject" do
+      # MaximumRetryCount is only valid alongside on-failure; sending it with `always`
+      # is a 400, not an ignored field.
+      for name <- ~w(always unless-stopped no) do
+        policy = create_body_for(base_spec(%{restart_policy: name}))
+        assert policy == %{"Name" => name}
+      end
+    end
+  end
+
   describe "deploy/1 — failure branches" do
     test "returns {:error, {:pull_failed, image, reason}} when the image pull fails" do
       # ...and the daemon does not already hold the image. A pull failure alone is not

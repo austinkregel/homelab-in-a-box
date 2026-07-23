@@ -105,6 +105,33 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert service.template_attrs.description =~ "Adopted from existing container"
     end
 
+    # The policy was already captured off the live container and then dropped, so an
+    # `always` container came back as the platform default of on-failure/3 -- and the
+    # operator found out at the next host reboot, when a service that used to come back
+    # did not.
+    test "the original container's restart policy is carried onto the deployment" do
+      plan = AdoptionPlanner.build_plan([review_fixture()])
+
+      [service] = plan.services
+      assert service.deployment_attrs == %{restart_policy_override: "always"}
+    end
+
+    test "`no` is carried through rather than treated as unset" do
+      # A one-shot container that should run once and stay stopped would restart-loop
+      # under the platform default.
+      plan = AdoptionPlanner.build_plan([review_fixture(%{restart_policy: "no"})])
+
+      [service] = plan.services
+      assert service.deployment_attrs == %{restart_policy_override: "no"}
+    end
+
+    test "a container with no policy recorded keeps the platform default" do
+      plan = AdoptionPlanner.build_plan([review_fixture(%{restart_policy: nil})])
+
+      [service] = plan.services
+      assert service.deployment_attrs == %{}
+    end
+
     # A container on the host's network publishes NO port bindings, so the port import
     # has nothing to read. Adopting it as :host produced a replacement on a private
     # bridge, reachable on nothing — and silently killed the mDNS/SSDP discovery the

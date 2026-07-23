@@ -408,6 +408,21 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert image == spec.image
     end
 
+    test "a spec with no policy keeps the historical on-failure/3" do
+      assert %{"Condition" => "on-failure", "MaxAttempts" => 3} = restart_policy_for(build_spec())
+    end
+
+    test "always and unless-stopped both become Swarm's `any`" do
+      # Swarm has no unless-stopped: stopping a service there means scaling it to zero
+      # or removing it, which the manager honours without a restart condition.
+      assert %{"Condition" => "any"} = restart_policy_for(policy_spec("always"))
+      assert %{"Condition" => "any"} = restart_policy_for(policy_spec("unless-stopped"))
+    end
+
+    test "`no` becomes Swarm's `none`, with no attempt cap to state" do
+      assert restart_policy_for(policy_spec("no")) == %{"Condition" => "none"}
+    end
+
     test "a :registry image fails hard even when the daemon holds it locally" do
       # A version bump whose new tag will not pull must not quietly keep running the
       # old image and report the release as successful.
@@ -1060,6 +1075,27 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
   end
 
   # --- Helpers ---
+
+  defp policy_spec(policy), do: Map.put(build_spec(), :restart_policy, policy)
+
+  defp restart_policy_for(spec) do
+    test_pid = self()
+    stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+    stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+    stub(Homelab.Mocks.DockerClient, :post, fn
+      "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc123"}}
+
+      _path, _body, _opts ->
+        {:ok, %{}}
+    end)
+
+    assert {:ok, "svc123"} = DockerSwarm.deploy(spec)
+    assert_received {:create_body, body}
+    get_in(body, ["TaskTemplate", "RestartPolicy"])
+  end
 
   defp build_spec(suffix \\ "test") do
     %{
