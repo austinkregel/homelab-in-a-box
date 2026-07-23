@@ -34,6 +34,10 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:curated_loading, false)
       |> assign(:selected_entry, nil)
       |> assign(:selected_template, nil)
+      # Set when the operator names an image that an already-existing template does not
+      # run. Becomes the new deployment's image_override rather than a rewrite of the
+      # shared template — see select_custom/3.
+      |> assign(:image_override, nil)
       |> assign(:enriching, nil)
       |> assign(:custom_image, "")
       |> assign(:custom_name, "")
@@ -282,15 +286,23 @@ defmodule HomelabWeb.DeployWizardLive do
         ports: []
       }
 
-      template =
+      # A slug collision used to silently discard the image the operator just typed:
+      # the existing template was reused as-is, so asking for `nginx:1.25` deployed
+      # whatever the old template said, with no warning. Rewriting the template
+      # instead would be worse — it is shared, so it would move every other
+      # deployment of that slug.
+      #
+      # So the typed image becomes this DEPLOYMENT's override, which is exactly what
+      # per-deployment images are for.
+      {template, image_override} =
         case Catalog.get_app_template_by_slug(slug) do
           {:ok, t} ->
-            t
+            {t, if(t.image == image, do: nil, else: image)}
 
           {:error, :not_found} ->
             case Catalog.create_app_template(template_attrs) do
-              {:ok, t} -> t
-              {:error, _} -> struct(Homelab.Catalog.AppTemplate, template_attrs)
+              {:ok, t} -> {t, nil}
+              {:error, _} -> {struct(Homelab.Catalog.AppTemplate, template_attrs), nil}
             end
         end
 
@@ -317,6 +329,7 @@ defmodule HomelabWeb.DeployWizardLive do
       socket =
         socket
         |> assign(:selected_template, template)
+        |> assign(:image_override, image_override)
         |> assign(:ports, template.ports || [])
         |> assign(:volumes, template.volumes || [])
         |> assign(
@@ -824,7 +837,8 @@ defmodule HomelabWeb.DeployWizardLive do
         tenant_id: String.to_integer(tenant_id),
         app_template_id: template.id,
         domain: domain,
-        env_overrides: env_overrides
+        env_overrides: env_overrides,
+        image_override: socket.assigns[:image_override]
       }
 
       case Homelab.Deployments.deploy_now(attrs) do
@@ -906,18 +920,7 @@ defmodule HomelabWeb.DeployWizardLive do
             exposure_mode: String.to_existing_atom(exposure_mode)
           }
 
-          template =
-            case Catalog.get_app_template_by_slug(slug) do
-              {:ok, t} ->
-                Catalog.update_app_template(t, template_attrs)
-                t
-
-              {:error, :not_found} ->
-                case Catalog.create_app_template(template_attrs) do
-                  {:ok, t} -> t
-                  {:error, _} -> nil
-                end
-            end
+          template = resolve_compose_template(slug, template_attrs)
 
           if template do
             svc_env_overrides =
@@ -929,7 +932,11 @@ defmodule HomelabWeb.DeployWizardLive do
                    tenant_id: String.to_integer(tenant_id),
                    app_template_id: template.id,
                    domain: nil,
-                   env_overrides: svc_env_overrides
+                   env_overrides: svc_env_overrides,
+                   # This compose service's shape belongs to THIS deployment, not to a
+                   # template other deployments inherit from.
+                   ports_override: blank_to_nil_list(template_attrs.ports),
+                   volumes_override: blank_to_nil_list(template_attrs.volumes)
                  }) do
               {:ok, deployment} -> deployment
               _ -> nil
@@ -3187,6 +3194,44 @@ defmodule HomelabWeb.DeployWizardLive do
     |> String.split(":")
     |> List.first()
   end
+
+  # A compose service whose name collides with an existing template used to REWRITE that
+  # template — image, ports, volumes and env — and templates are shared by slug. So
+  # importing a stack into one space silently changed what every other space's deployment
+  # of that slug runs, on its next redeploy. Deploying app X in space B changed app X in
+  # space A, with nothing said about it.
+  #
+  # Reuse an existing row only when it already describes the same image, which keeps
+  # re-importing the same compose file idempotent. A genuinely different stack that
+  # happens to name a service `db` or `redis` gets its own template instead of
+  # overwriting someone else's. Nothing here mutates a shared row.
+  defp resolve_compose_template(slug, attrs) do
+    case Catalog.get_app_template_by_slug(slug) do
+      {:ok, template} ->
+        if template.image == attrs.image,
+          do: template,
+          else: create_template(%{attrs | slug: unique_slug(slug)})
+
+      {:error, :not_found} ->
+        create_template(attrs)
+    end
+  end
+
+  defp create_template(attrs) do
+    case Catalog.create_app_template(attrs) do
+      {:ok, template} -> template
+      {:error, _changeset} -> nil
+    end
+  end
+
+  defp unique_slug(slug), do: "#{slug}-#{System.unique_integer([:positive]) |> rem(10_000)}"
+
+  # `[]` from a compose service that declared no ports means "nothing to publish", but an
+  # empty override is NOT the same as no override — `Access.effective_ports/1` inherits
+  # only on nil, so storing [] would win over the template rather than defer to it.
+  defp blank_to_nil_list([]), do: nil
+  defp blank_to_nil_list(nil), do: nil
+  defp blank_to_nil_list(list), do: list
 
   defp slugify(name) do
     name
