@@ -376,6 +376,96 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     end
   end
 
+  # A host-network container has no endpoint of its own: `/networks/<n>/connect` on it
+  # is refused by the daemon ("container sharing network namespace with another
+  # container or host cannot be connected to any other network"), and there is no
+  # backend IP for Traefik to route to even if it succeeded.
+  describe "deploy/1 — host network" do
+    defp host_network_spec(overrides \\ %{}) do
+      base_spec(Map.merge(%{network: "host", host_network: true}, overrides))
+    end
+
+    test "sets NetworkMode host and never asks the daemon to create the host network" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        send(test_pid, {:get, path})
+        {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        send(test_pid, {:post, path, body})
+
+        if String.starts_with?(path, "/containers/create"),
+          do: {:ok, %{"Id" => "cid"}},
+          else: {:ok, %{}}
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(host_network_spec())
+
+      assert_received {:post, "/containers/create?name=myapp", create_body}
+      assert create_body["HostConfig"]["NetworkMode"] == "host"
+
+      # `host` is predefined: not ours to create, and NOT removable — the driver-mismatch
+      # path in Homelab.Docker.Network would otherwise try to recreate it.
+      refute_received {:get, "/networks/host"}
+    end
+
+    test "attaches to nothing else, even carrying a routing label and bridge networks" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "cid"}}
+
+          String.ends_with?(path, "/connect") ->
+            send(test_pid, {:connect, path, body})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec =
+        host_network_spec(%{
+          bridge_networks: ["shared_net"],
+          labels: %{"traefik.enable" => "true"}
+        })
+
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+      refute_received {:connect, _path, _body}
+    end
+
+    test "never sends a network-scoped alias, which the daemon rejects outside a user network" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "cid"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      spec = host_network_spec(%{network_aliases: ["mysql"]})
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+
+      assert_received {:create_body, body}
+      refute Map.has_key?(body, "NetworkingConfig")
+    end
+  end
+
   describe "deploy/1 — failure branches" do
     test "returns {:error, {:pull_failed, image, reason}} when the image pull fails" do
       # ...and the daemon does not already hold the image. A pull failure alone is not
