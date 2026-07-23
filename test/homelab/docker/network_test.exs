@@ -69,4 +69,30 @@ defmodule Homelab.Docker.NetworkTest do
       assert %{"Driver" => "bridge"} = Network.attrs()
     end
   end
+
+  # Docker's built-in networks are neither creatable nor removable. `host` in particular
+  # is named by every host-network workload, and its driver ("host") never matches the
+  # bridge/overlay this daemon wants — which lands squarely in the driver-mismatch path.
+  # That path REMOVES the network before recreating it, so without the short-circuit a
+  # single host-network deploy would try to tear out the daemon's own host network.
+  describe "predefined networks" do
+    for name <- ~w(host none bridge) do
+      test "ensure_for_workload/1 short-circuits #{name} without touching the daemon" do
+        stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+          flunk("must not inspect a predefined network: #{path}")
+        end)
+
+        stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+          flunk("must not create a predefined network: #{path}")
+        end)
+
+        stub(Homelab.Mocks.DockerClient, :delete, fn path, _opts ->
+          flunk("must not remove a predefined network: #{path}")
+        end)
+
+        assert :ok = Network.ensure_for_workload(unquote(name))
+        assert :ok = Network.ensure(unquote(name))
+      end
+    end
+  end
 end
