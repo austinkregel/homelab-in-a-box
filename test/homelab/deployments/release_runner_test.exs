@@ -154,6 +154,90 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  # THE GitLab adoption bug. The lease was refreshed only BETWEEN steps, so a step
+  # that outran the TTL (a backup copying tens of GB) let it lapse mid-flight. The
+  # reconciler re-enqueues every release whose lease has expired, the second runner
+  # reclaimed the still-`:running` step and re-ran it concurrently, and its
+  # `File.rm_rf!` of the deterministic backup dest deleted the tree the first runner
+  # was still checksumming — surfacing as "could not stream .../data/...: no such
+  # file or directory" and rolling the whole adoption back.
+  describe "lease heartbeat (a step longer than the TTL)" do
+    defmodule BlockingHandler do
+      @behaviour Homelab.Deployments.ReleaseStep.Handler
+
+      @impl true
+      def run(_step, _ctx) do
+        cfg = Application.get_env(:homelab, :test_release_handler)
+        send(cfg.pid, {:blocking_started, self()})
+
+        receive do
+          :proceed -> {:ok, %{"ran" => true}}
+        after
+          5_000 -> {:error, :test_timeout}
+        end
+      end
+
+      @impl true
+      def compensate(_step, _ctx), do: :ok
+    end
+
+    setup do
+      Application.put_env(:homelab, :release_step_handlers, %{default: BlockingHandler})
+      # A 1s lease renewed every 100ms: the step below stays blocked well past the
+      # point the old code would have dropped it.
+      Application.put_env(:homelab, :release_lease_ttl_seconds, 1)
+      Application.put_env(:homelab, :release_lease_heartbeat_ms, 100)
+
+      on_exit(fn ->
+        Application.delete_env(:homelab, :release_lease_ttl_seconds)
+        Application.delete_env(:homelab, :release_lease_heartbeat_ms)
+      end)
+
+      :ok
+    end
+
+    test "the release never becomes resumable while its step is still running" do
+      release = plan(insert(:deployment), [:backup_verify])
+      task = Task.async(fn -> ReleaseRunner.run(release.id, owner: "hb-owner") end)
+
+      assert_receive {:blocking_started, handler}, 1_000
+
+      # Sit here past the 1s TTL. Without the heartbeat the lease lapses and the
+      # reconciler's resumable query picks the release up — which is what let a
+      # second runner start on top of the first.
+      Process.sleep(1_500)
+
+      resumable = Enum.map(Releases.list_resumable_releases(), & &1.id)
+      refute release.id in resumable, "a running step must keep its lease alive"
+
+      send(handler, :proceed)
+      assert :ok = Task.await(task, 5_000)
+      assert Releases.get_release(release.id).status == :running
+    end
+
+    test "losing the lease mid-step does not take the step down with it" do
+      release = plan(insert(:deployment), [:backup_verify])
+      task = Task.async(fn -> ReleaseRunner.run(release.id, owner: "hb-owner") end)
+
+      assert_receive {:blocking_started, handler}, 1_000
+
+      # Someone else takes ownership out from under the running step. The heartbeat
+      # must NOT resurrect it (two runners both believing they own the release is
+      # the exact state the lease exists to prevent) — it gives up and logs.
+      {1, _} =
+        Homelab.Deployments.Release
+        |> where([r], r.id == ^release.id)
+        |> Homelab.Repo.update_all(set: [lease_owner: "thief"])
+
+      assert Releases.renew_lease(release.id, "hb-owner", 1) == :lost
+
+      # The step itself is already running and cannot be un-run, so it finishes
+      # normally; the compare-and-set transitions are what keep the loser honest.
+      send(handler, :proceed)
+      assert :ok = Task.await(task, 5_000)
+    end
+  end
+
   describe "lease contention" do
     test "snoozes when another owner holds an unexpired lease" do
       release = plan(insert(:deployment))
