@@ -73,6 +73,7 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       aliases: Map.get(capture, :aliases, []),
       command: Map.get(capture, :command),
       entrypoint: Map.get(capture, :entrypoint),
+      host_network: Map.get(capture, :host_network, false),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
@@ -93,9 +94,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       source: "adopted",
       source_id: name,
       description: "Adopted from existing container #{name}",
-      # Host exposure so the cutover container can bind the original's host ports
-      # (spec_builder only binds host ports in :host mode).
-      exposure_mode: :host,
+      # Reproduce how the original was REACHED, not just what it ran. `:host` so the
+      # cutover container can bind the original's host ports (spec_builder only binds
+      # them in that mode) — unless the original was on the host's network, which
+      # publishes no bindings to import and needs the namespace itself carried over.
+      exposure_mode: if(Map.get(review, :host_network, false), do: :host_network, else: :host),
       volumes: Enum.map(review.preserve, &volume_entry(name, &1, strategy)),
       # The cutover renames the container. Its siblings do not know that: an app's config
       # says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Carry the names it already
