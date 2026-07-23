@@ -1732,7 +1732,16 @@ defmodule HomelabWeb.DeployWizardLive do
                 Host-ports access: each listed port binds to the host. Set the host port for each.
               </p>
               <p
-                :if={@exposure_mode != "host"}
+                :if={@exposure_mode == "host_network"}
+                class="text-[11px] text-base-content/40 mb-2 leading-snug"
+              >
+                Host-network access: the container listens on these ports
+                <span class="font-medium">on the host itself</span>
+                — there is nothing to map, so no host port to set. They're listed here for the
+                healthcheck and for your own record.
+              </p>
+              <p
+                :if={@exposure_mode not in ["host", "host_network"]}
                 class="text-[11px] text-base-content/40 mb-2 leading-snug"
               >
                 These are the container's ports. They're reached through the reverse proxy — choose
@@ -2336,12 +2345,12 @@ defmodule HomelabWeb.DeployWizardLive do
         </div>
       </.form>
 
-      <%!-- Access (single coherent choice: proxy XOR host XOR internal) --%>
+      <%!-- Access (single coherent choice: proxy XOR host ports XOR host network XOR internal) --%>
       <div class="rounded-lg bg-base-100 border border-base-content/5 p-3 mt-4">
         <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
           <.icon name="hero-shield-check-mini" class="size-4 text-success" /> Access
         </h3>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
           <.access_option
             access="proxy"
             current={@access}
@@ -2355,6 +2364,13 @@ defmodule HomelabWeb.DeployWizardLive do
             icon="hero-server-stack"
             title="Host ports"
             desc="Bind container ports to the host"
+          />
+          <.access_option
+            access="host_network"
+            current={@access}
+            icon="hero-signal"
+            title="Host network"
+            desc="Share the host's network namespace"
           />
           <.access_option
             access="internal"
@@ -2390,6 +2406,19 @@ defmodule HomelabWeb.DeployWizardLive do
         >
           <p class="text-[11px] text-base-content/40 leading-relaxed">
             Container ports bind directly to the host — set which on the next step. Not reverse-proxied.
+          </p>
+        </div>
+
+        <div
+          :if={@access == "host_network"}
+          class="mt-2.5 rounded-md bg-warning/5 border border-warning/20 py-2 px-3"
+        >
+          <p class="text-[11px] text-base-content/40 leading-relaxed">
+            The container runs in the host's network namespace — it listens on the host's ports
+            directly, with nothing mapped. Pick this for apps that need broadcast or multicast
+            discovery (mDNS, SSDP, DHCP), which a published port cannot forward. It gives up
+            network isolation from the host: no tenant network, no reverse proxy, and no
+            container-to-container DNS.
           </p>
         </div>
 
@@ -2673,6 +2702,19 @@ defmodule HomelabWeb.DeployWizardLive do
               No environment variables
             </p>
           </div>
+        </div>
+
+        <%!-- Warning for host-network mode --%>
+        <div
+          :if={@exposure_mode == "host_network"}
+          class="rounded-md bg-warning/5 border border-warning/20 py-2 px-3 flex items-start gap-2"
+        >
+          <.icon name="hero-signal-mini" class="size-4 text-warning mt-0.5 flex-shrink-0" />
+          <p class="text-[11px] text-base-content/40 leading-relaxed">
+            <span class="font-medium text-base-content/60">Host network:</span>
+            The container shares the host's network namespace. Every port it listens on is open on
+            the host directly — no mapping, no tenant network, and no Traefik route.
+          </p>
         </div>
 
         <%!-- Warning for service mode --%>
@@ -3133,6 +3175,8 @@ defmodule HomelabWeb.DeployWizardLive do
   defp format_exposure("public"), do: "Public"
   defp format_exposure("sso_protected"), do: "SSO Protected"
   defp format_exposure("private"), do: "Private"
+  defp format_exposure("host"), do: "Host ports"
+  defp format_exposure("host_network"), do: "Host network"
   defp format_exposure("service"), do: "Service (proxy-only)"
   defp format_exposure(other), do: to_string(other)
 
