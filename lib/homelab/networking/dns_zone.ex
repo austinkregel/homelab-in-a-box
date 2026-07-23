@@ -31,4 +31,41 @@ defmodule Homelab.Networking.DnsZone do
     )
     |> unique_constraint(:name)
   end
+
+  @doc """
+  Changeset for editing an existing zone.
+
+  A zone had no edit path at all, so moving one from `manual` to `cloudflare` meant
+  deleting it and cascading away every record it held — for what is really a change of
+  who answers for the same names.
+
+  `name` is deliberately not castable here: the records and domains hanging off this
+  zone are all scoped to that name, so renaming it is a migration rather than an edit.
+
+  Changing the provider resets `sync_status` to `:pending`, because what the previous
+  provider had published says nothing about the new one — but only when the caller did
+  not state a status itself. The registrar sync changes the provider and knows the
+  result is synced; an operator editing the form in the UI does not.
+  """
+  def update_changeset(zone, attrs) do
+    zone
+    |> cast(attrs, @optional_fields)
+    |> reset_sync_on_provider_change(zone)
+  end
+
+  defp reset_sync_on_provider_change(changeset, zone) do
+    provider_moved? =
+      case get_change(changeset, :provider) do
+        nil -> false
+        provider -> provider != zone.provider
+      end
+
+    if provider_moved? and get_change(changeset, :sync_status) == nil do
+      changeset
+      |> put_change(:sync_status, :pending)
+      |> put_change(:last_synced_at, nil)
+    else
+      changeset
+    end
+  end
 end
