@@ -815,6 +815,101 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  # The spec a host-network deployment produces is defined as much by what it OMITS as
+  # by the network name: aliases, port bindings and a routing label are each rejected by
+  # the daemon next to host networking, not ignored, so emitting one fails the deploy.
+  describe "host network access" do
+    test "the container is placed in the host's namespace instead of the tenant network" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :host_network})
+      deployment = build_deployment(tenant, template, %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.network == "host"
+      assert spec.host_network == true
+      refute spec.network =~ "homelab_tenant_"
+    end
+
+    test "nothing is published — the container already listens on the host's ports" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :host_network, ports: host_ports()})
+      deployment = build_deployment(tenant, template, %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == []
+    end
+
+    test "network aliases are dropped — there is no embedded DNS to register them in" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{exposure_mode: :host_network, network_aliases: ["mysql", "db"]})
+
+      deployment = build_deployment(tenant, template, %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.network_aliases == []
+    end
+
+    test "a stray domain still produces no Traefik route — there is no backend IP to route to" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :host_network, ports: host_ports()})
+      deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      refute spec.labels["traefik.enable"]
+      assert spec.labels["homelab.exposure"] == "host_network"
+      refute spec.service_mode
+    end
+
+    test "the healthcheck still probes the app's port (localhost IS the host here)" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :host_network,
+          ports: host_ports(),
+          health_check: %{"path" => "/healthz"}
+        })
+
+      deployment = build_deployment(tenant, template, %{routed_port: 8080, domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert [_cmd_shell, probe] = spec.health_check["Test"]
+      assert probe =~ "http://localhost:8080/healthz"
+    end
+
+    test "a per-deployment override can put an otherwise-proxied app on the host network" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :sso_protected, ports: host_ports()})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          exposure_mode_override: "host_network",
+          domain: "app.friends.test"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.network == "host"
+      assert spec.host_network == true
+      assert spec.ports == []
+      refute spec.labels["traefik.enable"]
+    end
+
+    test "every other access mode leaves host_network false" do
+      tenant = build_tenant()
+
+      for mode <- [:public, :sso_protected, :private, :host, :service] do
+        deployment =
+          build_deployment(tenant, build_template(%{exposure_mode: mode}), %{domain: nil})
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+        refute spec.host_network, "#{mode} must not be on the host network"
+        assert spec.network =~ "homelab_tenant_"
+      end
+    end
+  end
+
   describe "GPU" do
     test "no GPU by default" do
       tenant = build_tenant()
