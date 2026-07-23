@@ -456,6 +456,13 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
   defp maybe_put_healthcheck(spec, _healthcheck), do: spec
 
+  # A host-network service attaches to exactly one thing: `host`. Swarm accepts the
+  # predefined host network as a task's network (it is how `--network host` reaches a
+  # service), but a task in the host namespace has no endpoint on any overlay, so
+  # naming a second network alongside it is rejected. No aliases either — the host
+  # network has no embedded DNS to register one in.
+  defp build_networks(%{host_network: true}), do: [%{"Target" => "host"}]
+
   defp build_networks(spec) do
     # Aliases go on the PRIMARY network only: that is where the rest of an adopted stack
     # lives, and it is the name its siblings resolve. Putting them on the shared routing
