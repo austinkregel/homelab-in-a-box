@@ -28,6 +28,26 @@ defmodule Homelab.Deployments.SpecBuilder do
   net only. Sharing a datastore across apps is done by multi-homing it onto the
   consuming app's network — never by exposing it publicly.
 
+  ### Host networking
+
+  `:host_network` opts out of the model above entirely: the container is placed in the
+  HOST's network namespace (`network: "host"`, `host_network: true`), which is what an
+  app needing broadcast/multicast discovery (Home Assistant, Plex, Jellyfin, AdGuard,
+  anything doing mDNS/SSDP/DHCP) actually requires — a published port forwards unicast
+  TCP and drops the discovery traffic on the floor.
+
+  The spec that comes out is deliberately *narrower*, because the daemon rejects every
+  one of these alongside host networking rather than ignoring them:
+
+    * `ports: []` — there is no mapping to make; the container listens on the host's
+      ports directly. Docker discards `PortBindings` in host mode with a warning.
+    * `network_aliases: []` — a network-scoped alias is a user-defined-network feature.
+    * no ingress/bridge attachment — a container in the host namespace has no endpoint
+      on any other network and cannot be connected to one.
+
+  That last point is why host networking is exclusive with the proxy modes and not a
+  flag on top of them: Traefik's Docker provider has no backend IP to route to.
+
   NOTE: the older per-deployment network (`deployment_network/2`) is retained only
   for the vestigial `publish`/`unpublish` calls (Traefik was never actually on those
   nets); routing is now enforced by Traefik's Docker provider over the shared
@@ -47,6 +67,7 @@ defmodule Homelab.Deployments.SpecBuilder do
           volumes: [map()],
           ports: [map()],
           network: String.t(),
+          host_network: boolean(),
           labels: map(),
           replicas: pos_integer(),
           memory_limit: pos_integer(),
@@ -61,8 +82,10 @@ defmodule Homelab.Deployments.SpecBuilder do
     tenant = deployment.tenant
 
     with :ok <- validate_required_env(template, deployment.env_overrides) do
-      # Access model: only :host binds host ports; proxy/:service never do.
+      # Access model: only :host binds host ports; proxy/:service never do, and
+      # :host_network has nothing to bind — it is already on the host's ports.
       service_mode? = Access.effective_exposure(deployment) == :service
+      host_network? = Access.host_network_mode?(deployment)
       ports = build_ports(deployment)
 
       # Network model (see moduledoc): the PRIMARY network is the tenant-scoped
@@ -71,7 +94,10 @@ defmodule Homelab.Deployments.SpecBuilder do
       # network by the orchestrator (on `traefik.enable`); a `:service` datastore
       # stays on the app network only, so it is never publicly reachable. Traefik
       # reaches the web over the ingress network, named in the routing label below.
-      primary_network = tenant_network(tenant)
+      #
+      # `:host_network` replaces the primary with Docker's predefined `host` network:
+      # no tenant isolation, because there is no network to isolate it on.
+      primary_network = if host_network?, do: "host", else: tenant_network(tenant)
       bridge_networks = []
 
       base_labels = build_labels(template, tenant, deployment)
@@ -90,9 +116,15 @@ defmodule Homelab.Deployments.SpecBuilder do
         ports: ports,
         network: primary_network,
         bridge_networks: bridge_networks,
+        # The container lives in the HOST's network namespace. The drivers read this
+        # rather than string-matching the network name, and it is what tells them to
+        # skip everything host mode forbids (see moduledoc).
+        host_network: host_network?,
         # Extra names this container answers to on its network. Adoption fills these with
         # the original's compose service name, so the rest of the stack keeps resolving it.
-        network_aliases: template.network_aliases || [],
+        # Meaningless — and rejected by the daemon — on the host network, which has no
+        # embedded DNS to register a name with.
+        network_aliases: if(host_network?, do: [], else: template.network_aliases || []),
         # nil = the image's default. Adoption sets these to what the original actually ran.
         command: template.command,
         entrypoint: template.entrypoint,
@@ -290,6 +322,11 @@ defmodule Homelab.Deployments.SpecBuilder do
   # sso_protected/private) are reached through Traefik and :service is internal —
   # neither binds a host port, so there's no silent override and a protected app
   # can never be reached on the host bypassing its auth.
+  #
+  # :host_network binds nothing either, for the opposite reason: the container is
+  # ALREADY on the host's ports. Emitting a binding there is not a smaller version of
+  # the same thing — the daemon discards it, and a spec that claimed a mapping would
+  # have the UI show a host port that no rule anywhere actually created.
   defp build_ports(%Deployment{} = deployment) do
     if Access.effective_exposure(deployment) == :host do
       bind_host_ports(deployment)
