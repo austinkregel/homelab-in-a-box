@@ -30,6 +30,9 @@ defmodule Homelab.Deployments.Access do
 
   @proxy_modes [:public, :sso_protected, :private]
 
+  # What both drivers hardcoded before a restart policy could be chosen at all.
+  @default_restart_policy "on-failure"
+
   # UI metadata: top-level access choices and the proxy auth sub-choices.
   @access_choices [
     {"proxy", "Reverse proxy", "Served via Traefik at a domain"},
@@ -102,6 +105,39 @@ defmodule Homelab.Deployments.Access do
     do: t.health_check || %{}
 
   def effective_health_check(%Deployment{health_check_override: hc}), do: hc
+
+  @doc """
+  Effective restart policy (nil = the platform default).
+
+  Not an inherited value: there is no template field for it. Before this was settable
+  both drivers hardcoded `on-failure` with three attempts, so that stays the default.
+  """
+  def effective_restart_policy(%Deployment{restart_policy_override: nil}), do: @default_restart_policy
+  def effective_restart_policy(%Deployment{restart_policy_override: policy}), do: policy
+
+  @doc "Effective replica count (nil = 1). Swarm only; Engine has no replicas."
+  def effective_replicas(%Deployment{replicas_override: nil}), do: 1
+  def effective_replicas(%Deployment{replicas_override: replicas}), do: replicas
+
+  @doc """
+  Effective command (override wins; nil = inherit the template).
+
+  `[]` is a real value, not an absent one — it means "run no command", distinct from
+  "run whatever the template says". Same for `effective_entrypoint/1`, where an empty
+  list clears the image's own entrypoint.
+  """
+  def effective_command(%Deployment{command_override: nil, app_template: t}), do: t.command
+  def effective_command(%Deployment{command_override: command}), do: command
+
+  @doc "Effective entrypoint (override wins; nil = inherit the template)."
+  def effective_entrypoint(%Deployment{entrypoint_override: nil, app_template: t}), do: t.entrypoint
+  def effective_entrypoint(%Deployment{entrypoint_override: entrypoint}), do: entrypoint
+
+  @doc "Effective network aliases (override wins; nil = inherit the template)."
+  def effective_network_aliases(%Deployment{network_aliases_override: nil, app_template: t}),
+    do: t.network_aliases || []
+
+  def effective_network_aliases(%Deployment{network_aliases_override: aliases}), do: aliases
 
   def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
   def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
