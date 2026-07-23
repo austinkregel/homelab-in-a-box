@@ -486,7 +486,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     # An ADOPTED container is by definition already running its image, and a stack that
     # builds its own has no registry to pull from. Failing the pull rolled the cutover
     # back on an image the daemon was holding the whole time.
-    test "a pull failure is survivable when the daemon already holds the image" do
+    test "a pull failure is survivable for a :local image the daemon already holds" do
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
@@ -498,7 +498,55 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         _path, _body, _opts -> {:ok, %{}}
       end)
 
-      assert {:ok, "c123"} = DockerEngine.deploy(base_spec())
+      assert {:ok, "c123"} = DockerEngine.deploy(base_spec(%{image_source: :local}))
+    end
+
+    test "a :registry image fails hard even when the daemon holds it locally" do
+      # The regression that makes a version change trustworthy. The daemon answers
+      # /images/<ref>/json for the OLD image under a ref that still resolves, so the
+      # old code called this a success and the operator was told they had upgraded.
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
+        {:error, :unauthorized}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, _body, _opts -> {:ok, %{"Id" => "c123"}}
+        _path, _body, _opts -> {:ok, %{}}
+      end)
+
+      assert {:error, {:pull_failed, "nginx:latest", :unauthorized}} =
+               DockerEngine.deploy(base_spec(%{image_source: :registry}))
+    end
+
+    test "a spec that does not declare an image source fails closed" do
+      # Guessing :local would mean a deploy that reports success while running the
+      # wrong image, so the absent case must be the strict one.
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts ->
+        {:error, :unauthorized}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, _body, _opts -> {:ok, %{"Id" => "c123"}}
+        _path, _body, _opts -> {:ok, %{}}
+      end)
+
+      assert {:error, {:pull_failed, _image, :unauthorized}} = DockerEngine.deploy(base_spec())
+    end
+
+    test "a locally-built image still skips the pull entirely" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, _body, _opts -> {:ok, %{"Id" => "c123"}}
+        _path, _body, _opts -> {:ok, %{}}
+      end)
+
+      # No post_stream stub: reaching the pull at all would fail the test.
+      assert {:ok, "c123"} = DockerEngine.deploy(base_spec(%{image: "homelab-built/app:v1"}))
     end
 
     test "propagates a container create failure" do

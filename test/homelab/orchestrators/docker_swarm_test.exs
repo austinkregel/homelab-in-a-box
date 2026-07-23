@@ -408,6 +408,36 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert image == spec.image
     end
 
+    test "a :registry image fails hard even when the daemon holds it locally" do
+      # A version bump whose new tag will not pull must not quietly keep running the
+      # old image and report the release as successful.
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> {:error, :nope} end)
+
+      assert {:error, {:pull_failed, _image, :nope}} =
+               DockerSwarm.deploy(build_spec() |> Map.put(:image_source, :registry))
+    end
+
+    test "a pull failure is survivable for a :local image the daemon already holds" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> {:error, :nope} end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/services/create", _body, _opts -> {:ok, %{"ID" => "svc123"}}
+        _path, _body, _opts -> {:ok, %{}}
+      end)
+
+      assert {:ok, "svc123"} = DockerSwarm.deploy(build_spec() |> Map.put(:image_source, :local))
+    end
+
+    test "a spec that does not declare an image source fails closed" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> {:error, :nope} end)
+
+      assert {:error, {:pull_failed, _image, :nope}} = DockerSwarm.deploy(build_spec())
+    end
+
     test "routing network is added when traefik.enable is true" do
       spec =
         build_spec()

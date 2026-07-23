@@ -107,6 +107,48 @@ defmodule Homelab.Deployments.ImageOverrideTest do
     end
   end
 
+  describe "SpecBuilder image_source" do
+    test "a catalog deployment must pull from a registry" do
+      assert {:ok, spec} = SpecBuilder.build(deployment())
+      assert spec.image_source == :registry
+    end
+
+    test "an adopted deployment may fall back to the local image" do
+      # An adopted container is by definition already running its image; there may be
+      # no registry that ever had it.
+      d = deployment(%{app_template: template(%{source: "adopted"})})
+      assert {:ok, spec} = SpecBuilder.build(d)
+      assert spec.image_source == :local
+    end
+
+    test "a Workbench-built deployment may fall back to the local image" do
+      d = deployment(%{app_template: template(%{source: "built"})})
+      assert {:ok, spec} = SpecBuilder.build(d)
+      assert spec.image_source == :local
+    end
+
+    test "a compose import must pull from a registry" do
+      d = deployment(%{app_template: template(%{source: "compose"})})
+      assert {:ok, spec} = SpecBuilder.build(d)
+      assert spec.image_source == :registry
+    end
+
+    test "an explicit override forces a registry pull even for an adopted app" do
+      # The rule that makes the version picker trustworthy: an operator who named a
+      # ref wants THAT ref, and a stale local image reported as an upgrade is the
+      # exact failure this feature exists to fix.
+      d =
+        deployment(%{
+          app_template: template(%{source: "adopted"}),
+          image_override: "gitlab/gitlab-ce:17.0.0"
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(d)
+      assert spec.image_source == :registry
+      assert spec.image == "gitlab/gitlab-ce:17.0.0"
+    end
+  end
+
   describe "changeset validation" do
     defp change(attrs), do: Deployment.changeset(%Deployment{}, base_attrs(attrs))
 
