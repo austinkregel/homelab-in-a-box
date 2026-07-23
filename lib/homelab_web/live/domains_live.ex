@@ -18,6 +18,7 @@ defmodule HomelabWeb.DomainsLive do
       |> assign(:active_tab, "zones")
       |> assign(:show_modal, nil)
       |> assign(:modal_form, nil)
+      |> assign(:editing_zone_id, nil)
       |> assign(:syncing, false)
       |> load_all_data()
 
@@ -47,21 +48,47 @@ defmodule HomelabWeb.DomainsLive do
 
   def handle_event("open_add_zone", _params, socket) do
     form = to_form(%{"name" => "", "provider" => "manual"}, as: :zone)
-    {:noreply, assign(socket, show_modal: :add_zone, modal_form: form)}
+    {:noreply, assign(socket, show_modal: :add_zone, modal_form: form, editing_zone_id: nil)}
+  end
+
+  # A zone had no edit path, so changing who answers for it meant deleting the zone and
+  # cascading away every record it held.
+  def handle_event("open_edit_zone", %{"id" => id}, socket) do
+    zone = Networking.get_dns_zone!(String.to_integer(id))
+
+    form =
+      to_form(
+        %{
+          "name" => zone.name,
+          "provider" => zone.provider,
+          "provider_zone_id" => zone.provider_zone_id || ""
+        },
+        as: :zone
+      )
+
+    {:noreply, assign(socket, show_modal: :add_zone, modal_form: form, editing_zone_id: zone.id)}
   end
 
   def handle_event("close_modal", _params, socket) do
-    {:noreply, assign(socket, show_modal: nil, modal_form: nil)}
+    {:noreply, assign(socket, show_modal: nil, modal_form: nil, editing_zone_id: nil)}
   end
 
   def handle_event("save_zone", %{"zone" => params}, socket) do
-    case Networking.create_dns_zone(params) do
+    result =
+      case socket.assigns[:editing_zone_id] do
+        nil -> Networking.create_dns_zone(params)
+        id -> Networking.update_dns_zone(Networking.get_dns_zone!(id), params)
+      end
+
+    case result do
       {:ok, _zone} ->
+        verb = if socket.assigns[:editing_zone_id], do: "updated", else: "created"
+
         {:noreply,
          socket
          |> load_all_data()
-         |> assign(show_modal: nil, modal_form: nil)
-         |> put_flash(:info, "Zone created successfully!")}
+         |> assign(show_modal: nil, modal_form: nil, editing_zone_id: nil)
+         |> put_flash(:info, "Zone #{verb} successfully!")}
 
       {:error, changeset} ->
         {:noreply, assign(socket, modal_form: to_form(changeset, as: :zone))}
@@ -366,8 +393,12 @@ defmodule HomelabWeb.DomainsLive do
         <%!-- Modals --%>
         <.modal
           :if={@show_modal == :add_zone}
-          title="Add DNS Zone"
-          subtitle="Create a new DNS zone for domain management"
+          title={if @editing_zone_id, do: "Edit DNS Zone", else: "Add DNS Zone"}
+          subtitle={
+            if @editing_zone_id,
+              do: "Change who answers for this zone",
+              else: "Create a new DNS zone for domain management"
+          }
           icon="hero-server-stack"
           on_close="close_modal"
         >
@@ -381,8 +412,13 @@ defmodule HomelabWeb.DomainsLive do
                 type="text"
                 placeholder="example.com"
                 required
-                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+                disabled={@editing_zone_id != nil}
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
               />
+              <p :if={@editing_zone_id} class="mt-1.5 text-xs text-base-content/50">
+                Every record and domain in this zone is scoped to its name, so renaming it
+                means recreating them. Delete and re-add the zone to use a different name.
+              </p>
             </div>
             <div>
               <label class="block text-sm font-medium text-base-content/70 mb-1.5">
@@ -392,9 +428,28 @@ defmodule HomelabWeb.DomainsLive do
                 name="zone[provider]"
                 class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
               >
-                <option value="manual">Manual</option>
-                <option value="cloudflare">Cloudflare</option>
+                <option value="manual" selected={@modal_form[:provider].value == "manual"}>
+                  Manual
+                </option>
+                <option value="cloudflare" selected={@modal_form[:provider].value == "cloudflare"}>
+                  Cloudflare
+                </option>
               </select>
+              <p :if={@editing_zone_id} class="mt-1.5 text-xs text-base-content/50">
+                Changing the provider marks the zone unsynced — what the old provider had
+                published says nothing about the new one.
+              </p>
+            </div>
+            <div :if={@editing_zone_id}>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+                Provider zone ID
+              </label>
+              <.input
+                field={@modal_form[:provider_zone_id]}
+                type="text"
+                placeholder="The provider's own identifier for this zone"
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
             </div>
             <.modal_actions />
           </.form>
@@ -632,15 +687,25 @@ defmodule HomelabWeb.DomainsLive do
                 <.sync_status_badge status={zone.sync_status} />
               </td>
               <td class="px-6 py-4 text-right">
-                <button
-                  type="button"
-                  phx-click="delete_zone"
-                  phx-value-id={zone.id}
-                  data-confirm="Delete this zone and all its records?"
-                  class="text-xs text-error/60 hover:text-error transition-colors cursor-pointer"
-                >
-                  Delete
-                </button>
+                <div class="flex items-center justify-end gap-3">
+                  <button
+                    type="button"
+                    phx-click="open_edit_zone"
+                    phx-value-id={zone.id}
+                    class="text-xs text-base-content/50 hover:text-base-content transition-colors cursor-pointer"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    phx-click="delete_zone"
+                    phx-value-id={zone.id}
+                    data-confirm="Delete this zone and all its records?"
+                    class="text-xs text-error/60 hover:text-error transition-colors cursor-pointer"
+                  >
+                    Delete
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
