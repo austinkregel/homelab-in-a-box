@@ -10,11 +10,20 @@ defmodule Homelab.Deployments.Access do
       binds a host port.
     * **Host ports** (`:host`) — binds the published container ports to the host.
       Never proxied.
+    * **Host network** (`:host_network`) — the container shares the HOST's network
+      namespace (`--network host`). Every port it listens on is already on the host,
+      so nothing is mapped and nothing is published. Never proxied.
     * **Internal only** (`:service`) — no external access.
 
   Proxy XOR host: a deployment is reached exactly one way, so there are no silent
   overrides (a domain can't suppress a host port) and a protected app can't be
   reached on the host bypassing its auth.
+
+  `:host_network` is exclusive for a harder reason than policy — the daemon enforces
+  it. A container in the host's namespace has no address of its own on any bridge or
+  overlay, so it cannot be attached to another network at all, and Traefik's Docker
+  provider has no backend IP to route to. There is no configuration in which host
+  networking and a proxy route coexist.
   """
 
   alias Homelab.Deployments.Deployment
@@ -25,6 +34,7 @@ defmodule Homelab.Deployments.Access do
   @access_choices [
     {"proxy", "Reverse proxy", "Served via Traefik at a domain"},
     {"host", "Host ports", "Bind container ports to the host"},
+    {"host_network", "Host network", "Share the host's network namespace"},
     {"internal", "Internal only", "No external access"}
   ]
   @auth_choices [
@@ -73,16 +83,21 @@ defmodule Homelab.Deployments.Access do
 
   def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
   def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
+  def host_network_mode?(%Deployment{} = d), do: effective_exposure(d) == :host_network
   def internal_mode?(%Deployment{} = d), do: effective_exposure(d) == :service
 
   def proxy_modes, do: @proxy_modes
   def access_choices, do: @access_choices
   def auth_choices, do: @auth_choices
 
-  @doc "Top-level access key (\"proxy\" | \"host\" | \"internal\") for an exposure value."
+  @doc ~S"""
+  Top-level access key (`"proxy" | "host" | "host_network" | "internal"`) for an
+  exposure value.
+  """
   def access_of(exposure) do
     case to_atom(exposure) do
       :host -> "host"
+      :host_network -> "host_network"
       :service -> "internal"
       _ -> "proxy"
     end
@@ -101,6 +116,7 @@ defmodule Homelab.Deployments.Access do
   Auth only applies to proxy access.
   """
   def exposure_for("host", _auth), do: "host"
+  def exposure_for("host_network", _auth), do: "host_network"
   def exposure_for("internal", _auth), do: "service"
   def exposure_for("proxy", auth) when auth in ~w(public sso_protected private), do: auth
   def exposure_for("proxy", _auth), do: "public"
