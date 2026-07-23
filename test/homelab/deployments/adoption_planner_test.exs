@@ -105,6 +105,24 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert service.template_attrs.description =~ "Adopted from existing container"
     end
 
+    # A container on the host's network publishes NO port bindings, so the port import
+    # has nothing to read. Adopting it as :host produced a replacement on a private
+    # bridge, reachable on nothing — and silently killed the mDNS/SSDP discovery the
+    # original was on the host network for in the first place.
+    test "a container that ran on the host's network is adopted onto the host's network" do
+      plan = AdoptionPlanner.build_plan([review_fixture(%{host_network: true})])
+
+      [service] = plan.services
+      assert service.template_attrs.exposure_mode == :host_network
+    end
+
+    test "a container on a bridge network is still adopted with host ports" do
+      plan = AdoptionPlanner.build_plan([review_fixture(%{host_network: false})])
+
+      [service] = plan.services
+      assert service.template_attrs.exposure_mode == :host
+    end
+
     test "proposes a managed template referencing the permanent-home volume + captured user" do
       plan = AdoptionPlanner.build_plan([review_fixture()])
 
