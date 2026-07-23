@@ -37,7 +37,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
     # cleanup, a sibling deploy's rollback, or a prune — before the container ever
     # attached, surfacing as "network <name> not found" at create time. Ensuring the
     # network right before the create closes that window.
-    with :ok <- pull_image(spec.image),
+    with :ok <- pull_image(spec.image, image_source(spec)),
          :ok <- ensure_network(spec.network) do
       body = build_container_payload(spec)
 
@@ -260,15 +260,20 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   # --- Image Management ---
 
+  # Whether this spec's image has a registry behind it. A spec that does not say is
+  # treated as `:registry` -- fail closed, because the failure mode of guessing
+  # `:local` is a deploy that reports success while running the wrong image.
+  defp image_source(spec), do: Map.get(spec, :image_source, :registry)
+
   # Images built in the Workbench live only in the local image store and have no
   # registry to pull from, so skip the pull for the local-build namespace.
-  defp pull_image("homelab-built/" <> _ = image) do
+  defp pull_image("homelab-built/" <> _ = image, _source) do
     require Logger
     Logger.info("[DockerEngine] Using locally-built image #{image} (skipping pull)")
     :ok
   end
 
-  defp pull_image(image) do
+  defp pull_image(image, source) do
     require Logger
     Logger.info("[DockerEngine] Pulling image #{image}...")
 
@@ -280,11 +285,12 @@ defmodule Homelab.Orchestrators.DockerEngine do
         :ok
 
       {:error, reason} ->
-        # A pull failure is not fatal if the daemon already holds the image. An ADOPTED
-        # container is by definition running its image, and for any stack that builds its
-        # own there is no registry to pull it from -- so failing here rolled the cutover
-        # back on an image that was sitting in the local store the whole time.
-        if Homelab.Docker.Image.present?(image) do
+        # Whether a pull failure is survivable is a property of the SPEC, not of what
+        # the daemon happens to be holding. An adopted or locally-built image has no
+        # registry to be pulled from, so failing there rolls a cutover back on an image
+        # the daemon already has. Everything else must come from the registry: falling
+        # back would run the old image and report the upgrade as done.
+        if source == :local and Homelab.Docker.Image.present?(image) do
           Logger.warning(
             "[DockerEngine] Could not pull #{image} (#{inspect(reason)}) — using the local image"
           )
