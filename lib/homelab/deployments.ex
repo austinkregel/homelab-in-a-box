@@ -76,9 +76,26 @@ defmodule Homelab.Deployments do
     |> Deployment.changeset(attrs)
     |> Repo.update()
     |> case do
-      {:ok, deployment} -> {:ok, Repo.preload(deployment, [:tenant, :app_template], force: true)}
-      error -> error
+      {:ok, updated} ->
+        updated = Repo.preload(updated, [:tenant, :app_template], force: true)
+
+        # The Domain row is DERIVED from the deployment, and it used to be written once
+        # at first deploy and never revisited — only `do_deploy/1` touched it, and that
+        # runs on the create path only. So changing a deployment's domain left the old
+        # row (with its TLS state and DNS-zone link) claiming this deployment, and never
+        # created one for the new name at all.
+        if domain_or_exposure_changed?(deployment, updated), do: sync_domain_records(updated)
+
+        {:ok, updated}
+
+      error ->
+        error
     end
+  end
+
+  defp domain_or_exposure_changed?(before, mutated) do
+    before.domain != mutated.domain or
+      before.exposure_mode_override != mutated.exposure_mode_override
   end
 
   def update_status(%Deployment{} = deployment, status, opts \\ []) do
@@ -527,10 +544,41 @@ defmodule Homelab.Deployments do
 
   defp post_deploy_hooks(%{domain: domain} = deployment)
        when is_binary(domain) and domain != "" do
-    exposure = deployment.app_template.exposure_mode || :public
+    sync_domain_records(deployment)
+    create_dns_records(deployment)
+  end
+
+  defp post_deploy_hooks(_deployment), do: :ok
+
+  @doc """
+  Brings the `Domain` rows for a deployment in line with the domain it is actually
+  served at: retires rows for names it no longer answers to, and creates or reclaims
+  the row for its current one.
+
+  Public because it has two callers with nothing else in common — first deploy, and
+  any later edit that moves the domain or changes the exposure.
+  """
+  def sync_domain_records(%Deployment{domain: domain} = deployment)
+      when is_binary(domain) and domain != "" do
+    deployment = Repo.preload(deployment, [:app_template])
+
+    # The EFFECTIVE exposure, not the template's. This read `app_template.exposure_mode`
+    # and ignored `exposure_mode_override`, so a deployment moved to :public kept a
+    # Domain row claiming it was SSO-protected.
+    exposure = Access.effective_exposure(deployment) || :public
+
+    retire_stale_domains(deployment, domain)
 
     case Homelab.Networking.get_domain_by_fqdn(domain) do
-      {:ok, _existing} ->
+      {:ok, existing} ->
+        # Reclaim a row that already exists for this fqdn rather than leaving it
+        # pointing at whatever created it.
+        _ =
+          Homelab.Networking.update_domain(existing, %{
+            deployment_id: deployment.id,
+            exposure_mode: exposure
+          })
+
         :ok
 
       {:error, :not_found} ->
@@ -553,11 +601,36 @@ defmodule Homelab.Deployments do
             )
         end
     end
-
-    create_dns_records(deployment)
   end
 
-  defp post_deploy_hooks(_deployment), do: :ok
+  # A deployment with no domain answers to no name, so every row it holds is stale.
+  def sync_domain_records(%Deployment{} = deployment),
+    do: retire_stale_domains(deployment, nil)
+
+  # Domains this deployment used to answer to and no longer does. Deleted rather than
+  # left orphaned: the row carries TLS state and a DNS-zone link for a name this
+  # deployment is not served at any more, and `unique_constraint(:fqdn)` means it would
+  # otherwise sit on that name forever, blocking a legitimate reuse.
+  defp retire_stale_domains(deployment, current_fqdn) do
+    deployment.id
+    |> Homelab.Networking.list_domains_for_deployment()
+    |> Enum.reject(&(&1.fqdn == current_fqdn))
+    |> Enum.each(fn stale ->
+      case Homelab.Networking.delete_domain(stale) do
+        {:ok, _} ->
+          ActivityLog.info("domain", "Retired domain record for #{stale.fqdn}", %{
+            deployment_id: deployment.id
+          })
+
+        {:error, reason} ->
+          ActivityLog.error(
+            "domain",
+            "Failed to retire domain #{stale.fqdn}: #{inspect(reason)}",
+            %{deployment_id: deployment.id}
+          )
+      end
+    end)
+  end
 
   defp create_dns_records(%{domain: domain} = deployment)
        when is_binary(domain) and domain != "" do
