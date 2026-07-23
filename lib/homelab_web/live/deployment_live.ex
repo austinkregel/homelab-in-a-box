@@ -1098,7 +1098,7 @@ defmodule HomelabWeb.DeploymentLive do
               >
                 <div class="flex flex-col gap-1.5">
                   <label class="text-xs font-medium text-base-content/50">Access</label>
-                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
                     <label
                       :for={{value, title, desc} <- Access.access_choices()}
                       class={[
@@ -1347,6 +1347,53 @@ defmodule HomelabWeb.DeploymentLive do
                   </div>
                 </div>
 
+                <%!-- Host network: the container is IN the host's namespace, so there is no
+                   mapping to edit. The ports are still worth keeping — they drive the
+                   healthcheck — and rendering them keeps `ports_override` from being
+                   silently dropped on save, which would fall back to the template. --%>
+                <div
+                  :if={@settings_access == "host_network"}
+                  class="space-y-2 rounded-lg bg-base-200/40 p-3"
+                >
+                  <div class="flex items-center justify-between">
+                    <label class="text-xs font-medium text-base-content/50">
+                      Ports it listens on
+                    </label>
+                    <button
+                      type="button"
+                      phx-click="settings_add_port"
+                      class="text-xs text-primary hover:text-primary/80"
+                    >
+                      + Add port
+                    </button>
+                  </div>
+                  <p class="text-[11px] text-base-content/40">
+                    On the host's network these are the host's ports — nothing is mapped, so
+                    there is no separate host port to choose. A port already in use on the host
+                    will keep the container from starting.
+                  </p>
+                  <div
+                    :for={{port, idx} <- Enum.with_index(@settings_ports)}
+                    class="flex items-center gap-2"
+                  >
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][internal]"}
+                      value={port["internal"]}
+                      placeholder="port"
+                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    />
+                    <button
+                      type="button"
+                      phx-click="settings_remove_port"
+                      phx-value-index={idx}
+                      class="text-base-content/30 hover:text-error ml-auto"
+                    >
+                      <.icon name="hero-x-mark" class="size-4" />
+                    </button>
+                  </div>
+                </div>
+
                 <p
                   :if={@settings_access == "internal"}
                   class="text-[11px] text-base-content/40 rounded-lg bg-base-200/40 p-3"
@@ -1518,6 +1565,19 @@ defmodule HomelabWeb.DeploymentLive do
                         <span :for={p <- ports} class="block">
                           {p["internal"]} → {p["external"] || p["internal"]}
                         </span>
+                    <% end %>
+                  </dd>
+                </div>
+                <%!-- Host network: nothing is MAPPED, so these are shown as-is rather
+                   than as `container → host` pairs, which would imply a rule exists. --%>
+                <div :if={access == "host_network"} class="flex justify-between gap-4">
+                  <dt class="text-base-content/50">Listening on host</dt>
+                  <dd class="text-base-content font-mono text-right">
+                    <%= case Access.effective_ports(@deployment) do %>
+                      <% [] -> %>
+                        —
+                      <% ports -> %>
+                        <span :for={p <- ports} class="block">{p["internal"]}</span>
                     <% end %>
                   </dd>
                 </div>
@@ -2158,6 +2218,7 @@ defmodule HomelabWeb.DeploymentLive do
     case Access.access_of(exposure) do
       "proxy" -> "Reverse proxy (#{auth_label(Access.auth_of(exposure))})"
       "host" -> "Host ports"
+      "host_network" -> "Host network"
       "internal" -> "Internal only"
     end
   end
