@@ -38,6 +38,15 @@ defmodule HomelabWeb.DeployWizardLive do
       # run. Becomes the new deployment's image_override rather than a rewrite of the
       # shared template — see select_custom/3.
       |> assign(:image_override, nil)
+      # Advanced settings, held in assigns rather than form params: the review step has
+      # two layouts (form and visual), and threading hidden inputs through both is how
+      # they drift apart. These were editable only AFTER deploying, so a GPU or
+      # multi-port app always came up wrong once and needed an immediate recreate.
+      |> assign(:adv_memory_mb, "")
+      |> assign(:adv_cpu_shares, "")
+      |> assign(:adv_routed_port, "")
+      |> assign(:adv_sticky, false)
+      |> assign(:adv_restart_policy, "on-failure")
       |> assign(:enriching, nil)
       |> assign(:custom_image, "")
       |> assign(:custom_name, "")
@@ -341,6 +350,16 @@ defmodule HomelabWeb.DeployWizardLive do
       params = build_step_params(socket, "config")
       {:noreply, push_patch(socket, to: ~p"/deploy/new?#{params}")}
     end
+  end
+
+  def handle_event("advanced_changed", %{"advanced" => advanced}, socket) do
+    {:noreply,
+     socket
+     |> assign(:adv_memory_mb, advanced["memory_mb"] || "")
+     |> assign(:adv_cpu_shares, advanced["cpu_shares"] || "")
+     |> assign(:adv_routed_port, advanced["routed_port"] || "")
+     |> assign(:adv_restart_policy, advanced["restart_policy"] || "on-failure")
+     |> assign(:adv_sticky, advanced["sticky"] == "true")}
   end
 
   # --- Events: Compose ---
@@ -833,13 +852,15 @@ defmodule HomelabWeb.DeployWizardLive do
         Catalog.update_app_template(template, template_updates)
       end
 
-      attrs = %{
-        tenant_id: String.to_integer(tenant_id),
-        app_template_id: template.id,
-        domain: domain,
-        env_overrides: env_overrides,
-        image_override: socket.assigns[:image_override]
-      }
+      attrs =
+        %{
+          tenant_id: String.to_integer(tenant_id),
+          app_template_id: template.id,
+          domain: domain,
+          env_overrides: env_overrides,
+          image_override: socket.assigns[:image_override]
+        }
+        |> Map.merge(advanced_attrs(socket))
 
       case Homelab.Deployments.deploy_now(attrs) do
         {:ok, _deployment} ->
@@ -1187,6 +1208,11 @@ defmodule HomelabWeb.DeployWizardLive do
             tenants={@tenants}
             compose_services={@compose_services}
             deploy_type={@deploy_type}
+            adv_memory_mb={@adv_memory_mb}
+            adv_cpu_shares={@adv_cpu_shares}
+            adv_routed_port={@adv_routed_port}
+            adv_restart_policy={@adv_restart_policy}
+            adv_sticky={@adv_sticky}
           />
         <% else %>
           <.step_indicator current={@step} deploy_type={@deploy_type} />
@@ -1248,6 +1274,11 @@ defmodule HomelabWeb.DeployWizardLive do
               tenant_id={@tenant_id}
               tenants={@tenants}
               compose_services={@compose_services}
+              adv_memory_mb={@adv_memory_mb}
+              adv_cpu_shares={@adv_cpu_shares}
+              adv_routed_port={@adv_routed_port}
+              adv_restart_policy={@adv_restart_policy}
+              adv_sticky={@adv_sticky}
             />
           </div>
         <% end %>
@@ -2499,6 +2530,104 @@ defmodule HomelabWeb.DeployWizardLive do
   # Step 5: Review & Deploy
   # ============================================================
 
+  # Its own form, not nested in the deploy form — nested forms are invalid HTML and the
+  # browser drops the inner one's fields. Writes to assigns, which `advanced_attrs/1`
+  # reads at deploy time, so both review layouts get the same behaviour for free.
+  attr :memory_mb, :string, required: true
+  attr :cpu_shares, :string, required: true
+  attr :routed_port, :string, required: true
+  attr :restart_policy, :string, required: true
+  attr :sticky, :boolean, required: true
+
+  defp advanced_panel(assigns) do
+    ~H"""
+    <details class="rounded-lg bg-base-100 border border-base-content/5 p-3">
+      <summary class="text-sm font-semibold text-base-content cursor-pointer flex items-center gap-2">
+        <.icon name="hero-adjustments-horizontal-mini" class="size-4 text-primary" /> Advanced
+        <span class="text-xs font-normal text-base-content/40">
+          Optional — all of these are editable later
+        </span>
+      </summary>
+      <.form
+        for={to_form(%{}, as: :advanced)}
+        id="advanced-form"
+        phx-change="advanced_changed"
+        class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3"
+      >
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">Memory limit (MB)</label>
+          <input
+            type="number"
+            min="1"
+            name="advanced[memory_mb]"
+            value={@memory_mb}
+            placeholder="Unlimited"
+            class="rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">CPU shares</label>
+          <input
+            type="number"
+            min="1"
+            name="advanced[cpu_shares]"
+            value={@cpu_shares}
+            placeholder="Unlimited"
+            class="rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">Routed port</label>
+          <input
+            type="number"
+            min="1"
+            max="65535"
+            name="advanced[routed_port]"
+            value={@routed_port}
+            placeholder="Detected automatically"
+            class="rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          />
+          <p class="text-xs text-base-content/40">
+            Which container port the proxy forwards to, for an app serving more than one.
+          </p>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">Restart policy</label>
+          <select
+            name="advanced[restart_policy]"
+            class="rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >
+            <option
+              :for={
+                {value, label} <- [
+                  {"on-failure", "On failure (up to 3 times)"},
+                  {"always", "Always"},
+                  {"unless-stopped", "Unless stopped"},
+                  {"no", "Never"}
+                ]
+              }
+              value={value}
+              selected={@restart_policy == value}
+            >
+              {label}
+            </option>
+          </select>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-base-content/70 sm:col-span-2">
+          <input type="hidden" name="advanced[sticky]" value="false" />
+          <input
+            type="checkbox"
+            name="advanced[sticky]"
+            value="true"
+            checked={@sticky}
+            class="rounded border-base-content/20"
+          /> Sticky sessions — pin each visitor to one replica
+        </label>
+      </.form>
+    </details>
+    """
+  end
+
   defp step_review(assigns) do
     template = assigns.selected_template
 
@@ -2520,11 +2649,20 @@ defmodule HomelabWeb.DeployWizardLive do
         <.icon name="hero-arrow-left-mini" class="size-4" /> Back
       </button>
 
+      <%!-- Outside the deploy form: nested forms are invalid HTML. --%>
+      <.advanced_panel
+        memory_mb={@adv_memory_mb}
+        cpu_shares={@adv_cpu_shares}
+        routed_port={@adv_routed_port}
+        restart_policy={@adv_restart_policy}
+        sticky={@adv_sticky}
+      />
+
       <.form
         for={to_form(%{})}
         id="deploy-review-form"
         phx-submit={if(@deploy_type == "compose", do: "deploy_compose", else: "deploy")}
-        class="space-y-3"
+        class="space-y-3 mt-3"
       >
         <input type="hidden" name="tenant_id" value={@tenant_id || ""} />
         <input type="hidden" name="domain" value={@domain} />
@@ -2813,6 +2951,13 @@ defmodule HomelabWeb.DeployWizardLive do
             </div>
           </div>
         </div>
+        <.advanced_panel
+          memory_mb={@adv_memory_mb}
+          cpu_shares={@adv_cpu_shares}
+          routed_port={@adv_routed_port}
+          restart_policy={@adv_restart_policy}
+          sticky={@adv_sticky}
+        />
         <div class="rounded-lg bg-base-100 border border-base-content/[0.06] p-4">
           <h4 class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-3">
             Deploy
@@ -3193,6 +3338,45 @@ defmodule HomelabWeb.DeployWizardLive do
     |> List.last()
     |> String.split(":")
     |> List.first()
+  end
+
+  # Only the fields the operator actually filled in. A blank stays absent rather than
+  # becoming an explicit override, so an untouched Advanced panel leaves the deployment
+  # inheriting from its template exactly as before.
+  defp advanced_attrs(socket) do
+    limits =
+      %{}
+      |> put_number("memory_mb", socket.assigns.adv_memory_mb)
+      |> put_number("cpu_shares", socket.assigns.adv_cpu_shares)
+
+    %{}
+    |> put_if(:resource_limits_override, if(limits == %{}, do: nil, else: limits))
+    |> put_if(:routed_port, parse_int(socket.assigns.adv_routed_port))
+    |> put_if(
+      :restart_policy_override,
+      if(socket.assigns.adv_restart_policy == "on-failure",
+        do: nil,
+        else: socket.assigns.adv_restart_policy
+      )
+    )
+    |> put_if(:proxy_options, if(socket.assigns.adv_sticky, do: %{"sticky" => true}))
+  end
+
+  defp put_if(map, _key, nil), do: map
+  defp put_if(map, key, value), do: Map.put(map, key, value)
+
+  defp put_number(map, key, value) do
+    case parse_int(value) do
+      nil -> map
+      number -> Map.put(map, key, number)
+    end
+  end
+
+  defp parse_int(value) do
+    case Integer.parse(to_string(value)) do
+      {number, _rest} when number > 0 -> number
+      _ -> nil
+    end
   end
 
   # A compose service whose name collides with an existing template used to REWRITE that
