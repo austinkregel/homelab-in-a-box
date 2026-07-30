@@ -33,12 +33,8 @@ defmodule HomelabWeb.Api.V1.DeploymentJSON do
     end)
   end
 
-  defp sensitive_key?(key) do
-    upper = String.upcase(key)
-
-    String.contains?(upper, "PASSWORD") or
-      String.contains?(upper, "SECRET") or
-      String.contains?(upper, "TOKEN") or
-      (String.contains?(upper, "KEY") and not String.contains?(upper, "PUBLIC"))
-  end
+  # One definition, shared with the wizard and the deployment page — see
+  # `Homelab.SecretKeys` for why three drifting copies was a problem and what the
+  # heuristic still misses.
+  defp sensitive_key?(key), do: Homelab.SecretKeys.sensitive?(key)
 end
