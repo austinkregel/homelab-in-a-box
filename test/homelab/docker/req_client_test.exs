@@ -169,6 +169,47 @@ defmodule Homelab.Docker.ReqClientTest do
       assert_receive {:event, %{"stream" => "done"}}
     end
 
+    # The drain loop borrows the CALLER's mailbox (`into: :self`) and used to `receive`
+    # any message, hand it to `Req.parse_message/2`, and on `:unknown` simply loop —
+    # discarding it. Every foreign message delivered during a build or pull was silently
+    # eaten: a PubSub broadcast, a `:DOWN`, a LiveView `handle_info` — or, as the test
+    # above kept demonstrating intermittently, the caller's own `on_event` sending to
+    # itself. Whether anything was lost came down to the timing of the next `receive`.
+    test "messages that are not part of the stream are given back, not swallowed" do
+      bypass = Bypass.open()
+      Application.put_env(:homelab, ReqClient, base_url: "http://localhost:#{bypass.port}")
+      ReqClient.reset_api_version_cache()
+      stub_version(bypass)
+
+      Bypass.expect(bypass, "POST", "/v1.47/build", fn conn ->
+        conn = Plug.Conn.send_chunked(conn, 200)
+        {:ok, conn} = Plug.Conn.chunk(conn, ~s|{"stream":"one"}\n|)
+        {:ok, conn} = Plug.Conn.chunk(conn, ~s|{"stream":"two"}\n|)
+        conn
+      end)
+
+      test_pid = self()
+
+      # Delivered to this process WHILE the drain loop owns the mailbox.
+      on_event = fn event ->
+        send(test_pid, {:unrelated, :from_callback})
+        send(test_pid, {:event, event})
+      end
+
+      send(self(), {:unrelated, :before_the_stream})
+
+      assert :ok = ReqClient.build("t=app", "tarbytes", on_event)
+
+      # Both stream events arrived...
+      assert_receive {:event, %{"stream" => "one"}}
+      assert_receive {:event, %{"stream" => "two"}}
+
+      # ...and so did every foreign message, in the order it was sent.
+      assert_receive {:unrelated, :before_the_stream}
+      assert_receive {:unrelated, :from_callback}
+      assert_receive {:unrelated, :from_callback}
+    end
+
     test "a daemon error event aborts the stream", %{bypass: bypass} do
       Bypass.expect(bypass, "POST", "/v1.47/build", fn conn ->
         conn = Plug.Conn.send_chunked(conn, 200)
