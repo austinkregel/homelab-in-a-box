@@ -30,30 +30,45 @@ defmodule Homelab.Deployments.Adoption do
   def apply_plan(%{services: services}, opts) when is_list(services) do
     tenant_id = Keyword.fetch!(opts, :tenant_id)
 
-    Enum.reduce_while(services, {:ok, []}, fn service, {:ok, acc} ->
-      case apply_service(service, tenant_id) do
-        {:ok, result} -> {:cont, {:ok, [result | acc]}}
-        {:error, reason} -> {:halt, {:error, {service.name, reason}}}
+    # `adopted` maps each service's ORIGINAL container id to the deployment now adopting
+    # it, which is the only way to turn a child's `network_mode: container:<id>` into a
+    # `network_parent_id`. The planner orders donors first so the lookup can succeed.
+    Enum.reduce_while(services, {:ok, [], %{}}, fn service, {:ok, acc, adopted} ->
+      case apply_service(service, tenant_id, adopted) do
+        {:ok, result} ->
+          {:cont, {:ok, [result | acc], record_adopted(adopted, service, result)}}
+
+        {:error, reason} ->
+          {:halt, {:error, {service.name, reason}}}
       end
     end)
     |> case do
-      {:ok, results} -> {:ok, Enum.reverse(results)}
+      {:ok, results, _adopted} -> {:ok, Enum.reverse(results)}
       {:error, _} = err -> err
+    end
+  end
+
+  defp record_adopted(adopted, service, %{deployment: deployment}) do
+    case Map.get(service, :container_id) do
+      nil -> adopted
+      container_id -> Map.put(adopted, container_id, deployment)
     end
   end
 
   # Steps run sequentially (not in one outer transaction): the template upsert is
   # idempotent, the deployment is reused on re-run, and `plan_release/3` wraps its
   # own writes — so a mid-way failure leaves a safe, re-runnable partial state.
-  defp apply_service(service, tenant_id) do
-    steps = service.phase1 ++ service.phase2
-
-    with :ok <- refuse_netns_child(service),
+  defp apply_service(service, tenant_id, adopted) do
+    with {:ok, donor} <- resolve_netns_donor(service, adopted),
          {:ok, template} <- upsert_template(service.template_attrs),
          {:ok, deployment} <-
-           get_or_create_deployment(tenant_id, template.id, service[:deployment_attrs] || %{}),
+           get_or_create_deployment(
+             tenant_id,
+             template.id,
+             netns_attrs(service[:deployment_attrs] || %{}, donor)
+           ),
          :ok <- ensure_no_active_release(deployment.id),
-         {:ok, release} <- plan(deployment, steps, service) do
+         {:ok, release} <- plan(deployment, steps(service, donor), service) do
       # Enqueue after the release is committed (Oban lives on ObanRepo; the worker
       # must be able to read the release row).
       {:ok, _job} = ReleaseRunner.enqueue(release)
@@ -61,25 +76,80 @@ defmodule Homelab.Deployments.Adoption do
     end
   end
 
-  # A container living in ANOTHER container's network namespace cannot be adopted yet,
-  # and adopting it anyway is not a partial success — it is a leak.
+  # Which deployment owns the namespace this service's original lived in.
   #
-  # The replacement would come up on the tenant network instead of inside the tunnel,
-  # so an app whose entire purpose is that none of its traffic escapes the VPN would
-  # start sending all of it straight out, while reporting a successful adoption. There
-  # is no state in between: either it is in the namespace or it is not.
+  # Resolved from the services already applied in THIS plan, matched on the original
+  # container id. That is the only correspondence available: an adopted donor's
+  # `external_id` is its NEW managed container, so there is nothing on the row that still
+  # points back at the original id a child's `NetworkMode` names.
   #
-  # Adopting one properly needs cross-service resolution (the donor's container id maps
-  # to whichever deployment is adopting THAT container) and cross-service ordering,
-  # which `apply_service/2` — one service, one release, enqueued immediately — cannot
-  # express. Until that exists, refuse where the damage would be done, and let the
-  # operator re-create it through the deploy wizard, which does support this.
-  defp refuse_netns_child(service) do
+  # Which is why a donor outside the plan is still refused. Adopting the child anyway
+  # would put it on the tenant network instead of inside the tunnel, so an app whose
+  # entire purpose is that none of its traffic escapes the VPN would start sending all of
+  # it straight out while reporting a successful adoption. There is no state in between.
+  # The refusal now says what to do about it.
+  defp resolve_netns_donor(service, adopted) do
     case Map.get(service, :netns_parent_container_id) do
-      nil -> :ok
-      container_id -> {:error, {:netns_child_not_adoptable, container_id}}
+      nil ->
+        {:ok, nil}
+
+      container_id ->
+        case find_adopted(adopted, container_id) do
+          nil -> {:error, {:netns_donor_not_selected, container_id}}
+          donor -> {:ok, donor}
+        end
     end
   end
+
+  # Docker reports the full 64-character id in `NetworkMode`, and discovery captures the
+  # full id too, so this is normally an exact hit. Prefix-matched either way, because a
+  # short id anywhere in the chain would otherwise read as "donor not selected" and refuse
+  # an import that was perfectly well specified.
+  defp find_adopted(adopted, container_id) do
+    Enum.find_value(adopted, fn {adopted_id, deployment} ->
+      if id_match?(adopted_id, container_id), do: deployment
+    end)
+  end
+
+  defp id_match?(a, b) when is_binary(a) and is_binary(b) do
+    a == b or String.starts_with?(a, b) or String.starts_with?(b, a)
+  end
+
+  defp id_match?(_a, _b), do: false
+
+  defp netns_attrs(attrs, nil), do: attrs
+  defp netns_attrs(attrs, donor), do: Map.put(attrs, :network_parent_id, donor.id)
+
+  defp steps(service, nil), do: service.phase1 ++ service.phase2
+
+  # The cutover embeds the donor's CONTAINER id in the child's create payload, so it
+  # cannot run until the donor's managed container exists and is up. Adopting the donor
+  # replaces its container, which is precisely why the child's original cannot simply be
+  # left as it was.
+  #
+  # The wait goes at the top of PHASE 2, not phase 1: phase 1 copies this service's data
+  # while everything is still running, and there is no reason to hold that behind the
+  # donor. Blocking immediately before the step that needs the id keeps the two
+  # migrations overlapping.
+  #
+  # A generous timeout because what it is waiting behind is another service's data copy,
+  # which for a media library is minutes to hours — the 2-minute default would roll this
+  # release back for no reason other than that the donor was big.
+  defp steps(service, donor) do
+    service.phase1 ++
+      [
+        %{
+          type: :await_health,
+          resource_handle: %{
+            "deployment_id" => donor.id,
+            "timeout_ms" => netns_donor_timeout_ms()
+          }
+        }
+      ] ++ service.phase2
+  end
+
+  defp netns_donor_timeout_ms,
+    do: Application.get_env(:homelab, :adoption_netns_donor_timeout_ms, 3_600_000)
 
   defp upsert_template(attrs) do
     case Catalog.get_app_template_by_slug(attrs.slug) do
