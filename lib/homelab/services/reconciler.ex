@@ -38,7 +38,7 @@ defmodule Homelab.Services.Reconciler do
 
   alias Homelab.Accounts
   alias Homelab.Deployments
-  alias Homelab.Deployments.{Access, ReleaseRunner, Releases, SpecBuilder}
+  alias Homelab.Deployments.{Access, Netns, ReleaseRunner, Releases, SpecBuilder}
   alias Homelab.Notifications
   alias Homelab.Services.ActivityLog
   alias Homelab.Settings
@@ -197,6 +197,7 @@ defmodule Homelab.Services.Reconciler do
             resume_stuck_releases()
             converge(actual_by_id, leased)
             sweep_deploying_timeouts(leased)
+            sweep_stale_netns(leased)
             enforce_ingress_invariant()
 
             state
@@ -299,6 +300,50 @@ defmodule Homelab.Services.Reconciler do
           "#{label(deployment)} did not become ready within #{div(deploying_timeout_ms(), 1000)}s; marked failed and route severed.",
           deployment.id
         )
+      end
+    end)
+  end
+
+  # 2b. Stale network namespaces.
+  #
+  # A container that joins another's namespace embeds that container's ID in its create
+  # payload. When the donor is re-created the id moves, and every child is left naming a
+  # container that no longer exists — Docker refuses to start such a container outright
+  # ("cannot join network of a non running container"), so the child is not degraded, it
+  # is unstartable. Nothing about the child's own row looks wrong, and its restart
+  # policy will retry forever without ever succeeding.
+  #
+  # This is the convergence path for that: mark it failed with an error that names the
+  # real cause, and re-drive the whole stack so the children are re-created against the
+  # donor's current container.
+  defp sweep_stale_netns(leased) do
+    Netns.stale_children()
+    |> Enum.reject(&MapSet.member?(leased, &1.id))
+    |> Enum.group_by(& &1.network_parent_id)
+    |> Enum.each(fn {_donor_id, children} ->
+      Enum.each(children, fn child ->
+        transition(child, :failed, [:pending, :deploying, :running, :stopped],
+          error:
+            "Its network container was re-created, so this container can no longer start. " <>
+              "Re-deploying the stack."
+        )
+
+        alert(
+          :warning,
+          "Network container re-created",
+          "#{label(child)}: the container whose network it shares was replaced; re-deploying " <>
+            "the stack so it can start again.",
+          child.id
+        )
+      end)
+
+      # One release per stack, driven from any member — it resolves the donor itself.
+      case Deployments.redeploy_netns_stack(hd(children)) do
+        {:ok, _release} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("[Reconciler] stale netns redeploy failed: #{inspect(reason)}")
       end
     end)
   end
@@ -424,16 +469,16 @@ defmodule Homelab.Services.Reconciler do
       end
   end
 
-  defp sever_orphan_route(orchestrator, %{labels: labels}) do
-    tenant = labels["homelab.tenant"]
-    app = labels["homelab.app"]
-
-    if is_binary(tenant) and is_binary(app) do
-      orchestrator.unpublish(SpecBuilder.deployment_network_for(tenant, app))
-    else
-      :ok
-    end
+  # Severs by detaching the ORPHAN ITSELF from the ingress network.
+  #
+  # This used to disconnect Traefik from `homelab_<tenant>_<app>_net`, a network nothing
+  # is ever attached to — so an orphaned container carrying live Traefik labels kept
+  # serving traffic while the alert said "its public route was severed".
+  defp sever_orphan_route(orchestrator, %{id: container_id}) when is_binary(container_id) do
+    orchestrator.unpublish(container_id, Homelab.Infrastructure.internal_network())
   end
+
+  defp sever_orphan_route(_orchestrator, _container), do: :ok
 
   # 5. External-bypass audit (alert once per deployment)
   defp audit_external_bypass(state) do
@@ -463,6 +508,12 @@ defmodule Homelab.Services.Reconciler do
   # Keyed off the EFFECTIVE exposure, not the template's: the per-deployment override is
   # what actually decides how this deployment is reached, so reading the (shared)
   # template default would audit a mode the deployment isn't in.
+  # A container in another container's namespace has no ports of its own to bypass with:
+  # everything it listens on is reachable only through its donor, and for the case this
+  # exists for (a VPN client) that donor is the thing enforcing the tunnel. Auditing it
+  # as an external bypass would be exactly backwards.
+  defp bypass_kind(%{network_parent_id: parent_id}) when not is_nil(parent_id), do: nil
+
   defp bypass_kind(deployment) do
     case Access.effective_exposure(deployment) do
       # Every port the container listens on is a host port — there is no published-flag
