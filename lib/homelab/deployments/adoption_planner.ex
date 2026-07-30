@@ -74,6 +74,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       command: Map.get(capture, :command),
       entrypoint: Map.get(capture, :entrypoint),
       host_network: Map.get(capture, :host_network, false),
+      # Whose network namespace the original lived in, if any. This map is built from an
+      # EXPLICIT key list, so a captured field that is not named here is dropped — and
+      # dropping this one turns `Adoption.refuse_netns_child/1` into dead code that always
+      # matches nil, silently adopting a tunneled container onto the tenant network.
+      netns_parent_container_id: Map.get(capture, :netns_parent_container_id),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
@@ -118,7 +123,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
         name: name,
         template_attrs: template_attrs,
         deployment_attrs: deployment_attrs(review),
-        targets: targets
+        targets: targets,
+        # The container id whose network namespace the original lived in, when it lived
+        # in one (`network_mode: service:x`). Carried so `Adoption` can refuse rather
+        # than adopt it onto the tenant network — see apply_service/2.
+        netns_parent_container_id: Map.get(review, :netns_parent_container_id)
       },
       phase1: phase1,
       phase2: phase2
@@ -233,7 +242,10 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     %{
       "container_path" => mount.target,
       "source" => PermanentHome.volume_name(service, mount.target),
-      "type" => "volume"
+      "type" => "volume",
+      # The bytes are copied into a plane-owned volume, but how the APP was allowed to
+      # use them is still a property of the original and must be preserved.
+      "read_only" => Map.get(mount, :rw, true) == false
     }
   end
 
@@ -255,7 +267,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     %{
       "container_path" => mount.target,
       "source" => source,
-      "type" => to_string(mount.type)
+      "type" => to_string(mount.type),
+      # `rw` was captured off the live container and then dropped exactly here, so a
+      # mount the original had read-only came back writable — the replacement could
+      # delete a media library the original could only read. Nothing in the UI said so.
+      "read_only" => Map.get(mount, :rw, true) == false
     }
   end
 
