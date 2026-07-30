@@ -57,6 +57,9 @@ config :homelab, :release_step_handlers, %{
   # on an empty data dir), so the app would be handed a password the DB never took.
   ensure_datastore_grants: Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants,
   app_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
+  # Same handler as the containers above — a netns child is deployed exactly like any
+  # other, it just has to happen after the donor whose namespace it names.
+  netns_child_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
   await_health: Homelab.Deployments.ReleaseSteps.AwaitHealth,
   publish_ingress: Homelab.Deployments.ReleaseSteps.PublishIngress,
   # Adoption steps.
