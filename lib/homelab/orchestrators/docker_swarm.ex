@@ -525,7 +525,27 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   defp build_container_spec(spec) do
     base = %{
       "Image" => spec.image,
-      "Env" => env_to_list(spec.env)
+      "Env" => env_to_list(spec.env),
+      # The identity labels go on the TASK CONTAINER too, not only on the service.
+      #
+      # They were service-only, and every consumer of them reads CONTAINERS:
+      # `list_services/0` here and in the Engine filter on `homelab.managed=true`, and the
+      # reconciler's orphan sweep reads `homelab.tenant`/`homelab.app` off a container. So
+      # a Swarm-era workload was invisible to all of it. Two consequences, opposite in
+      # sign: the reconciler saw no container for a deployment that was running perfectly
+      # well and failed it with "Container not found" — and the orphan sweep could not see
+      # those containers either, which is the only reason it never tried to reap them.
+      #
+      # It also leaves nothing to match on afterwards. Switching the orchestrator to Engine
+      # strands the deployment: its `external_id` is a service id, and no running container
+      # carries a label that says which deployment it belongs to.
+      #
+      # `homelab.*` ONLY — deliberately not `spec.labels` wholesale. Traefik rejects a
+      # workload carrying both this provider's network label and the other's ("both Docker
+      # and Swarm labels are defined") and silently skips it, so copying the traefik.*
+      # labels onto the task container risks un-routing every Swarm workload. Routing stays
+      # a service-level concern; identity does not.
+      "Labels" => identity_labels(spec.labels)
     }
 
     base
@@ -544,6 +564,15 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     |> maybe_put_list("CapabilityDrop", Map.get(spec, :capabilities_drop))
     |> maybe_put_sysctls(Map.get(spec, :sysctls))
   end
+
+  # Who this container belongs to, and nothing about how it is reached.
+  defp identity_labels(labels) when is_map(labels) do
+    labels
+    |> Enum.filter(fn {key, _value} -> String.starts_with?(to_string(key), "homelab.") end)
+    |> Map.new()
+  end
+
+  defp identity_labels(_labels), do: %{}
 
   defp maybe_put_sysctls(spec, sysctls) when is_map(sysctls) and map_size(sysctls) > 0,
     do: Map.put(spec, "Sysctls", sysctls)
