@@ -33,6 +33,8 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     # Swarm, it hangs `pending` forever with an empty error field, and we would otherwise
     # spend a multi-gigabyte image pull on a task that can never be placed.
     with :ok <- preflight_gpu(spec),
+         :ok <- preflight_devices(spec),
+         :ok <- preflight_netns(spec),
          # Pull FIRST, then ensure the networks immediately before create — same race
          # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
          # which a freshly-created (empty) network can be swept by a racing cleanup or
@@ -54,6 +56,35 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     case GpuFacts.preflight_swarm(Map.get(spec, :gpu)) do
       :ok -> :ok
       {:error, message} -> {:error, {:gpu_unschedulable, message}}
+    end
+  end
+
+  # `ServiceSpec.ContainerSpec` has NO device field -- the same swarmkit gap that forces
+  # a GPU through generic resources (see build_resources/1), and there is no generic-
+  # resource equivalent for an arbitrary /dev node. Refuse rather than drop: a service
+  # created without the device it asked for STARTS, and only fails later from inside the
+  # app ("cannot open /dev/net/tun"), which reads as an app bug rather than a platform
+  # one. Capabilities and sysctls, by contrast, Swarm does support (API >= 1.41).
+  defp preflight_devices(spec) do
+    case Map.get(spec, :devices) do
+      devices when is_list(devices) and devices != [] ->
+        paths = Enum.map_join(devices, ", ", & &1["host_path"])
+        {:error, {:unsupported_on_swarm, :devices, paths}}
+
+      _ ->
+        :ok
+    end
+  end
+
+  # A Swarm task cannot join another container's network namespace: there is no
+  # `NetworkMode` on `ContainerSpec` and no `container:<id>` target a task network
+  # accepts. `Netns` already refuses to SAVE the setting under Swarm; this catches a
+  # deployment configured while the orchestrator was Engine and deployed after a switch.
+  defp preflight_netns(spec) do
+    if Map.get(spec, :netns_child, false) do
+      {:error, {:unsupported_on_swarm, :netns_sharing, spec.network}}
+    else
+      :ok
     end
   end
 
@@ -173,13 +204,58 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   end
 
   @impl true
-  def publish(network) do
-    Homelab.Infrastructure.connect_traefik_to_network(network)
+  # A Swarm task's networks are part of its SPEC, so attaching or detaching one means a
+  # service update — there is no runtime connect/disconnect the way there is for a plain
+  # container. The update rolls the tasks, which is the cost of severing a route here.
+  def publish(service_id, network) when is_binary(service_id) and is_binary(network) do
+    set_routing_network(service_id, network, true)
   end
 
+  def publish(_service_id, _network), do: :ok
+
   @impl true
-  def unpublish(network) do
-    Homelab.Infrastructure.disconnect_traefik_from_network(network)
+  def unpublish(service_id, network) when is_binary(service_id) and is_binary(network) do
+    set_routing_network(service_id, network, false)
+  end
+
+  def unpublish(_service_id, _network), do: :ok
+
+  defp set_routing_network(service_id, network, attached?) do
+    with {:ok, service} <- Client.get("/services/#{service_id}"),
+         version <- get_in(service, ["Version", "Index"]),
+         spec when is_map(spec) <- service["Spec"] do
+      networks = get_in(spec, ["TaskTemplate", "Networks"]) || []
+      present? = Enum.any?(networks, &(&1["Target"] == network))
+
+      cond do
+        attached? == present? ->
+          :ok
+
+        attached? ->
+          apply_networks(service_id, spec, version, networks ++ [%{"Target" => network}])
+
+        true ->
+          apply_networks(
+            service_id,
+            spec,
+            version,
+            Enum.reject(networks, &(&1["Target"] == network))
+          )
+      end
+    else
+      {:error, {:not_found, _}} -> :ok
+      {:error, reason} -> {:error, {:ingress_update_failed, service_id, reason}}
+      _ -> {:error, {:ingress_update_failed, service_id, :malformed_service}}
+    end
+  end
+
+  defp apply_networks(service_id, spec, version, networks) do
+    body = put_in(spec, ["TaskTemplate", "Networks"], networks)
+
+    case Client.post("/services/#{service_id}/update?version=#{version}", body) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, {:ingress_update_failed, service_id, reason}}
+    end
   end
 
   @impl true
@@ -460,7 +536,19 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     # entrypoint as an argument to itself.
     |> maybe_put_list("Command", Map.get(spec, :entrypoint))
     |> maybe_put_list("Args", Map.get(spec, :command))
+    # Capabilities and sysctls ARE expressible here, unlike devices — but under
+    # different names than the Engine's (`CapabilityAdd`, not `CapAdd`), and only from
+    # API 1.41. ReqClient negotiates the version and floors at v1.45, so the fields are
+    # always available on a daemon new enough to be running swarm mode at all.
+    |> maybe_put_list("CapabilityAdd", Map.get(spec, :capabilities_add))
+    |> maybe_put_list("CapabilityDrop", Map.get(spec, :capabilities_drop))
+    |> maybe_put_sysctls(Map.get(spec, :sysctls))
   end
+
+  defp maybe_put_sysctls(spec, sysctls) when is_map(sysctls) and map_size(sysctls) > 0,
+    do: Map.put(spec, "Sysctls", sysctls)
+
+  defp maybe_put_sysctls(spec, _sysctls), do: spec
 
   defp maybe_put_list(spec, _key, nil), do: spec
   defp maybe_put_list(spec, _key, []), do: spec
@@ -498,8 +586,16 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
     bridges = Enum.map(Map.get(spec, :bridge_networks, []), &%{"Target" => &1})
 
+    # ONLY a routed workload joins ingress.
+    #
+    # This used to also join on `service_mode` — i.e. every deployment whose access is
+    # "Internal only". That is the exact opposite of what the mode means: the UI says "no
+    # external access" and the service was placed on `homelab-iab-internal`, the network
+    # Traefik and every routed workload of every tenant share, reachable at L3 from any
+    # of them. It contradicted `SpecBuilder`'s stated model and the Engine driver, which
+    # joins on `traefik.enable` alone and has a test forbidding exactly this.
     routing =
-      if spec.labels["traefik.enable"] == "true" or Map.get(spec, :service_mode, false) do
+      if spec.labels["traefik.enable"] == "true" do
         [%{"Target" => @routing_network}]
       else
         []
@@ -512,7 +608,8 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     port_configs =
       Enum.map(ports, fn p ->
         %{
-          "Protocol" => "tcp",
+          # Specs built before UDP support carry no :protocol key at all; those are TCP.
+          "Protocol" => Map.get(p, :protocol) || "tcp",
           "TargetPort" => String.to_integer(to_string(p.internal)),
           "PublishedPort" => String.to_integer(to_string(p.external)),
           "PublishMode" => "ingress"
@@ -579,7 +676,9 @@ defmodule Homelab.Orchestrators.DockerSwarm do
               "Source" => vol.source,
               "Target" => vol.target,
               "Type" => vol[:type] || "bind",
-              "ReadOnly" => false
+              # Was hardcoded false, so a read-only mount was silently widened to
+              # writable for every Swarm service.
+              "ReadOnly" => Map.get(vol, :read_only, false)
             }
           end)
 
