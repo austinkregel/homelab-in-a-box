@@ -1641,6 +1641,48 @@ defmodule HomelabWeb.DeploymentLiveTest do
                updated.ports_override
     end
 
+    test "a UDP host binding persists, and survives an unrelated later save",
+         %{conn: conn, deployment: dep} do
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, 2, fn _spec -> {:ok, "container_new"} end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+      render_change(view, "settings_changed", %{"settings" => %{"access" => "host"}})
+      render_click(view, "settings_add_port")
+
+      view
+      |> form("#settings-form",
+        settings: %{
+          "access" => "host",
+          "ports" => %{
+            "0" => %{"internal" => "27900", "external" => "27900", "protocol" => "udp"}
+          }
+        }
+      )
+      |> render_submit()
+
+      updated = Homelab.Deployments.get_deployment!(dep.id)
+      assert [%{"internal" => "27900", "protocol" => "udp"}] = updated.ports_override
+
+      # The real regression risk is not the first save but the SECOND: the settings form
+      # re-renders from stored state, and a protocol the form fails to round-trip silently
+      # reverts to tcp the next time anything else on the page is saved.
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form", settings: %{"memory_mb" => "1024"})
+      |> render_submit()
+
+      reloaded = Homelab.Deployments.get_deployment!(dep.id)
+
+      assert [%{"internal" => "27900", "protocol" => "udp"}] = reloaded.ports_override,
+             "an unrelated save rewrote the port back to tcp"
+    end
+
     test "saving resilience limits + health path persists per-deployment overrides",
          %{conn: conn, deployment: dep} do
       Homelab.Mocks.Orchestrator
