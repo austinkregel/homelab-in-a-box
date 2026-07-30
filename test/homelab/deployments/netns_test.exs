@@ -1,0 +1,511 @@
+defmodule Homelab.Deployments.NetnsTest do
+  @moduledoc """
+  Sharing one network namespace between deployments — `network_mode: service:gluetun`.
+
+  Every rule here exists because the failure it prevents is SILENT: the daemon rejects
+  some of these with a message naming a flag the operator never typed, and simply does
+  the wrong thing with the rest. A tunneled app that comes up outside the tunnel reports
+  a successful deploy and leaks from the first second.
+  """
+  use Homelab.DataCase, async: false
+
+  import Homelab.Factory
+
+  alias Homelab.Deployments
+  alias Homelab.Deployments.{Netns, SpecBuilder}
+  alias Homelab.Repo
+
+  setup do
+    tenant = insert(:tenant)
+
+    donor_template =
+      insert(:app_template,
+        name: "Gluetun",
+        slug: "gluetun",
+        ports: [%{"internal" => 8000, "role" => "other"}],
+        netns_donor_kind: "gluetun",
+        exposure_mode: :service
+      )
+
+    donor =
+      insert(:deployment,
+        tenant: tenant,
+        app_template: donor_template,
+        domain: nil,
+        status: :running,
+        external_id: "gluetun-container-1"
+      )
+
+    %{tenant: tenant, donor: donor}
+  end
+
+  defp child_attrs(tenant, donor, overrides \\ %{}) do
+    template =
+      insert(:app_template,
+        name: "Sonarr #{System.unique_integer([:positive])}",
+        slug: "sonarr-#{System.unique_integer([:positive])}",
+        ports: [%{"internal" => 8989, "role" => "web"}],
+        exposure_mode: :public
+      )
+
+    Map.merge(
+      %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        network_parent_id: donor.id,
+        domain: "sonarr.example.com"
+      },
+      overrides
+    )
+  end
+
+  describe "what a child gives up" do
+    test "host ports are refused — it has none of its own to bind", ctx do
+      attrs = child_attrs(ctx.tenant, ctx.donor, %{exposure_mode_override: "host"})
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "no ports of its own"
+    end
+
+    test "host networking is refused — a container has ONE network namespace", ctx do
+      attrs = child_attrs(ctx.tenant, ctx.donor, %{exposure_mode_override: "host_network"})
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "one network namespace"
+    end
+
+    test "network aliases are refused — there is no endpoint to register a name on", ctx do
+      attrs = child_attrs(ctx.tenant, ctx.donor, %{network_aliases_override: ["sonarr"]})
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_aliases_override: [message]} = errors_on(changeset)
+      assert message =~ "no network endpoint"
+    end
+  end
+
+  describe "structural rules" do
+    test "the donor must be in the same space", ctx do
+      other_tenant = insert(:tenant)
+      attrs = child_attrs(other_tenant, ctx.donor)
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "same space"
+    end
+
+    test "chains are refused — one donor, N children, no grandchildren", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      attrs = child_attrs(ctx.tenant, child, %{domain: "grandchild.example.com"})
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "chains are not supported"
+    end
+
+    test "a deployment cannot route through itself", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      assert {:error, changeset} =
+               Deployments.update_deployment(child, %{network_parent_id: child.id})
+
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "itself"
+    end
+
+    test "a donor that is itself host-networked has no namespace to share", ctx do
+      host_template = insert(:app_template, slug: "hass", exposure_mode: :host_network)
+
+      host_donor =
+        insert(:deployment,
+          tenant: ctx.tenant,
+          app_template: host_template,
+          domain: nil,
+          exposure_mode_override: "host_network"
+        )
+
+      assert {:error, changeset} =
+               Deployments.create_deployment(child_attrs(ctx.tenant, host_donor))
+
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "host networking"
+    end
+
+    test "Docker Swarm is refused where the choice is made", ctx do
+      previous = Application.get_env(:homelab, :orchestrator)
+      Application.put_env(:homelab, :orchestrator, Homelab.Orchestrators.DockerSwarm)
+      on_exit(fn -> Application.put_env(:homelab, :orchestrator, previous) end)
+
+      assert {:error, changeset} =
+               Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "Docker Engine"
+    end
+  end
+
+  # Children of one donor share a single localhost. Two apps both on 8080 is not a
+  # preference conflict: the second to start fails to bind, and which one that is
+  # depends on scheduling — so the stack works until it does not.
+  describe "sibling port collisions" do
+    test "two children cannot claim the same port", ctx do
+      {:ok, _first} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      colliding =
+        insert(:app_template,
+          name: "Radarr",
+          slug: "radarr",
+          ports: [%{"internal" => 8989, "role" => "web"}]
+        )
+
+      attrs =
+        child_attrs(ctx.tenant, ctx.donor, %{
+          app_template_id: colliding.id,
+          domain: "radarr.example.com"
+        })
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "8989"
+    end
+
+    test "a child cannot claim a port the DONOR already listens on", ctx do
+      # gluetun's control server is on 8000 and is in the same namespace.
+      colliding = insert(:app_template, slug: "ctl", ports: [%{"internal" => 8000}])
+
+      attrs =
+        child_attrs(ctx.tenant, ctx.donor, %{
+          app_template_id: colliding.id,
+          domain: "ctl.example.com"
+        })
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "8000"
+    end
+
+    test "distinct ports are fine", ctx do
+      {:ok, _first} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      radarr =
+        insert(:app_template, name: "Radarr", slug: "radarr", ports: [%{"internal" => 7878}])
+
+      attrs =
+        child_attrs(ctx.tenant, ctx.donor, %{
+          app_template_id: radarr.id,
+          domain: "radarr.example.com"
+        })
+
+      assert {:ok, _second} = Deployments.create_deployment(attrs)
+    end
+  end
+
+  describe "the spec a child produces" do
+    setup ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+      Map.put(ctx, :child, Deployments.get_deployment!(child.id))
+    end
+
+    test "joins the donor's namespace by CONTAINER id", ctx do
+      assert {:ok, spec} = SpecBuilder.build(ctx.child)
+
+      assert spec.network == "container:gluetun-container-1"
+      assert spec.netns_child == true
+      refute spec.network =~ "homelab_tenant_"
+    end
+
+    test "publishes nothing and registers no name — the daemon rejects both here", ctx do
+      assert {:ok, spec} = SpecBuilder.build(ctx.child)
+
+      assert spec.ports == []
+      assert spec.network_aliases == []
+      assert spec.bridge_networks == []
+    end
+
+    test "emits NO Traefik labels of its own — it has no endpoint to resolve to", ctx do
+      assert {:ok, spec} = SpecBuilder.build(ctx.child)
+
+      refute Map.has_key?(spec.labels, "traefik.enable")
+    end
+
+    test "refuses to build while the donor has no container", ctx do
+      # A create naming a container id that does not exist yields a container the daemon
+      # will never start, with an error pointing at the wrong thing.
+      {:ok, _} = Deployments.update_deployment(ctx.donor, %{external_id: nil, status: :pending})
+
+      assert {:error, {:netns_donor_not_running, _id}} =
+               SpecBuilder.build(Deployments.get_deployment!(ctx.child.id))
+    end
+  end
+
+  describe "the spec the DONOR produces" do
+    setup ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+      Map.put(ctx, :child, child)
+    end
+
+    test "carries its routed children's Traefik labels", ctx do
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+
+      assert spec.labels["traefik.enable"] == "true"
+
+      assert spec.labels["traefik.http.routers.sonarr-example-com.rule"] ==
+               "Host(`sonarr.example.com`)"
+
+      # The child's PORT, resolved against the donor's address.
+      assert spec.labels["traefik.http.services.sonarr-example-com.loadbalancer.server.port"] ==
+               "8989"
+    end
+
+    test "is multi-homed onto ingress so Traefik can actually reach it", ctx do
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+
+      assert Homelab.Infrastructure.internal_network() in spec.bridge_networks
+    end
+
+    test "a donor with no ROUTED children stays off ingress", ctx do
+      {:ok, _} = Deployments.update_deployment(ctx.child, %{domain: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+
+      assert spec.bridge_networks == []
+      refute Map.has_key?(spec.labels, "traefik.enable")
+    end
+  end
+
+  # The most common way this arrangement fails, and the one with no error anywhere:
+  # gluetun's kill-switch drops traffic to a port it was not told about, so Traefik
+  # returns 502 and neither container logs a thing.
+  describe "derived gluetun firewall env" do
+    test "opens every child's port", ctx do
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+
+      assert spec.env["FIREWALL_INPUT_PORTS"] == "8989"
+    end
+
+    test "an operator's own value always wins", ctx do
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, donor} =
+        Deployments.update_deployment(ctx.donor, %{
+          env_overrides: %{"FIREWALL_INPUT_PORTS" => "9999"}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(donor.id))
+      assert spec.env["FIREWALL_INPUT_PORTS"] == "9999"
+    end
+
+    test "nothing is derived for a donor with no children, or a non-gluetun one", ctx do
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+      refute Map.has_key?(spec.env, "FIREWALL_INPUT_PORTS")
+
+      plain = insert(:app_template, slug: "plain-donor", netns_donor_kind: nil)
+
+      plain_donor =
+        insert(:deployment,
+          tenant: ctx.tenant,
+          app_template: plain,
+          domain: nil,
+          external_id: "plain-1",
+          status: :running
+        )
+
+      {:ok, _} = Deployments.create_deployment(child_attrs(ctx.tenant, plain_donor))
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(plain_donor.id))
+      refute Map.has_key?(spec.env, "FIREWALL_INPUT_PORTS")
+    end
+  end
+
+  describe "staleness" do
+    setup ctx do
+      {:ok, child} =
+        Deployments.create_deployment(
+          child_attrs(ctx.tenant, ctx.donor, %{
+            status: :running,
+            external_id: "sonarr-1",
+            netns_parent_external_id: "gluetun-container-1"
+          })
+        )
+
+      Map.put(ctx, :child, child)
+    end
+
+    test "a child matching its donor's current container is not stale", ctx do
+      refute Netns.stale?(ctx.child, ctx.donor)
+      assert Netns.stale_children() == []
+    end
+
+    test "re-creating the donor makes every child unstartable", ctx do
+      # The child's NetworkMode still names the OLD container. Docker refuses to start
+      # it at all, and nothing about the child's own row looks wrong.
+      {:ok, donor} =
+        Deployments.update_deployment(ctx.donor, %{external_id: "gluetun-container-2"})
+
+      assert Netns.stale?(ctx.child, donor)
+      assert [stale] = Netns.stale_children()
+      assert stale.id == ctx.child.id
+    end
+
+    test "a child that has never been deployed is not stale", ctx do
+      {:ok, child} = Deployments.update_deployment(ctx.child, %{netns_parent_external_id: nil})
+
+      refute Netns.stale?(child, ctx.donor)
+    end
+  end
+
+  # Each of these guards was written, documented, and then reached past by the code that
+  # was supposed to feed it — so it silently answered "fine" forever. They are the same
+  # class of bug the guards themselves exist to prevent.
+  describe "guards that were reaching past their own source of truth" do
+    test "declared_ports honours ports_override, not just the template", ctx do
+      # Read off the template directly, a port corrected in the Ports tab was invisible:
+      # the donor's firewall was opened for the ORIGINAL port and the readiness check,
+      # reading the same stale list, agreed the route was fine.
+      {:ok, child} =
+        Deployments.create_deployment(
+          child_attrs(ctx.tenant, ctx.donor, %{
+            ports_override: [%{"internal" => 9999, "role" => "web"}]
+          })
+        )
+
+      assert 9999 in Netns.declared_ports(Deployments.get_deployment!(child.id))
+      refute 8989 in Netns.declared_ports(Deployments.get_deployment!(child.id))
+    end
+
+    test "the derived firewall rule follows the override too", ctx do
+      {:ok, _child} =
+        Deployments.create_deployment(
+          child_attrs(ctx.tenant, ctx.donor, %{
+            ports_override: [%{"internal" => 9999, "role" => "web"}]
+          })
+        )
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+      assert spec.env["FIREWALL_INPUT_PORTS"] == "9999"
+    end
+
+    test "host modes are refused even when exposure lives on the TEMPLATE", ctx do
+      # Adoption writes exposure to the template and leaves the override nil, so a guard
+      # reading only the override was blind for exactly the deployments most likely to be
+      # host-mode.
+      host_template =
+        insert(:app_template,
+          slug: "adopted-#{System.unique_integer([:positive])}",
+          exposure_mode: :host,
+          ports: [%{"internal" => 7777}]
+        )
+
+      attrs =
+        child_attrs(ctx.tenant, ctx.donor, %{
+          app_template_id: host_template.id,
+          domain: "adopted.example.com"
+        })
+
+      assert {:error, changeset} = Deployments.create_deployment(attrs)
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "no ports of its own"
+    end
+
+    test "a host-networked donor is refused even when that lives on its template", ctx do
+      host_template = insert(:app_template, slug: "hass-tpl", exposure_mode: :host_network)
+
+      host_donor =
+        insert(:deployment,
+          tenant: ctx.tenant,
+          app_template: host_template,
+          domain: nil,
+          exposure_mode_override: nil
+        )
+
+      assert {:error, changeset} =
+               Deployments.create_deployment(child_attrs(ctx.tenant, host_donor))
+
+      assert %{network_parent_id: [message]} = errors_on(changeset)
+      assert message =~ "host networking"
+    end
+  end
+
+  describe "teardown protection" do
+    setup ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+      Map.put(ctx, :child, child)
+    end
+
+    test "a donor with children cannot be deleted", ctx do
+      # Detaching them silently would put a VPN'd app back on the tenant network, which
+      # is the one outcome the whole arrangement exists to prevent.
+      assert {:error, {:netns_donor_in_use, ids}} = Deployments.delete_deployment(ctx.donor)
+      assert ctx.child.id in ids
+      assert Repo.get(Homelab.Deployments.Deployment, ctx.donor.id)
+    end
+
+    test "destroy is refused for the same reason", ctx do
+      assert {:error, {:netns_donor_in_use, _ids}} = Deployments.destroy_deployment(ctx.donor)
+    end
+
+    test "removing the last child releases the donor", ctx do
+      assert {:ok, _} = Deployments.delete_deployment(ctx.child)
+      assert {:ok, _} = Deployments.delete_deployment(ctx.donor)
+    end
+  end
+
+  describe "release ordering" do
+    test "a child's release deploys its donor first", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.deploy_release(Deployments.get_deployment!(child.id))
+      release = Repo.preload(release, :steps)
+
+      steps = Enum.sort_by(release.steps, & &1.position)
+      types = Enum.map(steps, & &1.type)
+
+      assert Enum.at(types, 0) == :dependency_container
+
+      assert Enum.find(steps, &(&1.type == :dependency_container)).resource_handle == %{
+               "deployment_id" => ctx.donor.id
+             }
+
+      # ...and only then the child itself.
+      assert Enum.find_index(types, &(&1 == :app_container)) >
+               Enum.find_index(types, &(&1 == :dependency_container))
+    end
+
+    test "a stack redeploy re-creates the donor and then every child", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(child.id))
+      release = Repo.preload(release, :steps)
+
+      steps = Enum.sort_by(release.steps, & &1.position)
+      types = Enum.map(steps, & &1.type)
+
+      # The release is driven from the DONOR — it is what gets a new container id.
+      assert release.deployment_id == ctx.donor.id
+      assert Enum.at(types, 0) == :app_container
+
+      child_step = Enum.find(steps, &(&1.type == :netns_child_container))
+      assert child_step.resource_handle == %{"deployment_id" => child.id}
+      assert child_step.position > Enum.find(steps, &(&1.type == :app_container)).position
+    end
+
+    test "driving the stack from the DONOR gives the same release", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+      release = Repo.preload(release, :steps)
+
+      assert release.deployment_id == ctx.donor.id
+
+      assert Enum.any?(
+               release.steps,
+               &(&1.type == :netns_child_container and
+                   &1.resource_handle == %{"deployment_id" => child.id})
+             )
+    end
+  end
+end
