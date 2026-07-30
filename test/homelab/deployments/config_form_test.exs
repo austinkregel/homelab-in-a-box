@@ -30,4 +30,26 @@ defmodule Homelab.Deployments.ConfigFormTest do
              "a demoted port was silently promoted back to web"
     end
   end
+
+  describe "parse_ports/1 protocol handling" do
+    test "keeps udp and normalizes casing" do
+      assert [%{"protocol" => "udp"}] =
+               ConfigForm.parse_ports(%{"0" => %{"internal" => "27900", "protocol" => "udp"}})
+
+      assert [%{"protocol" => "udp"}] =
+               ConfigForm.parse_ports(%{"0" => %{"internal" => "27900", "protocol" => "UDP"}})
+    end
+
+    test "a form that posts no protocol field yields tcp, never nil" do
+      # A cached page or a submit path that has not grown the input must still produce a
+      # port map that answers the protocol question, since the orchestrators key on it.
+      assert [%{"protocol" => "tcp"}] =
+               ConfigForm.parse_ports(%{"0" => %{"internal" => "8080"}})
+    end
+
+    test "an unrecognized protocol falls back to tcp rather than failing the deploy" do
+      assert [%{"protocol" => "tcp"}] =
+               ConfigForm.parse_ports(%{"0" => %{"internal" => "8080", "protocol" => "sctp"}})
+    end
+  end
 end
