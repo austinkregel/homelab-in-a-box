@@ -31,13 +31,39 @@ defmodule Homelab.Crypto do
   is worse than useless: every caller here expects a binary, so `:error` would sail
   on to be JSON-encoded as the string "error" and used as a *password*, turning a
   key mismatch into an unexplainable 401 from a registry. Fail loudly, return nil.
+
+  A value that is not even well-formed also returns nil rather than raising. This used
+  to be `Base.decode64!/1` plus a bare binary pattern match, so a truncated or garbage
+  row raised `ArgumentError: non-alphabet character found` — from inside `SpecBuilder`,
+  which took down the whole deploy with a base64 error naming neither the secret nor
+  the deployment. Every caller already handles nil; unparseable and undecryptable are
+  the same answer to them.
   """
   def decrypt(encoded) when is_binary(encoded) do
-    secret = encryption_key()
-    decoded = Base.decode64!(encoded)
-    <<iv::binary-16, tag::binary-16, ciphertext::binary>> = decoded
+    with {:ok, decoded} <- Base.decode64(encoded),
+         <<iv::binary-16, tag::binary-16, ciphertext::binary>> <- decoded do
+      decrypt_payload(iv, tag, ciphertext)
+    else
+      _ ->
+        Logger.error(
+          "[Crypto] A stored secret is not a well-formed encrypted payload and cannot be " <>
+            "decrypted. It was most likely written by a different version or corrupted at rest."
+        )
 
-    case :crypto.crypto_one_time_aead(:aes_256_gcm, secret, iv, ciphertext, "", tag, false) do
+        nil
+    end
+  end
+
+  defp decrypt_payload(iv, tag, ciphertext) do
+    case :crypto.crypto_one_time_aead(
+           :aes_256_gcm,
+           encryption_key(),
+           iv,
+           ciphertext,
+           "",
+           tag,
+           false
+         ) do
       plaintext when is_binary(plaintext) ->
         plaintext
 
