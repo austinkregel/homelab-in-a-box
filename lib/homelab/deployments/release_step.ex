@@ -16,7 +16,18 @@ defmodule Homelab.Deployments.ReleaseStep do
     :provision_credentials,
     :dependency_container,
     :await_health,
+    # Applies the credentials the app was configured with to the datastore that has to
+    # accept them. Registered in config and fully implemented, but it was NOT in this
+    # list — so `Ecto.Enum` would have rejected the row even if a planner emitted one,
+    # and none did. A datastore whose volume already holds data ignores
+    # MARIADB_USER/PASSWORD entirely (init runs once, on an empty data dir), so the app
+    # booted against credentials the database never took and failed from inside itself.
+    :ensure_datastore_grants,
     :app_container,
+    # A container that joins another deployment's network namespace, and so must be
+    # (re)created AFTER the container that owns it — the donor's id is part of the
+    # child's create payload. Same handler as the others; the ORDER is the point.
+    :netns_child_container,
     :publish_ingress,
     # Adoption steps (taking over an existing stack in place). `:backup_verify`
     # is the fail-closed gate; `:adopt_credentials` imports existing secrets
