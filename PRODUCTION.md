@@ -126,11 +126,81 @@ be decrypted.
 ## 7. Upgrades
 
 ```bash
-# rebuild image, then:
+docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
 
 Migrations run automatically on boot. The data and secrets volumes persist.
+
+> **`docker compose down -v` used to destroy your encryption key and keep your
+> database.** Only `homelab-iab-secrets` was declared in the compose file; the
+> Postgres volume is created through the Docker API by the app itself and was
+> invisible to compose. So `down -v` removed the key and left every encrypted row
+> — generated database passwords, adopted credentials, OIDC and registry secrets —
+> as ciphertext that can never be decrypted again. The volume is now `external:`
+> so compose cannot remove it. To genuinely start over, use
+> `build_from_scratch.sh`, which removes the key and the data together.
+
+> **`:latest` was never published.** The release workflow gated the `latest` tag on
+> a GitHub event that this workflow does not receive, so it was never applied —
+> while `docker-compose.prod.yml` defaults to `${HOMELAB_IMAGE_TAG:-latest}`. If
+> your install has not moved in a while, that is why. Pin a known version with
+> `HOMELAB_IMAGE_TAG=v1.2.3` if you want to be explicit.
+
+## 7b. Known damage from earlier versions
+
+Several bugs wrote incorrect data before they were fixed. The fixes stop the
+bleeding; they deliberately do **not** rewrite your existing rows, because in most
+of these cases the platform cannot tell damage from a deliberate choice. Check the
+ones that apply to you.
+
+**DNS records may have had their type and scope reset.** The edit modal's Type,
+Scope and Zone selects rendered with nothing pre-selected, so the browser submitted
+the first option. Opening any record to change its TTL turned it into an `A` record
+with scope `public` — and the change was then pushed to the provider, overwriting
+its copy. Find suspects with:
+
+```sql
+SELECT id, name, type, scope FROM dns_records
+ WHERE managed = false AND type = 'A' AND scope = 'public'
+   AND updated_at > inserted_at;
+```
+
+Records where `provider_record_id` is NULL are still correct at the provider —
+compare against your zone there. Records where it is set had both copies
+overwritten and must be re-entered by hand.
+
+**Shared app templates may have lost volume and port detail.** Deploying from the
+Catalog page wrote the operator's edited ports, volumes and exposure back onto the
+`app_templates` row that every space shares, and its parsers dropped volume
+`type`/`source` and port `protocol` on the way. A template that nominated a host
+folder became a managed (empty) volume, and a UDP port became TCP. Find suspects:
+
+```sql
+SELECT id, slug FROM app_templates
+ WHERE volumes::text LIKE '%container_path%' AND volumes::text NOT LIKE '%"type"%';
+```
+
+Deployments with a non-nil `volumes_override` still hold the true values and are
+running correctly; the degradation only bites on the next converge of a deployment
+that inherits from the template.
+
+**Adopted containers are mounted read-write and on all interfaces.** Adoption
+captured a mount's read-only flag and a port's bound interface and then discarded
+both, so a `:ro` mount became writable and a `127.0.0.1:` port was republished on
+`0.0.0.0`. Existing adopted deployments keep that behaviour until you set it on the
+deployment's Volumes and Settings tabs, which can now express both. The original
+values are only recoverable while the *original* container still exists.
+
+**Backup jobs may claim `:completed` without a snapshot.** Backups pointed at
+`/data/tenants/...`, a directory nothing creates, and wrote `size_bytes` as `0`
+regardless. Most jobs are expected to be `:failed` already. Treat any pre-upgrade
+`:completed` job as unverified until you can list it in your restic repo.
+
+**A config save used to strip a container's credentials.** Saving anything on a
+deployment's page recreated its container without the generated or adopted secrets.
+The secret rows themselves were never touched, so the fix is self-healing: the next
+deploy restores them. If a datastore is refusing your app's login, redeploy it.
 
 ## 8. Path to Swarm
 
