@@ -239,10 +239,10 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
     end
 
     # `to_review/1` builds its map from an EXPLICIT key list, so a captured field that is
-    # not named there is dropped. Dropping this one turned `Adoption.refuse_netns_child/1`
-    # into dead code that always matched nil — and a VPN-tunneled container was adopted
-    # onto the tenant network, leaking every packet from the first second while reporting
-    # a successful import.
+    # not named there is dropped. Dropping this one leaves `Adoption` unable to resolve the
+    # donor at all: the child is adopted onto the tenant network instead of into the
+    # tunnel, leaking every packet from the first second while reporting a successful
+    # import. See `Homelab.Deployments.AdoptionNetnsTest`.
     test "carries the container's network namespace parent through to the review" do
       stub(Homelab.Mocks.DockerClient, :get, fn
         "/containers/json?all=true", _opts ->
