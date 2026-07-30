@@ -172,7 +172,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
       view = runtime_form(conn, d)
       html = submit(view, %{"caps_add_mode" => "custom", "caps_add" => "NET_ADMN"})
 
-      assert html =~ "Could not save"
+      assert html =~ "unknown Linux capability: NET_ADMN"
       assert Repo.reload!(d).capabilities_add_override == nil
     end
 
@@ -202,7 +202,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
           "devices" => %{"0" => %{"host_path" => "dev/net/tun"}}
         })
 
-      assert html =~ "Could not save"
+      assert html =~ "a device needs an absolute host path"
       assert Repo.reload!(d).devices_override == nil
     end
 
@@ -229,7 +229,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
           "sysctls" => %{"0" => %{"key" => "vm.max_map_count", "value" => "262144"}}
         })
 
-      assert html =~ "Could not save"
+      assert html =~ "not in a namespace a container owns"
       assert Repo.reload!(d).sysctls_override == nil
     end
 
@@ -279,7 +279,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     view = runtime_form(conn, d)
     html = submit(view, %{"replicas" => "3"})
 
-    assert html =~ "Could not save"
+    assert html =~ "requires Docker Swarm"
     assert Repo.reload!(d).replicas_override == nil
   end
 end
