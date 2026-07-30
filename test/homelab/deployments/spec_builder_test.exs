@@ -49,7 +49,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
         app_template_id: template.id,
         status: :pending,
         env_overrides: %{},
-        domain: "nextcloud.friends.homelab.local"
+        domain: "nextcloud.friends.homelab.local",
+        # Explicitly childless. `SpecBuilder` asks a donor for its children (their routes
+        # go on ITS labels) and looks them up when the association is not loaded, so a
+        # hand-built struct has to say so rather than send these DB-free tests to Repo.
+        network_children: [],
+        # Likewise: SpecBuilder merges deployment secrets into the container env and
+        # looks them up when the association is not loaded.
+        secrets: []
       },
       overrides
     )
@@ -254,9 +261,43 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      assert %{source: "homelab-managed-pg", target: "/var/lib/postgresql/data", type: "volume"} in spec.volumes
+      assert %{
+               source: "homelab-managed-pg",
+               target: "/var/lib/postgresql/data",
+               type: "volume",
+               read_only: false
+             } in spec.volumes
 
-      assert %{source: "/srv/homelab/app/etc", target: "/etc/app", type: "bind"} in spec.volumes
+      assert %{
+               source: "/srv/homelab/app/etc",
+               target: "/etc/app",
+               type: "bind",
+               read_only: false
+             } in spec.volumes
+    end
+
+    # A mount the operator made read-only is a deliberate boundary — the app can read a
+    # media library but not delete it. It had nowhere to live in the schema, so both the
+    # adoption capture and the compose `:ro` suffix were dropped and every such mount
+    # came back writable.
+    test "a read-only mount stays read-only" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          volumes: [
+            %{
+              "container_path" => "/media",
+              "source" => "/srv/media",
+              "type" => "bind",
+              "read_only" => true
+            }
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(build_deployment(tenant, template))
+
+      assert [%{target: "/media", read_only: true}] = spec.volumes
     end
 
     test "still computes a synthetic volume name when no source is given" do
@@ -306,10 +347,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
-  describe "deployment_network_for/2" do
-    test "builds a per-deployment network name from slugs" do
-      assert SpecBuilder.deployment_network_for("acme", "blog") == "homelab_acme_blog_net"
-    end
+  # `deployment_network/2` and `deployment_network_for/2` are gone. They named
+  # `homelab_<tenant>_<app>_net`, a network nothing was ever attached to — retained only
+  # so publish/unpublish had something to connect Traefik to, which is why "severing a
+  # route" did nothing at all. Reachability is now the WORKLOAD's membership of the
+  # shared ingress network, so there is no name left to build.
+  test "the vestigial per-deployment network helpers are gone" do
+    refute function_exported?(SpecBuilder, :deployment_network, 2)
+    refute function_exported?(SpecBuilder, :deployment_network_for, 2)
   end
 
   describe "healthcheck translation" do
@@ -440,6 +485,44 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
       assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "9000"
+    end
+
+    test "the guess never lands on a UDP port, even when it sorts first" do
+      # Traefik's http services speak TCP only, so a UDP port is not a lower-ranked
+      # candidate for the route — it is not a candidate. A game server publishing its
+      # UDP probe port ahead of its TCP listener must still route to the TCP one.
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "kbc.li",
+          routed_port: nil,
+          ports_override: [
+            %{"internal" => "27900", "role" => "other", "protocol" => "udp"},
+            %{"internal" => "18710", "role" => "other", "protocol" => "tcp"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["traefik.http.services.kbc-li.loadbalancer.server.port"] == "18710"
+    end
+
+    test "a UDP-only workload falls back to 80 rather than routing to the UDP port" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "kbc.li",
+          routed_port: nil,
+          ports_override: [%{"internal" => "27900", "role" => "other", "protocol" => "udp"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.services.kbc-li.loadbalancer.server.port"] == "80",
+             "pointing http at 27900/udp would be a route that cannot ever answer"
     end
 
     # A wrong routed port must fail loudly at deploy time rather than come up
@@ -673,7 +756,10 @@ defmodule Homelab.Deployments.SpecBuilderTest do
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
-      assert spec.ports == [%{internal: "8080", external: "9090", role: "web"}]
+
+      assert spec.ports == [
+               %{internal: "8080", external: "9090", role: "web", protocol: "tcp", host_ip: nil}
+             ]
     end
 
     test "nil ports_override falls back to the template ports" do
@@ -690,7 +776,10 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       deployment = build_deployment(tenant, template, %{domain: nil, ports_override: nil})
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
-      assert spec.ports == [%{internal: "1000", external: "1000", role: "web"}]
+
+      assert spec.ports == [
+               %{internal: "1000", external: "1000", role: "web", protocol: "tcp", host_ip: nil}
+             ]
     end
 
     test "exposure_mode_override :service publishes no host ports and marks service mode" do
@@ -781,8 +870,58 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
-      assert spec.ports == [%{internal: "8080", external: "8080", role: "web"}]
+
+      assert spec.ports == [
+               %{internal: "8080", external: "8080", role: "web", protocol: "tcp", host_ip: nil}
+             ]
+
       refute spec.labels["traefik.enable"]
+    end
+
+    test ":host carries each port's protocol through to the spec" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :host,
+          ports: [
+            %{
+              "internal" => "27900",
+              "external" => "27900",
+              "published" => true,
+              "role" => "other",
+              "protocol" => "udp"
+            },
+            # No "protocol" key at all — every template seeded before UDP support.
+            %{
+              "internal" => "18710",
+              "external" => "18710",
+              "published" => true,
+              "role" => "other"
+            }
+          ]
+        })
+
+      deployment = build_deployment(tenant, template, %{})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.ports == [
+               %{
+                 internal: "27900",
+                 external: "27900",
+                 role: "other",
+                 protocol: "udp",
+                 host_ip: nil
+               },
+               %{
+                 internal: "18710",
+                 external: "18710",
+                 role: "other",
+                 protocol: "tcp",
+                 host_ip: nil
+               }
+             ]
     end
 
     test "routing labels are emitted only for a proxy mode with a domain" do
@@ -812,6 +951,65 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert {:ok, spec} = SpecBuilder.build(service)
       refute spec.labels["traefik.enable"]
+    end
+  end
+
+  describe "kernel privileges" do
+    test "the template's privileges reach the spec when no override is set" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          capabilities_add: ["NET_ADMIN"],
+          capabilities_drop: ["ALL"],
+          devices: [%{"host_path" => "/dev/net/tun", "container_path" => "/dev/net/tun"}],
+          sysctls: %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+        })
+
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.capabilities_add == ["NET_ADMIN"]
+      assert spec.capabilities_drop == ["ALL"]
+      assert [%{"host_path" => "/dev/net/tun", "permissions" => "rwm"}] = spec.devices
+      assert spec.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+    end
+
+    test "an override WINS, and [] is a real override rather than 'inherit'" do
+      # Explicitly dropping the capability a shared template grants is a hardening
+      # instruction. Treating [] as absent would silently keep granting it.
+      tenant = build_tenant()
+      template = build_template(%{capabilities_add: ["NET_ADMIN", "SYS_MODULE"]})
+
+      deployment =
+        build_deployment(tenant, template, %{capabilities_add_override: ["NET_BIND_SERVICE"]})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.capabilities_add == ["NET_BIND_SERVICE"]
+
+      cleared = build_deployment(tenant, template, %{capabilities_add_override: []})
+      assert {:ok, cleared_spec} = SpecBuilder.build(cleared)
+      assert cleared_spec.capabilities_add == []
+    end
+
+    test "the two spellings of one capability are folded before the drivers see them" do
+      tenant = build_tenant()
+      template = build_template(%{capabilities_add: ["CAP_NET_ADMIN"]})
+      deployment = build_deployment(tenant, template, %{capabilities_add_override: nil})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.capabilities_add == ["NET_ADMIN"]
+    end
+
+    test "a deployment with none of them gets empty values, never nil" do
+      tenant = build_tenant()
+      deployment = build_deployment(tenant, build_template())
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.capabilities_add == []
+      assert spec.capabilities_drop == []
+      assert spec.devices == []
+      assert spec.sysctls == %{}
     end
   end
 
