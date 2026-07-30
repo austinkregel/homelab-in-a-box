@@ -19,6 +19,10 @@ defmodule HomelabWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :api_authenticated do
+    plug HomelabWeb.Plugs.RequireAuthApi
+  end
+
   # Auth controller routes (not LiveView, no on_mount needed)
   scope "/auth", HomelabWeb do
     pipe_through :browser
@@ -70,8 +74,22 @@ defmodule HomelabWeb.Router do
     get "/settings/export", SettingsExportController, :export
   end
 
+  # Health is deliberately public: a container HEALTHCHECK and the post-deploy smoke test
+  # in PRODUCTION.md both call it before anyone could be logged in, and it reveals only
+  # up/down per service plus the app version.
   scope "/api/v1", HomelabWeb.Api.V1 do
     pipe_through :api
+
+    get "/health", HealthController, :index
+  end
+
+  # Everything else reads or MUTATES real state. This scope had no authentication at all
+  # until now — and since the app's own Traefik rule matches `Host(base_domain)` with no
+  # path constraint, all of it was served publicly. `POST /tenants/:id/deployments`
+  # reaches `deploy_now/1`, and `image_override` takes any parseable reference, so this
+  # was unauthenticated arbitrary-image execution on the Docker host.
+  scope "/api/v1", HomelabWeb.Api.V1 do
+    pipe_through [:api, :api_authenticated]
 
     resources "/tenants", TenantController, except: [:new, :edit] do
       resources "/deployments", DeploymentController, except: [:new, :edit]
@@ -80,8 +98,6 @@ defmodule HomelabWeb.Router do
     resources "/app-templates", AppTemplateController, only: [:index, :show]
     resources "/backups", BackupController, only: [:index, :show, :create]
     post "/backups/:id/restore", BackupController, :restore
-
-    get "/health", HealthController, :index
   end
 
   if Application.compile_env(:homelab, :dev_routes) do
