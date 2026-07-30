@@ -115,16 +115,38 @@ defmodule Homelab.Deployments.ReleaseSteps.GreenfieldTest do
     end
   end
 
+  # This step attaches the WORKLOAD to the shared ingress network, and its compensation
+  # detaches it. Both used to act on `homelab_<tenant>_<app>_net` — a network nothing was
+  # ever on — so the moduledoc's promise that "a rolled-back release is never left
+  # externally reachable" was false: Traefik kept routing to it.
   describe "PublishIngress" do
-    test "publishes the network and compensate unpublishes" do
+    test "attaches the app's container, and compensate detaches it" do
+      app =
+        insert(:deployment,
+          app_template:
+            insert(:app_template, required_env: [], default_env: %{}, volumes: [], ports: []),
+          domain: "app.example.test",
+          external_id: "container-x"
+        )
+
+      expect(Homelab.Mocks.Orchestrator, :publish, fn "container-x", _network -> :ok end)
+
+      assert {:ok, %{"published" => true, "external_id" => "container-x"}} =
+               PublishIngress.run(step(%{}), ctx(app))
+
+      expect(Homelab.Mocks.Orchestrator, :unpublish, fn "container-x", _network -> :ok end)
+      assert :ok = PublishIngress.compensate(step(%{"external_id" => "container-x"}), ctx(app))
+    end
+
+    test "compensation severs the container this step actually published" do
+      # Even if the row has since been reset (which a rollback does), the handle still
+      # names the container that was made reachable.
       app = clean_deployment()
-      expect(Homelab.Mocks.Orchestrator, :publish, fn "net-x" -> :ok end)
 
-      assert {:ok, %{"network" => "net-x", "published" => true}} =
-               PublishIngress.run(step(%{"network" => "net-x"}), ctx(app))
+      expect(Homelab.Mocks.Orchestrator, :unpublish, fn "stale-container", _network -> :ok end)
 
-      expect(Homelab.Mocks.Orchestrator, :unpublish, fn "net-x" -> :ok end)
-      assert :ok = PublishIngress.compensate(step(%{"network" => "net-x"}), ctx(app))
+      assert :ok =
+               PublishIngress.compensate(step(%{"external_id" => "stale-container"}), ctx(app))
     end
   end
 end
