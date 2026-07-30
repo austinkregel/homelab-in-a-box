@@ -273,9 +273,45 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       assert {:ok, [service]} = AdoptionPlanner.review()
       assert service.netns_parent_container_id == "gluetun-abc"
 
-      # ...and it survives into the plan, which is what the refusal reads.
+      # ...and it survives into the plan, where `Adoption` resolves it to a donor.
       plan = AdoptionPlanner.build_plan([service])
       assert [%{netns_parent_container_id: "gluetun-abc"}] = plan.services
+    end
+
+    test "a donor is listed above the containers in its namespace" do
+      # The daemon listed sabnzbd above the gluetun holding its network, and the apply is
+      # sequential and halts on the first failure — so that order read as the CAUSE of a
+      # failed import. The list the operator ticks has to match what will happen.
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "sab"}, %{"Id" => "glue"}]}
+
+        "/containers/" <> rest, _opts ->
+          id = String.replace_suffix(rest, "/json", "")
+
+          {:ok,
+           %{
+             "Id" => id,
+             "Name" => if(id == "sab", do: "/sabnzbd", else: "/gluetun"),
+             "Config" => %{"Image" => "#{id}:latest", "User" => ""},
+             "HostConfig" => %{
+               "RestartPolicy" => %{"Name" => "always"},
+               "NetworkMode" => if(id == "sab", do: "container:glue", else: "some_bridge")
+             },
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/homelab/appdata/#{id}",
+                 "Destination" => "/config",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      assert {:ok, reviews} = AdoptionPlanner.review()
+      assert Enum.map(reviews, & &1.name) == ["gluetun", "sabnzbd"]
     end
 
     test "a container on its own network carries no namespace parent" do
