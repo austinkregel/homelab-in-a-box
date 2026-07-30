@@ -73,6 +73,20 @@ defmodule Homelab.Catalog.Enrichers.ComposeParserTest do
         - 3000
   """
 
+  @compose_udp_ports """
+  services:
+    app:
+      image: myapp:latest
+      ports:
+        - "27900:27900/udp"
+        - "18710:18710/tcp"
+        - "18715:18715"
+        - "127.0.0.1:5353:53/udp"
+        - target: 161
+          published: 1610
+          protocol: udp
+  """
+
   @compose_host_ip_port """
   services:
     app:
@@ -217,11 +231,40 @@ defmodule Homelab.Catalog.Enrichers.ComposeParserTest do
       assert "3000" in internals
     end
 
-    test "parses host-ip:external:internal port format" do
+    test "keeps the /udp suffix instead of stripping it to a silently-wrong tcp port" do
+      # The old regex strip left the port NUMBER intact and only lost the transport, so
+      # an imported UDP service looked correct everywhere and was simply unreachable.
+      {:ok, result} = ComposeParser.parse(@compose_udp_ports)
+
+      by_internal = Map.new(result.ports, &{&1["internal"], &1})
+
+      assert by_internal["27900"]["protocol"] == "udp"
+      assert by_internal["18710"]["protocol"] == "tcp"
+      # Unsuffixed is tcp, matching compose's own default.
+      assert by_internal["18715"]["protocol"] == "tcp"
+      # host-ip form: the suffix still applies, and the ip is not mistaken for a port.
+      assert by_internal["53"]["protocol"] == "udp"
+      assert by_internal["53"]["external"] == "5353"
+      # Long syntax carries protocol as its own key.
+      assert by_internal["161"]["protocol"] == "udp"
+      assert by_internal["161"]["external"] == "1610"
+    end
+
+    test "parses host-ip:external:internal port format, KEEPING the interface" do
+      # The host IP used to be destructured away. `127.0.0.1:8080:80` is the operator
+      # saying this is reachable from the host and nowhere else; dropping the interface
+      # republished it on 0.0.0.0 — the whole LAN — and the imported result looked
+      # identical, because only the interface changed.
       {:ok, result} = ComposeParser.parse(@compose_host_ip_port)
       port = hd(result.ports)
       assert port["internal"] == "80"
       assert port["external"] == "8080"
+      assert port["host_ip"] == "127.0.0.1"
+    end
+
+    test "a port with no interface means all of them" do
+      {:ok, result} = ComposeParser.parse(@basic_compose)
+      assert hd(result.ports)["host_ip"] == nil
     end
 
     test "strips protocol from port strings" do
@@ -301,6 +344,183 @@ defmodule Homelab.Catalog.Enrichers.ComposeParserTest do
 
     test "returns error for invalid YAML" do
       assert {:error, _} = ComposeParser.parse_all("{{invalid")
+    end
+  end
+
+  # Dropped silently until now. A compose file whose service needs NET_ADMIN and
+  # /dev/net/tun imported CLEANLY and produced a template that could never work, with
+  # nothing on screen to say why — the exact shape of every VPN-client stack.
+  describe "kernel privileges" do
+    @compose_gluetun """
+    services:
+      gluetun:
+        image: qmcgaw/gluetun
+        cap_add:
+          - NET_ADMIN
+        cap_drop:
+          - CAP_SYS_MODULE
+        devices:
+          - /dev/net/tun:/dev/net/tun
+        sysctls:
+          - net.ipv4.conf.all.src_valid_mark=1
+        restart: unless-stopped
+    """
+
+    test "cap_add and cap_drop are read, in either spelling" do
+      {:ok, metadata} = ComposeParser.parse(@compose_gluetun)
+
+      assert metadata.capabilities_add == ["NET_ADMIN"]
+      assert metadata.capabilities_drop == ["SYS_MODULE"]
+    end
+
+    test "devices are read in compose's own spelling" do
+      {:ok, metadata} = ComposeParser.parse(@compose_gluetun)
+
+      assert metadata.devices == [
+               %{
+                 "host_path" => "/dev/net/tun",
+                 "container_path" => "/dev/net/tun",
+                 "permissions" => "rwm"
+               }
+             ]
+    end
+
+    test "sysctls are read in both the list and map forms" do
+      {:ok, metadata} = ComposeParser.parse(@compose_gluetun)
+      assert metadata.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+
+      map_form = """
+      services:
+        app:
+          image: app:latest
+          sysctls:
+            net.core.somaxconn: 1024
+      """
+
+      {:ok, metadata} = ComposeParser.parse(map_form)
+      assert metadata.sysctls == %{"net.core.somaxconn" => "1024"}
+    end
+
+    test "restart is read, and its retry-count suffix does not discard the whole policy" do
+      {:ok, metadata} = ComposeParser.parse(@compose_gluetun)
+      assert metadata.restart == "unless-stopped"
+
+      with_count = """
+      services:
+        app:
+          image: app:latest
+          restart: on-failure:5
+      """
+
+      {:ok, metadata} = ComposeParser.parse(with_count)
+      assert metadata.restart == "on-failure"
+    end
+
+    test "an unrecognised restart value is dropped rather than passed to the daemon" do
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            restart: sometimes
+        """)
+
+      assert metadata.restart == nil
+    end
+
+    test "command's exec form is kept verbatim; the shell form keeps its shell" do
+      # Splitting `bundle exec rails s -b "0.0.0.0"` on whitespace gets the quoting
+      # wrong. `/bin/sh -c <original>` preserves the semantics exactly instead.
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            command: ["minio", "server", "/data"]
+        """)
+
+      assert metadata.command == ["minio", "server", "/data"]
+
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            command: minio server /data
+        """)
+
+      assert metadata.command == ["/bin/sh", "-c", "minio server /data"]
+    end
+
+    test "a service declaring none of them yields empty values, not nil-in-a-list" do
+      {:ok, metadata} = ComposeParser.parse(@basic_compose)
+
+      assert metadata.capabilities_add == []
+      assert metadata.capabilities_drop == []
+      assert metadata.devices == []
+      assert metadata.sysctls == %{}
+      assert metadata.restart == nil
+      assert metadata.command == nil
+    end
+
+    test "parse_all carries them per service" do
+      {:ok, services} = ComposeParser.parse_all(@compose_gluetun)
+      gluetun = Enum.find(services, &(&1.name == "gluetun"))
+
+      assert gluetun.capabilities_add == ["NET_ADMIN"]
+      assert [%{"host_path" => "/dev/net/tun"}] = gluetun.devices
+    end
+  end
+
+  # `:ro` is not decoration. It is the operator saying this container must not write to
+  # a media library, a config directory or a socket. The mode suffix was destructured
+  # away as `_mode`, so every read-only mount was imported writable.
+  describe "read-only mounts" do
+    test "the :ro suffix survives the import" do
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            volumes:
+              - /srv/media:/media:ro
+              - /srv/data:/data
+        """)
+
+      [media, data] = metadata.volumes
+
+      assert media["read_only"] == true
+      assert data["read_only"] == false
+    end
+
+    test "a mode with several flags is still read-only" do
+      # Compose allows `z,ro`, `ro,cached`, and so on.
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            volumes:
+              - /srv/media:/media:z,ro
+        """)
+
+      assert [%{"read_only" => true}] = metadata.volumes
+    end
+
+    test "the long form's read_only is read too" do
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          app:
+            image: app:latest
+            volumes:
+              - type: bind
+                source: /srv/media
+                target: /media
+                read_only: true
+        """)
+
+      assert [%{"read_only" => true}] = metadata.volumes
     end
   end
 
