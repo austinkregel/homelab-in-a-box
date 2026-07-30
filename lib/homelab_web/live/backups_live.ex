@@ -35,13 +35,30 @@ defmodule HomelabWeb.BackupsLive do
            scheduled_at: DateTime.utc_now()
          }) do
       {:ok, job} ->
-        Backups.execute_backup(job)
+        # `execute_backup/1` is SYNCHRONOUS and its return was discarded, so a backup
+        # that failed wrote `status: :failed` to the row while the operator was told it
+        # succeeded — and `Readiness` reads these jobs, so the deployment then claimed
+        # protection it did not have.
+        result = Backups.execute_backup(job)
 
-        {:noreply,
-         socket
-         |> assign(:backups, Backups.list_backup_jobs())
-         |> assign(:show_backup_dropdown, false)
-         |> put_flash(:info, "Backup triggered successfully!")}
+        socket =
+          socket
+          |> assign(:backups, Backups.list_backup_jobs())
+          |> assign(:show_backup_dropdown, false)
+
+        case result do
+          {:ok, %{status: :completed}} ->
+            {:noreply, put_flash(socket, :info, "Backup completed.")}
+
+          {:ok, %{status: :failed, error_message: message}} ->
+            {:noreply, put_flash(socket, :error, "Backup failed: #{message}")}
+
+          {:ok, _job} ->
+            {:noreply, put_flash(socket, :info, "Backup started.")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Backup failed: #{inspect(reason)}")}
+        end
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Failed to create backup job")}
