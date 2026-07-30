@@ -38,6 +38,15 @@ defmodule Homelab.Deployments.PermanentHome do
     Path.join([managed_root(), slug(service), slug(container_path)])
   end
 
+  @doc """
+  The host directory holding ALL of a service's managed mounts — the parent of every
+  `backing_dir/2` for it.
+
+  This is what a whole-deployment backup covers. `Backups.execute_backup/1` used to
+  hardcode `/data/tenants/<tenant>/<app>`, which nothing creates.
+  """
+  def service_dir(service), do: Path.join(managed_root(), slug(service))
+
   @doc "The plane-managed named volume for an adopted mount."
   def volume_name(service, container_path) do
     "homelab-managed-#{slug(service)}-#{slug(container_path)}"
