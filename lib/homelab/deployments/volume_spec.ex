@@ -70,7 +70,19 @@ defmodule Homelab.Deployments.VolumeSpec do
       "type" => infer_type(vol["type"], source),
       "source" => source,
       "description" => vol["description"] || "",
-      "optional" => vol["optional"] in [true, "true"]
+      "optional" => vol["optional"] in [true, "true"],
+      # Whether the container may WRITE through this mount.
+      #
+      # There was no key for this at all, so a mount the operator deliberately made
+      # read-only — a media library, a certificate bundle, a config directory shared
+      # with another stack, `docker.sock` — was silently widened to read-write on
+      # adoption and on compose import. Both parsers CAPTURED the flag (`RW` from the
+      # daemon, the `:ro` suffix from compose) and dropped it one function later,
+      # because there was nowhere to put it.
+      #
+      # Defaults to false (writable), which is Docker's own default and what every
+      # existing stored volume means.
+      "read_only" => vol["read_only"] in [true, "true"]
     }
   end
 
