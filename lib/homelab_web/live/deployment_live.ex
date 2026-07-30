@@ -3,7 +3,10 @@ defmodule HomelabWeb.DeploymentLive do
 
   alias Homelab.Deployments
   alias Homelab.Deployments.Access
+  alias Homelab.Deployments.Netns
   alias Homelab.Deployments.Readiness
+  alias Homelab.Deployments.SpecBuilder
+  alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.ImageRef
   alias Homelab.Catalog.Tags
@@ -44,6 +47,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
+      |> assign(:settings_routed_port, nil)
       |> assign(:runtime_edit_mode, false)
       |> assign(:runtime_restart_policy, "on-failure")
       |> assign(:runtime_replicas, "1")
@@ -55,6 +59,22 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:runtime_entrypoint, "")
       |> assign(:runtime_aliases_mode, "inherit")
       |> assign(:runtime_aliases, "")
+      |> assign(:runtime_caps_add_mode, "inherit")
+      |> assign(:runtime_caps_add, "")
+      |> assign(:runtime_caps_drop_mode, "inherit")
+      |> assign(:runtime_caps_drop, "")
+      # Devices and sysctls are row editors rather than textareas, but carry the same
+      # inherit-vs-custom mode: a template that passes a device and a deployment that
+      # wants none is a real distinction an empty row list alone cannot express.
+      |> assign(:runtime_devices_mode, "inherit")
+      |> assign(:runtime_devices, [])
+      |> assign(:runtime_sysctls_mode, "inherit")
+      |> assign(:runtime_sysctls, [])
+      |> assign(:settings_network_parent_id, nil)
+      |> assign(:netns_candidates, [])
+      |> assign(:netns_donor, nil)
+      |> assign(:netns_children, [])
+      |> assign(:netns_donor_env, %{})
       |> assign(:version_edit_mode, false)
       |> assign(:version_image, "")
       # :idle | :loading | {:ok, [TagInfo]} | {:error, reason}. A registry that cannot
@@ -85,7 +105,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:tenants, tenants)
       |> assign(:siblings, siblings)
       |> assign_releases()
-      |> assign_readiness()
+      |> assign_derived()
       |> probe_tls()
 
     socket =
@@ -157,7 +177,7 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_info({:deployment_status, deployment_id, _new_status}, socket) do
     if socket.assigns.deployment && socket.assigns.deployment.id == deployment_id do
       deployment = Deployments.get_deployment!(deployment_id)
-      {:noreply, socket |> assign(:deployment, deployment) |> assign_readiness()}
+      {:noreply, socket |> assign(:deployment, deployment) |> assign_derived()}
     else
       {:noreply, socket}
     end
@@ -174,7 +194,7 @@ defmodule HomelabWeb.DeploymentLive do
        socket
        |> assign(:deployment, deployment)
        |> assign_releases()
-       |> assign_readiness()}
+       |> assign_derived()}
     else
       {:noreply, socket}
     end
@@ -344,7 +364,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
-         |> assign_readiness()
+         |> assign_derived()
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
          |> assign(:env_rows, [])
@@ -415,7 +435,11 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:runtime_replicas, to_string(Access.effective_replicas(d)))
      |> assign_list_field(:command, d.command_override)
      |> assign_list_field(:entrypoint, d.entrypoint_override)
-     |> assign_list_field(:aliases, d.network_aliases_override)}
+     |> assign_list_field(:aliases, d.network_aliases_override)
+     |> assign_list_field(:caps_add, d.capabilities_add_override)
+     |> assign_list_field(:caps_drop, d.capabilities_drop_override)
+     |> assign_device_rows(d.devices_override)
+     |> assign_sysctl_rows(d.sysctls_override)}
   end
 
   def handle_event("cancel_runtime_edit", _params, socket) do
@@ -432,7 +456,55 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:runtime_entrypoint_mode, runtime["entrypoint_mode"])
      |> assign(:runtime_entrypoint, runtime["entrypoint"])
      |> assign(:runtime_aliases_mode, runtime["aliases_mode"])
-     |> assign(:runtime_aliases, runtime["aliases"])}
+     |> assign(:runtime_aliases, runtime["aliases"])
+     |> assign(:runtime_caps_add_mode, runtime["caps_add_mode"])
+     |> assign(:runtime_caps_add, runtime["caps_add"])
+     |> assign(:runtime_caps_drop_mode, runtime["caps_drop_mode"])
+     |> assign(:runtime_caps_drop, runtime["caps_drop"])
+     |> assign(:runtime_devices_mode, runtime["devices_mode"])
+     # parse_*_rows KEEPS blank rows, unlike the parse_* the changeset uses: a
+     # just-added row has to survive this change event instead of vanishing under the
+     # operator's cursor.
+     |> assign(:runtime_devices, RuntimeSpec.parse_device_rows(runtime["devices"]))
+     |> assign(:runtime_sysctls_mode, runtime["sysctls_mode"])
+     |> assign(:runtime_sysctls, sysctl_rows_from_params(runtime["sysctls"]))}
+  end
+
+  def handle_event("add_runtime_device", _params, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :runtime_devices,
+       socket.assigns.runtime_devices ++
+         [%{"host_path" => "", "container_path" => "", "permissions" => "rwm"}]
+     )}
+  end
+
+  def handle_event("remove_runtime_device", %{"index" => index}, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :runtime_devices,
+       List.delete_at(socket.assigns.runtime_devices, to_int(index))
+     )}
+  end
+
+  def handle_event("add_runtime_sysctl", _params, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :runtime_sysctls,
+       socket.assigns.runtime_sysctls ++ [%{"key" => "", "value" => ""}]
+     )}
+  end
+
+  def handle_event("remove_runtime_sysctl", %{"index" => index}, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :runtime_sysctls,
+       List.delete_at(socket.assigns.runtime_sysctls, to_int(index))
+     )}
   end
 
   def handle_event("save_runtime", %{"runtime" => runtime}, socket) do
@@ -443,7 +515,13 @@ defmodule HomelabWeb.DeploymentLive do
       replicas_override: parse_replicas(runtime["replicas"]),
       command_override: parse_list_field(runtime["command_mode"], runtime["command"]),
       entrypoint_override: parse_list_field(runtime["entrypoint_mode"], runtime["entrypoint"]),
-      network_aliases_override: parse_list_field(runtime["aliases_mode"], runtime["aliases"])
+      network_aliases_override: parse_list_field(runtime["aliases_mode"], runtime["aliases"]),
+      capabilities_add_override:
+        parse_capability_field(runtime["caps_add_mode"], runtime["caps_add"]),
+      capabilities_drop_override:
+        parse_capability_field(runtime["caps_drop_mode"], runtime["caps_drop"]),
+      devices_override: parse_devices_field(runtime["devices_mode"], runtime["devices"]),
+      sysctls_override: parse_sysctls_field(runtime["sysctls_mode"], runtime["sysctls"])
     }
 
     case apply_config(deployment, attrs) do
@@ -451,7 +529,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
-         |> assign_readiness()
+         |> assign_derived()
          |> assign(:runtime_edit_mode, false)
          |> put_flash(:info, "Runtime settings saved — recreating the container.")}
 
@@ -480,7 +558,18 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
      |> assign_gpu_settings(limits)
      |> assign(:settings_health_path, health["path"] || "")
-     |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)}
+     |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)
+     |> assign(
+       :settings_network_parent_id,
+       deployment.network_parent_id && to_string(deployment.network_parent_id)
+     )
+     # Seeded once here and round-tripped in `settings_changed` from then on, like every
+     # other field — see `checked_routed_port/2` for what recomputing it per render did.
+     |> assign(
+       :settings_routed_port,
+       checked_routed_port(deployment, editable_ports(Access.effective_ports(deployment)))
+     )
+     |> assign(:netns_candidates, netns_candidates(deployment))}
   end
 
   def handle_event("cancel_settings_edit", _params, socket) do
@@ -511,6 +600,20 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(
        :settings_health_path,
        settings["health_path"] || socket.assigns.settings_health_path
+     )
+     # Drives which access tiles are even selectable, so it has to round-trip on every
+     # change rather than only at save. `""` is a real value here — it is the operator
+     # choosing "its own network" — so it must not fall through to the previous one.
+     |> assign(
+       :settings_network_parent_id,
+       settings["network_parent_id"] || socket.assigns.settings_network_parent_id
+     )
+     # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
+     # persisted deployment on every render, so a new selection reverted on the next
+     # keystroke and the save wrote the old port.
+     |> assign(
+       :settings_routed_port,
+       settings["routed_port"] || socket.assigns.settings_routed_port
      )}
   end
 
@@ -523,6 +626,7 @@ defmodule HomelabWeb.DeploymentLive do
       "internal" => "",
       "external" => "",
       "role" => "other",
+      "protocol" => "tcp",
       "description" => "",
       "optional" => false
     }
@@ -582,7 +686,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
-         |> assign_readiness()
+         |> assign_derived()
          |> assign(:volumes_edit_mode, false)
          |> assign(:volumes_rows, [])
          |> put_flash(:info, "Volumes updated — recreating the container.")}
@@ -625,22 +729,37 @@ defmodule HomelabWeb.DeploymentLive do
       domain: domain,
       exposure_mode_override: exposure,
       ports_override: if(ports == [], do: nil, else: ports),
-      routed_port: parse_routed_port(settings["routed_port"]),
+      routed_port:
+        parse_routed_port(settings["routed_port"] || socket.assigns.settings_routed_port),
       # Only a proxied app has paths to route; in host mode Traefik is not in the way.
       extra_routes: if(access == "proxy", do: parse_routes(settings["routes"]), else: []),
       proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
-      health_check_override: health_override(deployment, settings)
+      health_check_override: health_override(deployment, settings),
+      network_parent_id: parse_network_parent(settings, socket)
     }
 
-    case apply_config(deployment, attrs) do
+    # A netns member's route is served by its DONOR's labels, so changing it means
+    # re-creating the donor — which mints a new container id and leaves every OTHER
+    # child naming a container that no longer exists. The whole group has to go round
+    # together; see Deployments.redeploy_netns_stack/1.
+    stack? = netns_member?(deployment, attrs.network_parent_id)
+
+    case apply_config(deployment, attrs, stack?) do
       {:ok, updated} ->
         {:noreply,
          socket
          |> assign(:deployment, updated)
-         |> assign_readiness()
+         |> assign_derived()
          |> assign(:settings_edit_mode, false)
-         |> put_flash(:info, "Settings saved — recreating the container.")}
+         |> put_flash(
+           :info,
+           if(stack?,
+             do:
+               "Settings saved — re-deploying this container and everything sharing its network.",
+             else: "Settings saved — recreating the container."
+           )
+         )}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -1456,6 +1575,171 @@ defmodule HomelabWeb.DeploymentLive do
                   value={@runtime_aliases}
                 />
 
+                <div class="pt-2 border-t border-base-content/5">
+                  <h4 class="text-xs font-semibold text-base-content/70 uppercase tracking-wide mb-1">
+                    Kernel privileges
+                  </h4>
+                  <p class="text-xs text-base-content/40 mb-4">
+                    What this container may ask the host kernel for. Needed by VPN clients,
+                    USB/serial coordinators and anything managing its own network stack.
+                  </p>
+
+                  <div class="space-y-5">
+                    <.runtime_list_field
+                      name="caps_add"
+                      label="Capabilities added"
+                      hint="One per line, e.g. NET_ADMIN. The CAP_ prefix is optional."
+                      mode={@runtime_caps_add_mode}
+                      value={@runtime_caps_add}
+                    />
+                    <p
+                      :if={privileged_caps(@runtime_caps_add_mode, @runtime_caps_add) != []}
+                      class="flex items-start gap-2 text-xs text-warning -mt-3"
+                    >
+                      <.icon name="hero-exclamation-triangle" class="w-4 h-4 shrink-0 mt-px" />
+                      <span>
+                        {Enum.join(privileged_caps(@runtime_caps_add_mode, @runtime_caps_add), ", ")}
+                        {if length(privileged_caps(@runtime_caps_add_mode, @runtime_caps_add)) == 1,
+                          do: "reaches",
+                          else: "reach"} past the container onto the host. Grant only what this
+                        app actually needs.
+                      </span>
+                    </p>
+
+                    <.runtime_list_field
+                      name="caps_drop"
+                      label="Capabilities dropped"
+                      hint="One per line. ALL drops every capability, then only the added ones apply."
+                      mode={@runtime_caps_drop_mode}
+                      value={@runtime_caps_drop}
+                    />
+
+                    <div class="flex flex-col gap-1.5">
+                      <label class="text-xs font-medium text-base-content/50">Devices</label>
+                      <select
+                        name="runtime[devices_mode]"
+                        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option value="inherit" selected={@runtime_devices_mode == "inherit"}>
+                          Inherit from catalog
+                        </option>
+                        <option value="custom" selected={@runtime_devices_mode == "custom"}>
+                          Custom
+                        </option>
+                      </select>
+
+                      <div :if={@runtime_devices_mode == "custom"} class="space-y-2 mt-1">
+                        <div
+                          :for={{device, idx} <- Enum.with_index(@runtime_devices)}
+                          class="flex items-center gap-2"
+                        >
+                          <input
+                            type="text"
+                            name={"runtime[devices][#{idx}][host_path]"}
+                            value={device["host_path"]}
+                            placeholder="/dev/net/tun"
+                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                          />
+                          <input
+                            type="text"
+                            name={"runtime[devices][#{idx}][container_path]"}
+                            value={device["container_path"]}
+                            placeholder="same as host"
+                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                          />
+                          <input
+                            type="text"
+                            name={"runtime[devices][#{idx}][permissions]"}
+                            value={device["permissions"]}
+                            placeholder="rwm"
+                            class="w-20 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                          />
+                          <button
+                            type="button"
+                            phx-click="remove_runtime_device"
+                            phx-value-index={idx}
+                            class="p-2 rounded-lg text-base-content/40 hover:text-error hover:bg-error/10 transition-colors"
+                            aria-label="Remove device"
+                          >
+                            <.icon name="hero-x-mark" class="w-4 h-4" />
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          phx-click="add_runtime_device"
+                          class="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+                        >
+                          + Add device
+                        </button>
+                      </div>
+                      <p class="text-xs text-base-content/40">
+                        Host path, path inside the container, and cgroup permissions (r/w/m).
+                        <%= if swarm?() do %>
+                          Swarm cannot pass a device — a deployment with one is refused rather
+                          than started without it.
+                        <% end %>
+                      </p>
+                    </div>
+
+                    <div class="flex flex-col gap-1.5">
+                      <label class="text-xs font-medium text-base-content/50">Sysctls</label>
+                      <select
+                        name="runtime[sysctls_mode]"
+                        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option value="inherit" selected={@runtime_sysctls_mode == "inherit"}>
+                          Inherit from catalog
+                        </option>
+                        <option value="custom" selected={@runtime_sysctls_mode == "custom"}>
+                          Custom
+                        </option>
+                      </select>
+
+                      <div :if={@runtime_sysctls_mode == "custom"} class="space-y-2 mt-1">
+                        <div
+                          :for={{sysctl, idx} <- Enum.with_index(@runtime_sysctls)}
+                          class="flex items-center gap-2"
+                        >
+                          <input
+                            type="text"
+                            name={"runtime[sysctls][#{idx}][key]"}
+                            value={sysctl["key"]}
+                            placeholder="net.ipv4.conf.all.src_valid_mark"
+                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                          />
+                          <input
+                            type="text"
+                            name={"runtime[sysctls][#{idx}][value]"}
+                            value={sysctl["value"]}
+                            placeholder="1"
+                            class="w-28 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                          />
+                          <button
+                            type="button"
+                            phx-click="remove_runtime_sysctl"
+                            phx-value-index={idx}
+                            class="p-2 rounded-lg text-base-content/40 hover:text-error hover:bg-error/10 transition-colors"
+                            aria-label="Remove sysctl"
+                          >
+                            <.icon name="hero-x-mark" class="w-4 h-4" />
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          phx-click="add_runtime_sysctl"
+                          class="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+                        >
+                          + Add sysctl
+                        </button>
+                      </div>
+                      <p class="text-xs text-base-content/40">
+                        Only settings a container owns its own copy of — net.*, fs.mqueue.* and
+                        the kernel IPC limits. Docker refuses anything else.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="flex items-center gap-2">
                   <button
                     type="submit"
@@ -1502,7 +1786,75 @@ defmodule HomelabWeb.DeploymentLive do
                     {format_list(Access.effective_network_aliases(@deployment))}
                   </dd>
                 </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Capabilities added</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_list(Access.effective_capabilities_add(@deployment))}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Capabilities dropped</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_list(Access.effective_capabilities_drop(@deployment))}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Devices</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_devices(Access.effective_devices(@deployment))}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-base-content/50 text-xs">Sysctls</dt>
+                  <dd class="font-mono text-xs text-base-content">
+                    {format_sysctls(Access.effective_sysctls(@deployment))}
+                  </dd>
+                </div>
+                <div :if={@netns_donor}>
+                  <dt class="text-base-content/50 text-xs">Network</dt>
+                  <dd class="text-base-content">
+                    Through
+                    <.link
+                      navigate={~p"/deployments/#{@netns_donor.id}"}
+                      class="text-primary hover:underline"
+                    >
+                      {@netns_donor.app_template.name}
+                    </.link>
+                  </dd>
+                </div>
               </dl>
+
+              <%!-- The donor's side of the relationship. The derived firewall values are
+                    shown because they are computed rather than typed: a 502 through
+                    Traefik is almost always a port missing from this list, and there is
+                    nothing in any log that says so. --%>
+              <div :if={@netns_children != []} class="mt-5 pt-4 border-t border-base-content/5">
+                <h4 class="text-xs font-semibold text-base-content/70 uppercase tracking-wide mb-2">
+                  Sharing its network
+                </h4>
+                <ul class="space-y-1.5 mb-3">
+                  <li
+                    :for={child <- @netns_children}
+                    class="flex items-center justify-between gap-3 text-sm"
+                  >
+                    <.link
+                      navigate={~p"/deployments/#{child.id}"}
+                      class="text-primary hover:underline"
+                    >
+                      {child.app_template.name}
+                    </.link>
+                    <span class="font-mono text-xs text-base-content/50">
+                      {format_ports(Homelab.Deployments.Netns.declared_ports(child))}
+                    </span>
+                  </li>
+                </ul>
+                <dl :if={@netns_donor_env != %{}} class="space-y-1.5">
+                  <div :for={{key, value} <- Enum.sort(@netns_donor_env)}>
+                    <dt class="text-base-content/50 text-xs">{key}</dt>
+                    <dd class="font-mono text-xs text-base-content break-all">{value}</dd>
+                  </div>
+                </dl>
+              </div>
             <% end %>
           </div>
         </div>
@@ -1531,6 +1883,35 @@ defmodule HomelabWeb.DeploymentLive do
                 phx-submit="save_settings"
                 class="space-y-5"
               >
+                <div :if={@netns_candidates != []} class="flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-base-content/50">Network</label>
+                  <select
+                    name="settings[network_parent_id]"
+                    class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                  >
+                    <option value="" selected={@settings_network_parent_id in [nil, ""]}>
+                      Its own network
+                    </option>
+                    <option
+                      :for={candidate <- @netns_candidates}
+                      value={to_string(candidate.id)}
+                      selected={@settings_network_parent_id == to_string(candidate.id)}
+                    >
+                      Through {candidate.app_template.name}
+                    </option>
+                  </select>
+                  <div
+                    :if={@settings_network_parent_id not in [nil, ""]}
+                    class="rounded-lg bg-warning/10 border border-warning/20 p-2.5 text-[11px] text-base-content/70 leading-relaxed"
+                  >
+                    All of this container's traffic goes through that container, and only
+                    through it. It gets no ports, no network aliases and no address of its own —
+                    siblings sharing the namespace reach each other on <code phx-no-curly-interpolation>localhost</code>, and its
+                    Traefik route is served from the other container. Saving re-creates the whole
+                    group, because the containers behind it are pinned to a specific container ID.
+                  </div>
+                </div>
+
                 <div class="flex flex-col gap-1.5">
                   <label class="text-xs font-medium text-base-content/50">Access</label>
                   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
@@ -1538,6 +1919,8 @@ defmodule HomelabWeb.DeploymentLive do
                       :for={{value, title, desc} <- Access.access_choices()}
                       class={[
                         "flex flex-col gap-0.5 rounded-lg border p-2.5 cursor-pointer transition-colors",
+                        netns_forbidden_access?(@settings_network_parent_id, value) &&
+                          "opacity-40 pointer-events-none",
                         if(@settings_access == value,
                           do: "border-primary bg-primary/5",
                           else: "border-base-content/10 hover:border-base-content/20"
@@ -1549,10 +1932,17 @@ defmodule HomelabWeb.DeploymentLive do
                         name="settings[access]"
                         value={value}
                         checked={@settings_access == value}
+                        disabled={netns_forbidden_access?(@settings_network_parent_id, value)}
                         class="sr-only"
                       />
                       <span class="text-xs font-semibold text-base-content">{title}</span>
-                      <span class="text-[10px] text-base-content/40 leading-snug">{desc}</span>
+                      <span class="text-[10px] text-base-content/40 leading-snug">
+                        <%= if netns_forbidden_access?(@settings_network_parent_id, value) do %>
+                          Not available while routing through another container
+                        <% else %>
+                          {desc}
+                        <% end %>
+                      </span>
                     </label>
                   </div>
                 </div>
@@ -1623,10 +2013,7 @@ defmodule HomelabWeb.DeploymentLive do
                           type="radio"
                           name="settings[routed_port]"
                           value={port["internal"]}
-                          checked={
-                            checked_routed_port(@deployment, @settings_ports) ==
-                              to_string(port["internal"])
-                          }
+                          checked={@settings_routed_port == to_string(port["internal"])}
                           class="radio radio-xs radio-primary"
                         />
                         <span class="text-[10px] text-base-content/40 w-10">route</span>
@@ -1643,6 +2030,18 @@ defmodule HomelabWeb.DeploymentLive do
                         name={"settings[ports][#{idx}][role]"}
                         value={port["role"]}
                       />
+                      <select
+                        name={"settings[ports][#{idx}][protocol]"}
+                        class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                      >
+                        <option
+                          :for={proto <- ~w(tcp udp)}
+                          value={proto}
+                          selected={proto == Access.port_protocol(port)}
+                        >
+                          {String.upcase(proto)}
+                        </option>
+                      </select>
                       <input
                         type="text"
                         name={"settings[ports][#{idx}][description]"}
@@ -1771,6 +2170,35 @@ defmodule HomelabWeb.DeploymentLive do
                       placeholder="host"
                       class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
                     />
+                    <select
+                      name={"settings[ports][#{idx}][protocol]"}
+                      class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    >
+                      <option
+                        :for={proto <- ~w(tcp udp)}
+                        value={proto}
+                        selected={proto == Access.port_protocol(port)}
+                      >
+                        {String.upcase(proto)}
+                      </option>
+                    </select>
+                    <%!-- The INTERFACE this binds on. Adoption captures `127.0.0.1` from
+                          the original container, and with no input for it any save here
+                          would widen the binding to every interface — putting a
+                          deliberately host-local database on the LAN. --%>
+                    <input
+                      type="text"
+                      name={"settings[ports][#{idx}][host_ip]"}
+                      value={port["host_ip"]}
+                      placeholder="all interfaces"
+                      title="Publish on one interface only, e.g. 127.0.0.1. Blank means all interfaces."
+                      class="w-32 rounded-lg bg-base-100 border-0 text-sm font-mono py-1.5 px-2"
+                    />
+                    <input
+                      type="hidden"
+                      name={"settings[ports][#{idx}][role]"}
+                      value={port["role"] || "other"}
+                    />
                     <button
                       type="button"
                       phx-click="settings_remove_port"
@@ -1817,6 +2245,26 @@ defmodule HomelabWeb.DeploymentLive do
                       value={port["internal"]}
                       placeholder="port"
                       class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    />
+                    <%!-- Nothing is mapped in this mode, but the protocol still has to
+                       round-trip: dropping it rewrites the stored port map to tcp on
+                       save, which the healthcheck and any later mode switch then read. --%>
+                    <select
+                      name={"settings[ports][#{idx}][protocol]"}
+                      class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
+                    >
+                      <option
+                        :for={proto <- ~w(tcp udp)}
+                        value={proto}
+                        selected={proto == Access.port_protocol(port)}
+                      >
+                        {String.upcase(proto)}
+                      </option>
+                    </select>
+                    <input
+                      type="hidden"
+                      name={"settings[ports][#{idx}][role]"}
+                      value={port["role"] || "other"}
                     />
                     <button
                       type="button"
@@ -2202,6 +2650,22 @@ defmodule HomelabWeb.DeploymentLive do
                   placeholder="what it holds (optional)"
                   class="w-40 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2 text-base-content/60"
                 />
+                <%!-- The hidden input is what makes UNCHECKING work: an unchecked box
+                      posts nothing at all, which is indistinguishable from the field not
+                      being rendered. --%>
+                <label
+                  class="flex items-center gap-1.5 text-[11px] text-base-content/60 whitespace-nowrap"
+                  title="Mount read-only — the container cannot write through it"
+                >
+                  <input type="hidden" name={"volumes[#{idx}][read_only]"} value="false" />
+                  <input
+                    type="checkbox"
+                    name={"volumes[#{idx}][read_only]"}
+                    value="true"
+                    checked={vol["read_only"] == true}
+                    class="rounded border-base-content/20"
+                  /> read-only
+                </label>
                 <button
                   type="button"
                   phx-click="remove_volume"
@@ -2361,8 +2825,31 @@ defmodule HomelabWeb.DeploymentLive do
     """
   end
 
-  defp assign_readiness(socket) do
-    assign(socket, :readiness, Readiness.checks(socket.assigns.deployment))
+  # Everything computed FROM the deployment rather than stored on it. Called from every
+  # site that (re)assigns `:deployment`, so a save can never leave the page showing one
+  # container's config next to another's derived state.
+  defp assign_derived(socket) do
+    deployment = socket.assigns.deployment
+
+    socket
+    |> assign(:readiness, Readiness.checks(deployment))
+    |> assign_netns(deployment)
+  end
+
+  defp assign_netns(socket, deployment) do
+    children = Netns.children(Deployments.reload_network_children(deployment))
+    donor = Netns.donor(deployment)
+
+    socket
+    |> assign(:netns_donor, donor)
+    |> assign(:netns_children, children)
+    # Derived, not typed — which is exactly why it is shown. A 502 through Traefik to a
+    # tunneled app is almost always a port missing from FIREWALL_INPUT_PORTS, and
+    # nothing in any log says so.
+    |> assign(
+      :netns_donor_env,
+      SpecBuilder.donor_env(deployment.app_template, deployment.tenant, children)
+    )
   end
 
   defp merged_env(deployment) do
@@ -2401,10 +2888,11 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  defp secret_key?(key) do
-    upper = String.upcase(key)
-    String.contains?(upper, "PASSWORD") or String.contains?(upper, "SECRET")
-  end
+  # One definition, shared with the wizard and the API serializer. This copy was the
+  # narrowest of the three — only PASSWORD and SECRET — so an `API_TOKEN`, an
+  # `*_API_KEY` or a `DATABASE_URL` was rendered in plaintext on the Environment tab
+  # while the very same variable was masked in the wizard. See `Homelab.SecretKeys`.
+  defp secret_key?(key), do: Homelab.SecretKeys.sensitive?(key)
 
   # An inherit/custom pair plus a textarea. The pair exists because a blank textarea
   # alone cannot distinguish "use the catalog's" from "explicitly nothing", and for
@@ -2443,6 +2931,42 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_list([]), do: "(none)"
   defp format_list(values), do: Enum.join(values, " ")
 
+  defp format_ports([]), do: "no known ports"
+  defp format_ports(ports), do: Enum.map_join(ports, ", ", &to_string/1)
+
+  defp format_devices([]), do: "(none)"
+
+  defp format_devices(devices) do
+    Enum.map_join(devices, ", ", fn device ->
+      "#{device["host_path"]} → #{device["container_path"]} (#{device["permissions"]})"
+    end)
+  end
+
+  defp format_sysctls(sysctls) when map_size(sysctls) == 0, do: "(none)"
+
+  defp format_sysctls(sysctls) do
+    sysctls
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
+  end
+
+  # The added capabilities that reach past the container, so the form can say so while
+  # the operator is typing. A warning, never a refusal — NET_ADMIN is exactly what a
+  # VPN client legitimately needs.
+  defp privileged_caps("custom", text) do
+    text
+    |> parse_capability_field_preview()
+    |> Enum.filter(&RuntimeSpec.privileged_capability?/1)
+  end
+
+  defp privileged_caps(_inherit, _text), do: []
+
+  defp parse_capability_field_preview(text) do
+    (text || "")
+    |> String.split("\n")
+    |> RuntimeSpec.parse_capabilities()
+  end
+
   # One argument per line, not a shell string. Splitting `--flag "a b"` on whitespace
   # gets it wrong, and the alternative is implementing shell quoting in a form field.
   defp assign_list_field(socket, key, nil) do
@@ -2468,6 +2992,83 @@ defmodule HomelabWeb.DeploymentLive do
 
   defp parse_list_field(_inherit, _text), do: nil
 
+  # Capabilities are a list field too, but normalized on the way in so `cap_net_admin`
+  # and `NET_ADMIN` are stored as one permission rather than two.
+  defp parse_capability_field("custom", text),
+    do: RuntimeSpec.parse_capabilities(parse_list_field("custom", text))
+
+  defp parse_capability_field(_inherit, _text), do: nil
+
+  # Same inherit-vs-custom rule as the list fields: [] is "explicitly no devices",
+  # which is a real instruction when the template passes one.
+  defp parse_devices_field("custom", rows), do: RuntimeSpec.parse_devices(rows)
+  defp parse_devices_field(_inherit, _rows), do: nil
+
+  defp parse_sysctls_field("custom", rows) do
+    rows
+    |> sysctl_rows_from_params()
+    |> Enum.reject(&(String.trim(&1["key"]) == ""))
+    |> Map.new(fn row -> {String.trim(row["key"]), row["value"]} end)
+  end
+
+  defp parse_sysctls_field(_inherit, _rows), do: nil
+
+  defp assign_device_rows(socket, nil) do
+    socket
+    |> assign(:runtime_devices_mode, "inherit")
+    |> assign(:runtime_devices, [])
+  end
+
+  defp assign_device_rows(socket, devices) when is_list(devices) do
+    socket
+    |> assign(:runtime_devices_mode, "custom")
+    |> assign(:runtime_devices, RuntimeSpec.parse_device_rows(devices))
+  end
+
+  defp assign_sysctl_rows(socket, nil) do
+    socket
+    |> assign(:runtime_sysctls_mode, "inherit")
+    |> assign(:runtime_sysctls, [])
+  end
+
+  defp assign_sysctl_rows(socket, sysctls) when is_map(sysctls) do
+    rows =
+      sysctls
+      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.map(fn {key, value} -> %{"key" => key, "value" => to_string(value)} end)
+
+    socket
+    |> assign(:runtime_sysctls_mode, "custom")
+    |> assign(:runtime_sysctls, rows)
+  end
+
+  # Indexed form params (`%{"0" => %{"key" => ..., "value" => ...}}`) back to ordered
+  # rows, blanks KEPT so a just-added row survives the change event.
+  defp sysctl_rows_from_params(nil), do: []
+
+  defp sysctl_rows_from_params(params) when is_map(params) do
+    params
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{"key" => to_string(row["key"] || ""), "value" => to_string(row["value"] || "")}
+    end)
+  end
+
+  defp sysctl_rows_from_params(rows) when is_list(rows) do
+    Enum.map(rows, fn row ->
+      %{"key" => to_string(row["key"] || ""), "value" => to_string(row["value"] || "")}
+    end)
+  end
+
+  defp to_int(value) when is_integer(value), do: value
+
+  defp to_int(value) do
+    case Integer.parse(to_string(value)) do
+      {n, _rest} -> n
+      _ -> 0
+    end
+  end
+
   # Blank means "the platform default", which is what nil resolves to.
   defp parse_replicas(value) do
     case Integer.parse(to_string(value)) do
@@ -2491,7 +3092,7 @@ defmodule HomelabWeb.DeploymentLive do
         {:noreply,
          socket
          |> assign(:deployment, updated)
-         |> assign_readiness()
+         |> assign_derived()
          |> assign(version_edit_mode: false, available_tags: :idle)
          |> put_flash(:info, message)}
 
@@ -2520,9 +3121,9 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   # Persists config attrs then recreates the container so the changes take effect.
-  defp apply_config(deployment, attrs) do
+  defp apply_config(deployment, attrs, stack? \\ false) do
     with {:ok, updated} <- Deployments.update_deployment(deployment, attrs),
-         {:ok, _} <- Deployments.recreate_deployment(updated) do
+         {:ok, _} <- reconverge(updated, stack?) do
       {:ok, Deployments.get_deployment!(updated.id)}
     else
       {:error, %Ecto.Changeset{}} -> {:error, "Could not save the configuration."}
@@ -2530,17 +3131,69 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
+  # A lone container converges in place; a network-namespace group cannot. Re-creating
+  # one member mints a new container id that the others are pinned to, so the group goes
+  # round together as one ordered release.
+  defp reconverge(deployment, true), do: Deployments.redeploy_netns_stack(deployment)
+  defp reconverge(deployment, false), do: Deployments.recreate_deployment(deployment)
+
+  # True when this save touches a network-namespace group at all — either this
+  # deployment is joining/leaving one, or it is the donor others are already inside.
+  defp netns_member?(deployment, new_parent_id) do
+    not is_nil(new_parent_id) or not is_nil(deployment.network_parent_id) or
+      Homelab.Deployments.Netns.donor?(deployment)
+  end
+
+  # "" is the operator choosing "its own network"; a missing key means the control was
+  # not rendered at all (no eligible donors), which must not clear an existing choice.
+  defp parse_network_parent(settings, socket) do
+    case Map.get(settings, "network_parent_id", :absent) do
+      :absent -> socket.assigns.deployment.network_parent_id
+      "" -> nil
+      value -> to_int(value)
+    end
+  end
+
+  # Deployments in the same space that could host this one's network namespace.
+  # Excludes itself, anything already inside another namespace (chains are not
+  # supported) and host-networked containers (which have no namespace to share).
+  defp netns_candidates(deployment) do
+    Deployments.list_deployments()
+    |> Enum.filter(fn candidate ->
+      candidate.id != deployment.id and
+        candidate.tenant_id == deployment.tenant_id and
+        is_nil(candidate.network_parent_id) and
+        not Access.host_network_mode?(candidate)
+    end)
+    |> Enum.sort_by(& &1.app_template.name)
+  end
+
+  # A container inside another's namespace has no ports of its own to bind and no
+  # namespace of its own to replace, so both host modes are unreachable from here.
+  defp netns_forbidden_access?(parent_id, access) when parent_id not in [nil, ""],
+    do: access in ["host", "host_network"]
+
+  defp netns_forbidden_access?(_parent_id, _access), do: false
+
   # Normalizes stored ports into the container->host rows the Host editor renders.
   # Carries the ROLE through the form. The settings form used to post only
   # internal/external, so `ConfigForm` re-inferred the role from the port number on
   # every save — and an app on a non-obvious port lost its explicit "web"
   # designation, which is the one the reverse proxy routes to.
+  #
+  # PROTOCOL rides along for the same reason, and it fails worse: a port the form does
+  # not post defaults back to tcp on save, so editing anything else on a UDP deployment
+  # would quietly republish its port on the wrong transport and take the service down.
   defp editable_ports(ports) do
     Enum.map(ports, fn p ->
       %{
         "internal" => to_string(p["internal"] || p["container_port"] || ""),
         "external" => to_string(p["external"] || p["host_port"] || ""),
         "role" => p["role"] || "other",
+        "protocol" => Access.port_protocol(p),
+        # nil renders as a blank field, which means "all interfaces" — the same thing
+        # it means in the stored map and to Docker.
+        "host_ip" => p["host_ip"],
         "description" => p["description"] || "",
         "optional" => p["optional"] == true
       }
@@ -2558,6 +3211,10 @@ defmodule HomelabWeb.DeploymentLive do
         "internal" => p["internal"] || "",
         "external" => p["external"] || "",
         "role" => p["role"] || "other",
+        "protocol" => Access.port_protocol(p),
+        # Round-tripped like every other field, or the interface would revert to "all"
+        # under the operator's cursor on the next change event.
+        "host_ip" => p["host_ip"],
         "description" => p["description"] || "",
         "optional" => p["optional"] == "true"
       }
@@ -2591,10 +3248,18 @@ defmodule HomelabWeb.DeploymentLive do
   defp tls_probe_impl,
     do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
 
-  # Which radio is checked: the port Traefik will ACTUALLY forward to. A stored
+  # Which radio starts checked: the port Traefik will ACTUALLY forward to. A stored
   # routed_port is the operator's decision and wins outright; only a deployment that
   # has never made one falls back to SpecBuilder's guess (mirrored here so the form
   # never shows a different port than the one the spec will use).
+  #
+  # Read ONCE, into `@settings_routed_port`, when the editor opens. It used to be
+  # recomputed from the PERSISTED deployment on every render — and since
+  # `@settings_ports` is rebuilt on every change event, the whole comprehension
+  # re-rendered on each keystroke and re-asserted `checked` from the old value. Selecting
+  # a different route port and then editing any other field reverted the selection under
+  # the operator's cursor, and the save persisted the port they had before. It was the
+  # only field in this form not round-tripped through `settings_changed`.
   defp checked_routed_port(%{routed_port: port}, _ports) when is_integer(port),
     do: to_string(port)
 
