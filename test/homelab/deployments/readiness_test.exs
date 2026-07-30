@@ -154,4 +154,81 @@ defmodule Homelab.Deployments.ReadinessTest do
       refute Readiness.ready?(d)
     end
   end
+
+  # This gate reads the donor's EFFECTIVE firewall env. Reading `env_overrides` alone
+  # could never see the platform-derived value — deriving it means putting it in the
+  # spec's env, never in the overrides — so the gate reported a permanent failure for
+  # every correctly-configured donor and told the operator to re-do something that had
+  # already happened. A check that cannot pass trains people to ignore it, and this is
+  # the one that catches a real 502.
+  describe "tunnel firewall gate" do
+    setup do
+      tenant = insert(:tenant)
+
+      donor =
+        insert(:deployment,
+          tenant: tenant,
+          app_template:
+            build(:app_template,
+              name: "Gluetun",
+              netns_donor_kind: "gluetun",
+              exposure_mode: :service,
+              ports: []
+            ),
+          domain: nil,
+          status: :running,
+          external_id: "gluetun-1"
+        )
+
+      %{tenant: tenant, donor: donor}
+    end
+
+    defp tunneled_child(tenant, donor, overrides \\ %{}) do
+      insert(
+        :deployment,
+        Map.merge(
+          %{
+            tenant: tenant,
+            app_template:
+              build(:app_template,
+                name: "Sonarr",
+                exposure_mode: :public,
+                ports: [%{"internal" => 8989, "role" => "web"}]
+              ),
+            domain: "sonarr.example.com",
+            network_parent_id: donor.id,
+            netns_parent_external_id: "gluetun-1"
+          },
+          overrides
+        )
+      )
+    end
+
+    test "passes on the value the platform derives, with no operator action", ctx do
+      child = tunneled_child(ctx.tenant, ctx.donor)
+
+      assert check(Homelab.Deployments.get_deployment!(child.id), :netns_firewall).status ==
+               :pass
+    end
+
+    test "an operator override that omits the port is a real gap", ctx do
+      {:ok, _donor} =
+        Homelab.Deployments.update_deployment(ctx.donor, %{
+          env_overrides: %{"FIREWALL_INPUT_PORTS" => "1234"}
+        })
+
+      child = tunneled_child(ctx.tenant, ctx.donor)
+
+      gate = check(Homelab.Deployments.get_deployment!(child.id), :netns_firewall)
+      assert gate.status == :gap
+      assert gate.detail =~ "8989"
+    end
+
+    test "a deployment on its own network is not asked about tunnels at all" do
+      d = insert(:deployment, domain: "app.example.com")
+
+      assert check(d, :netns_firewall) == nil
+      assert check(d, :netns_donor) == nil
+    end
+  end
 end
