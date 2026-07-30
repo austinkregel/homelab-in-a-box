@@ -38,14 +38,19 @@ defmodule Homelab.Services.ReconcilerTest do
     on_exit(fn -> Homelab.Settings.evict("reconciler_sweep_mode") end)
   end
 
+  # publish/unpublish take the WORKLOAD's id now, not a network name: they attach and
+  # detach the container from the shared ingress network, which is what actually decides
+  # whether Traefik can route to it. They used to connect Traefik to
+  # `homelab_<tenant>_<app>_net`, a network nothing was ever on — so every "route
+  # severed" alert in this file was reporting something that did not happen.
   defp record_orchestrator_io(test_pid) do
     Homelab.Mocks.Orchestrator
-    |> stub(:publish, fn net ->
-      send(test_pid, {:published, net})
+    |> stub(:publish, fn container_id, _network ->
+      send(test_pid, {:published, container_id})
       :ok
     end)
-    |> stub(:unpublish, fn net ->
-      send(test_pid, {:unpublished, net})
+    |> stub(:unpublish, fn container_id, _network ->
+      send(test_pid, {:unpublished, container_id})
       :ok
     end)
     |> stub(:undeploy, fn id ->
@@ -95,7 +100,7 @@ defmodule Homelab.Services.ReconcilerTest do
       assert_receive {:deployment_status, ^dep_id, :running}, 2_000
       assert Deployments.get_deployment!(dep_id).status == :running
       # ingress invariant grants the route only once it is running
-      assert_receive {:published, "homelab_acme_blog_net"}, 2_000
+      assert_receive {:published, "c1"}, 2_000
     end
 
     test "keeps :deploying (and unpublished) while a healthcheck'd container is still starting" do
@@ -246,8 +251,8 @@ defmodule Homelab.Services.ReconcilerTest do
 
       start_and_sync!()
 
-      assert_receive {:published, "homelab_acme_live_net"}, 2_000
-      assert_receive {:unpublished, "homelab_acme_dead_net"}, 2_000
+      assert_receive {:published, "c1"}, 2_000
+      assert_receive {:unpublished, "c2"}, 2_000
     end
   end
 
@@ -272,7 +277,7 @@ defmodule Homelab.Services.ReconcilerTest do
 
       # First pass: detected -> route severed + alerted.
       start_and_sync!()
-      assert_receive {:unpublished, "homelab_acme_ghost_net"}, 2_000
+      assert_receive {:unpublished, "rogue1"}, 2_000
       assert Repo.aggregate(Notification, :count, :id) >= 1
 
       # Second pass: grace elapsed -> removed.
@@ -293,7 +298,7 @@ defmodule Homelab.Services.ReconcilerTest do
       :ok = Reconciler.sync_now()
       :ok = Reconciler.sync_now()
 
-      assert_receive {:unpublished, "homelab_acme_ghost_net"}, 2_000
+      assert_receive {:unpublished, "rogue1"}, 2_000
       refute_receive {:undeployed, "rogue1"}, 300
 
       assert [%{id: "rogue1", tenant: "acme", app: "ghost"}] = Reconciler.list_orphans()
@@ -369,7 +374,7 @@ defmodule Homelab.Services.ReconcilerTest do
 
       # Tracked in sever-only first.
       start_and_sync!()
-      assert_receive {:unpublished, "homelab_acme_ghost_net"}, 2_000
+      assert_receive {:unpublished, "rogue1"}, 2_000
 
       # Arm: first armed pass must not delete (grace just reset).
       set_sweep_mode("armed")
