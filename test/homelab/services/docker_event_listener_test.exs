@@ -56,8 +56,8 @@ defmodule Homelab.Services.DockerEventListenerTest do
     # it can't race concurrent tests. `set_mox_global` lets the GenServer process
     # call the mock's expectations.
     stub(Homelab.Mocks.Orchestrator, :list_services, fn -> {:ok, []} end)
-    stub(Homelab.Mocks.Orchestrator, :publish, fn _ -> :ok end)
-    stub(Homelab.Mocks.Orchestrator, :unpublish, fn _ -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :unpublish, fn _, _ -> :ok end)
 
     resp = fake_stream_resp()
     stub(Homelab.Mocks.DockerClient, :stream_events, fn _filters, _opts -> {:ok, resp} end)
@@ -107,7 +107,15 @@ defmodule Homelab.Services.DockerEventListenerTest do
   end
 
   defp insert_deployment(status) do
-    insert(:deployment, status: status, domain: "app.tenant.homelab.local")
+    # `external_id` is required for publish/unpublish to do anything: they attach and
+    # detach the CONTAINER from the ingress network now, rather than connecting Traefik
+    # to a per-deployment network nothing was ever on. A deployment receiving Docker
+    # health events has a container by definition.
+    insert(:deployment,
+      status: status,
+      domain: "app.tenant.homelab.local",
+      external_id: "container-#{System.unique_integer([:positive])}"
+    )
   end
 
   defp reload_status(id) do
@@ -319,7 +327,7 @@ defmodule Homelab.Services.DockerEventListenerTest do
 
       test_pid = self()
 
-      expect(Homelab.Mocks.Orchestrator, :publish, fn _network ->
+      expect(Homelab.Mocks.Orchestrator, :publish, fn _network, _ ->
         send(test_pid, :published)
         :ok
       end)
@@ -347,7 +355,7 @@ defmodule Homelab.Services.DockerEventListenerTest do
 
       test_pid = self()
 
-      expect(Homelab.Mocks.Orchestrator, :unpublish, fn _network ->
+      expect(Homelab.Mocks.Orchestrator, :unpublish, fn _network, _ ->
         send(test_pid, :unpublished)
         :ok
       end)
