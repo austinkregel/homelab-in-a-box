@@ -227,19 +227,25 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
   @doc false
   def parse_exposed_ports(nil), do: []
 
+  # ExposedPorts keys are `"<port>/<proto>"`, and the proto half is kept rather than
+  # split off and dropped. An image declaring `EXPOSE 27900/udp` previously enriched to
+  # a TCP port map — the number looked right in the UI, so the loss was invisible until
+  # the deployed container turned out to be unreachable.
   @doc false
   def parse_exposed_ports(ports) when is_map(ports) do
     Enum.map(ports, fn {port_spec, _} ->
-      port_num =
-        port_spec
-        |> String.split("/")
-        |> List.first()
+      {port_num, protocol} =
+        case String.split(port_spec, "/", parts: 2) do
+          [num, "udp"] -> {num, "udp"}
+          [num | _] -> {num, "tcp"}
+        end
 
       %{
         "internal" => port_num,
         "external" => port_num,
         "description" => nil,
         "optional" => false,
+        "protocol" => protocol,
         "role" => Homelab.Catalog.Enrichers.PortRoles.infer(port_num)
       }
     end)
