@@ -658,31 +658,48 @@ defmodule Homelab.DeploymentsTest do
   end
 
   describe "publish_deployment/1 and unpublish_deployment/1" do
-    test "ingress-published deployment connects/disconnects its network via the orchestrator" do
+    # These act on the WORKLOAD's membership of the shared ingress network now, not on
+    # Traefik's membership of `homelab_<tenant>_<app>_net` — a per-deployment network
+    # nothing was ever attached to, which is why "severing a route" changed nothing and
+    # still reported success.
+    test "an ingress-published deployment attaches/detaches its own container" do
       tenant = insert(:tenant, slug: "acme")
       template = insert(:app_template, slug: "blog")
 
       deployment =
-        insert(:deployment, tenant: tenant, app_template: template, domain: "blog.acme.test")
-
-      net = "homelab_acme_blog_net"
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          domain: "blog.acme.test",
+          external_id: "container-abc"
+        )
 
       Homelab.Mocks.Orchestrator
-      |> expect(:publish, fn ^net -> :ok end)
-      |> expect(:unpublish, fn ^net -> :ok end)
+      |> expect(:publish, fn "container-abc", _network -> :ok end)
+      |> expect(:unpublish, fn "container-abc", _network -> :ok end)
 
       assert :ok = Deployments.publish_deployment(deployment)
       assert :ok = Deployments.unpublish_deployment(deployment)
     end
 
-    test "a no-domain deployment is never published; unpublish is a safe disconnect" do
-      deployment = insert(:deployment, domain: nil)
+    test "a no-domain deployment is never published; unpublish is a safe detach" do
+      deployment = insert(:deployment, domain: nil, external_id: "container-xyz")
 
       # publish: no domain → no orchestrator call.
       assert :ok = Deployments.publish_deployment(deployment)
 
-      # unpublish: always disconnects (idempotent), so it DOES call the orchestrator.
-      Homelab.Mocks.Orchestrator |> expect(:unpublish, fn _net -> :ok end)
+      # unpublish: always detaches (idempotent), so it DOES call the orchestrator.
+      Homelab.Mocks.Orchestrator |> expect(:unpublish, fn "container-xyz", _network -> :ok end)
+      assert :ok = Deployments.unpublish_deployment(deployment)
+    end
+
+    test "a deployment with no container is a no-op on both sides" do
+      # Nothing exists to attach or detach, and calling the orchestrator with nil would
+      # be a request against a container id of `nil`.
+      deployment =
+        insert(:deployment, domain: "nope.acme.test", external_id: nil)
+
+      assert :ok = Deployments.publish_deployment(deployment)
       assert :ok = Deployments.unpublish_deployment(deployment)
     end
 
