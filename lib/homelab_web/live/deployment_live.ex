@@ -3126,8 +3126,15 @@ defmodule HomelabWeb.DeploymentLive do
          {:ok, _} <- reconverge(updated, stack?) do
       {:ok, Deployments.get_deployment!(updated.id)}
     else
-      {:error, %Ecto.Changeset{}} -> {:error, "Could not save the configuration."}
-      {:error, reason} -> {:error, "Saved, but recreate failed: #{inspect(reason)}"}
+      # The changeset's OWN message, not a generic stand-in. Every refusal reachable from
+      # this form was written to say what is wrong and what to do instead — `Netns` alone
+      # has ten — and collapsing them all to "Could not save the configuration." is why
+      # choosing a network container read as a broken feature rather than a refused one.
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:error, HomelabWeb.ChangesetErrors.to_sentence(changeset)}
+
+      {:error, reason} ->
+        {:error, "Saved, but recreate failed: #{inspect(reason)}"}
     end
   end
 
