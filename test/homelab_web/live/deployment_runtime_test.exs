@@ -57,7 +57,13 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
       "entrypoint_mode" => "inherit",
       "entrypoint" => "",
       "aliases_mode" => "inherit",
-      "aliases" => ""
+      "aliases" => "",
+      "caps_add_mode" => "inherit",
+      "caps_add" => "",
+      "caps_drop_mode" => "inherit",
+      "caps_drop" => "",
+      "devices_mode" => "inherit",
+      "sysctls_mode" => "inherit"
     }
 
     render_submit(view, "save_runtime", %{"runtime" => Map.merge(defaults, params)})
@@ -126,6 +132,142 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     submit(view, %{"aliases_mode" => "custom", "aliases" => "mysql\ndb"})
 
     assert Repo.reload!(d).network_aliases_override == ["mysql", "db"]
+  end
+
+  describe "kernel privileges" do
+    test "capabilities are stored normalized, so one permission is one entry", %{
+      conn: conn,
+      deployment: d
+    } do
+      view = runtime_form(conn, d)
+
+      submit(view, %{
+        "caps_add_mode" => "custom",
+        "caps_add" => "cap_net_admin\nNET_ADMIN\nNET_RAW"
+      })
+
+      assert Repo.reload!(d).capabilities_add_override == ["NET_ADMIN", "NET_RAW"]
+    end
+
+    test "a custom-but-empty capability list clears what the template grants", %{
+      conn: conn,
+      deployment: d
+    } do
+      # [] is a real hardening instruction here, distinct from "inherit the catalog's".
+      {:ok, template} =
+        Homelab.Catalog.update_app_template(d.app_template, %{capabilities_add: ["NET_ADMIN"]})
+
+      d = %{d | app_template: template}
+
+      view = runtime_form(conn, d)
+      submit(view, %{"caps_add_mode" => "custom", "caps_add" => ""})
+
+      assert Repo.reload!(d).capabilities_add_override == []
+    end
+
+    test "an unknown capability is refused rather than handed to the daemon", %{
+      conn: conn,
+      deployment: d
+    } do
+      view = runtime_form(conn, d)
+      html = submit(view, %{"caps_add_mode" => "custom", "caps_add" => "NET_ADMN"})
+
+      assert html =~ "Could not save"
+      assert Repo.reload!(d).capabilities_add_override == nil
+    end
+
+    test "device rows are stored with the container path and permissions filled in", %{
+      conn: conn,
+      deployment: d
+    } do
+      view = runtime_form(conn, d)
+
+      submit(view, %{
+        "devices_mode" => "custom",
+        "devices" => %{"0" => %{"host_path" => "/dev/net/tun"}}
+      })
+
+      assert [device] = Repo.reload!(d).devices_override
+      assert device["host_path"] == "/dev/net/tun"
+      assert device["container_path"] == "/dev/net/tun"
+      assert device["permissions"] == "rwm"
+    end
+
+    test "a device with a relative host path is refused", %{conn: conn, deployment: d} do
+      view = runtime_form(conn, d)
+
+      html =
+        submit(view, %{
+          "devices_mode" => "custom",
+          "devices" => %{"0" => %{"host_path" => "dev/net/tun"}}
+        })
+
+      assert html =~ "Could not save"
+      assert Repo.reload!(d).devices_override == nil
+    end
+
+    test "sysctl rows are stored as a map, with blank keys dropped", %{conn: conn, deployment: d} do
+      view = runtime_form(conn, d)
+
+      submit(view, %{
+        "sysctls_mode" => "custom",
+        "sysctls" => %{
+          "0" => %{"key" => "net.ipv4.conf.all.src_valid_mark", "value" => "1"},
+          "1" => %{"key" => "", "value" => ""}
+        }
+      })
+
+      assert Repo.reload!(d).sysctls_override == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+    end
+
+    test "a sysctl outside a container's own namespace is refused", %{conn: conn, deployment: d} do
+      view = runtime_form(conn, d)
+
+      html =
+        submit(view, %{
+          "sysctls_mode" => "custom",
+          "sysctls" => %{"0" => %{"key" => "vm.max_map_count", "value" => "262144"}}
+        })
+
+      assert html =~ "Could not save"
+      assert Repo.reload!(d).sysctls_override == nil
+    end
+
+    test "inherit leaves all four as nil, so the catalog still drives them", %{
+      conn: conn,
+      deployment: d
+    } do
+      {:ok, pinned} =
+        Homelab.Deployments.update_deployment(d, %{
+          capabilities_add_override: ["NET_ADMIN"],
+          devices_override: [%{"host_path" => "/dev/net/tun"}],
+          sysctls_override: %{"net.core.somaxconn" => "1024"}
+        })
+
+      view = runtime_form(conn, pinned)
+      submit(view, %{})
+
+      reloaded = Repo.reload!(d)
+      assert reloaded.capabilities_add_override == nil
+      assert reloaded.devices_override == nil
+      assert reloaded.sysctls_override == nil
+    end
+
+    test "the read-only card reports the effective values", %{conn: conn, deployment: d} do
+      {:ok, _} =
+        Homelab.Deployments.update_deployment(d, %{
+          capabilities_add_override: ["NET_ADMIN"],
+          devices_override: [%{"host_path" => "/dev/net/tun"}],
+          sysctls_override: %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{d.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "settings"})
+
+      assert html =~ "NET_ADMIN"
+      assert html =~ "/dev/net/tun"
+      assert html =~ "net.ipv4.conf.all.src_valid_mark=1"
+    end
   end
 
   test "replicas above one are refused on Docker Engine", %{conn: conn, deployment: d} do
