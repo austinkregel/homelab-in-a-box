@@ -184,40 +184,78 @@ defmodule Homelab.Docker.ReqClient do
     end
   end
 
-  defp drain_json_stream(resp, buffer, on_event, error_tag) do
+  # Drains a `into: :self` response, giving back any message that is NOT part of it.
+  #
+  # This used to `receive` any message, hand it to `Req.parse_message/2`, and on
+  # `:unknown` simply loop — which DISCARDED it. Every foreign message delivered to the
+  # caller for the duration of a build or a pull was silently eaten: a PubSub broadcast,
+  # a `:DOWN` from a monitor, a LiveView `handle_info`, or — as the flaky test in
+  # `req_client_test.exs` kept demonstrating — the caller's own `on_event` callback
+  # sending to itself. Whether anything was lost came down to the timing of the next
+  # `receive`, which is why it presented as an intermittent "no events arrived".
+  #
+  # Unknown messages are accumulated and re-sent to the mailbox once the stream is
+  # finished, so they are delivered late rather than never. Order among them is
+  # preserved; order relative to messages that arrive after the drain is not, which is
+  # the honest cost of borrowing the caller's mailbox at all.
+  defp drain_json_stream(resp, buffer, on_event, error_tag, foreign \\ []) do
     receive do
       message ->
         case Req.parse_message(resp, message) do
           {:ok, chunks} ->
-            process_stream_chunks(chunks, resp, buffer, on_event, error_tag)
+            process_stream_chunks(chunks, resp, buffer, on_event, error_tag, foreign)
 
           :unknown ->
-            drain_json_stream(resp, buffer, on_event, error_tag)
+            drain_json_stream(resp, buffer, on_event, error_tag, [message | foreign])
         end
     after
       600_000 ->
+        requeue(foreign)
         {:error, :stream_timeout}
     end
   end
 
-  defp process_stream_chunks([], resp, buffer, on_event, error_tag),
-    do: drain_json_stream(resp, buffer, on_event, error_tag)
+  # Put back what was never ours, oldest first.
+  defp requeue(foreign) do
+    foreign
+    |> Enum.reverse()
+    |> Enum.each(&send(self(), &1))
+  end
 
-  defp process_stream_chunks([:done | _rest], _resp, buffer, on_event, error_tag),
-    do: emit_json_events(buffer, on_event, error_tag, true)
+  defp process_stream_chunks([], resp, buffer, on_event, error_tag, foreign),
+    do: drain_json_stream(resp, buffer, on_event, error_tag, foreign)
 
-  defp process_stream_chunks([{:error, reason} | _rest], _resp, _buffer, _on_event, _error_tag),
-    do: {:error, reason}
+  defp process_stream_chunks([:done | _rest], _resp, buffer, on_event, error_tag, foreign) do
+    result = emit_json_events(buffer, on_event, error_tag, true)
+    requeue(foreign)
+    result
+  end
 
-  defp process_stream_chunks([{:data, data} | rest], resp, buffer, on_event, error_tag) do
+  defp process_stream_chunks(
+         [{:error, reason} | _rest],
+         _resp,
+         _buffer,
+         _on_event,
+         _error_tag,
+         foreign
+       ) do
+    requeue(foreign)
+    {:error, reason}
+  end
+
+  defp process_stream_chunks([{:data, data} | rest], resp, buffer, on_event, error_tag, foreign) do
     case emit_json_events(buffer <> data, on_event, error_tag, false) do
-      {:cont, remaining} -> process_stream_chunks(rest, resp, remaining, on_event, error_tag)
-      {:error, _} = err -> err
+      {:cont, remaining} ->
+        process_stream_chunks(rest, resp, remaining, on_event, error_tag, foreign)
+
+      {:error, _} = err ->
+        requeue(foreign)
+        err
     end
   end
 
-  defp process_stream_chunks([{:trailers, _} | rest], resp, buffer, on_event, error_tag),
-    do: process_stream_chunks(rest, resp, buffer, on_event, error_tag)
+  defp process_stream_chunks([{:trailers, _} | rest], resp, buffer, on_event, error_tag, foreign),
+    do: process_stream_chunks(rest, resp, buffer, on_event, error_tag, foreign)
 
   # Splits the buffer on newlines, decodes each complete JSON line, and forwards
   # it to `on_event`. A daemon `"error"` event aborts the stream. When `final?`,
