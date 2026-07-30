@@ -1,13 +1,8 @@
 defmodule HomelabWeb.Api.V1.ErrorJSON do
+  # Same traversal the LiveViews use — see `HomelabWeb.ChangesetErrors`. This one keeps
+  # the field-keyed map, because a JSON client wants to know WHICH field was refused.
   def render("error.json", %{changeset: changeset}) do
-    errors =
-      Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
-        Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
-          opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
-        end)
-      end)
-
-    %{errors: errors}
+    %{errors: HomelabWeb.ChangesetErrors.to_map(changeset)}
   end
 
   def render("error.json", %{status: status, message: message}) do
