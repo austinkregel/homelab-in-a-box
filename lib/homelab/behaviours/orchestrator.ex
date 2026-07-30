@@ -54,16 +54,42 @@ defmodule Homelab.Behaviours.Orchestrator do
   @callback undeploy(service_id()) :: :ok | {:error, term()}
 
   @doc """
-  Grants external reachability to a deployment's network (connects the reverse
-  proxy to it). Called only after the deployment is verified ready. Idempotent.
+  Grants external reachability by attaching the WORKLOAD to the shared ingress
+  network — the one Traefik resolves backends on. Called only after the deployment
+  is verified ready. Idempotent.
+
+  These two used to take a NETWORK name, and were handed `homelab_<tenant>_<app>_net`
+  — a per-deployment network nothing is ever attached to (`SpecBuilder`'s moduledoc
+  calls it vestigial). Connecting and disconnecting Traefik from an empty network
+  changes nothing, so the reconciler's ingress invariant, its "route severed" alerts
+  and `PublishIngress.compensate/2` all reported success having done nothing: Traefik
+  kept routing to unhealthy apps and to rolled-back releases.
+
+  Traefik discovers a backend by the container's IP on the network named in its
+  `traefik.docker.network` label, so the container's MEMBERSHIP of that network is
+  what actually decides reachability. That is what these now operate on.
+
+  The NETWORK stays a parameter rather than becoming a constant inside the driver. It
+  is whatever that label names, and a workload is routinely on several networks at
+  once — its private tenant network, the ingress network, and anything the operator has
+  multi-homed it onto. Hardcoding one name would make a second ingress, or a workload
+  reached over a different private network, inexpressible.
+
+  Not every routed deployment can be attached, either: a container living in ANOTHER
+  container's network namespace has no endpoint of its own, and the daemon rejects the
+  connect outright. Its route is served by its donor. `Deployments.publish_deployment/1`
+  is what knows the difference.
   """
-  @callback publish(network :: String.t()) :: :ok | {:error, term()}
+  @callback publish(service_id(), network :: String.t()) :: :ok | {:error, term()}
 
   @doc """
-  Revokes external reachability for a deployment's network (disconnects the
-  reverse proxy from it). Never touches workload containers. Idempotent.
+  Revokes external reachability by detaching the workload from the given network.
+  Idempotent — detaching something already detached is a no-op.
+
+  Detaches from THAT network only. A routed workload is multi-homed, and severing its
+  public route must not cut it off from its own datastores.
   """
-  @callback unpublish(network :: String.t()) :: :ok | {:error, term()}
+  @callback unpublish(service_id(), network :: String.t()) :: :ok | {:error, term()}
   @callback update(service_id(), service_spec()) :: :ok | {:error, term()}
   @callback restart(service_id()) :: :ok | {:error, term()}
   @callback list_services() :: {:ok, [service_status()]} | {:error, term()}
