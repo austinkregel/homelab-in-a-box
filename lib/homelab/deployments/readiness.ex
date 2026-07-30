@@ -10,7 +10,7 @@ defmodule Homelab.Deployments.Readiness do
   (reverse-proxy + TLS, auth, verified backups, health + limits).
   """
 
-  alias Homelab.Deployments.{Access, Deployment, SpecBuilder}
+  alias Homelab.Deployments.{Access, Deployment, Netns, SpecBuilder}
   alias Homelab.Backups
 
   @type status :: :pass | :gap
@@ -30,7 +30,7 @@ defmodule Homelab.Deployments.Readiness do
       auth_check(deployment),
       backups_check(deployment),
       resilience_check(deployment)
-    ]
+    ] ++ netns_checks(deployment)
   end
 
   @doc "True when every gate passes."
@@ -97,6 +97,125 @@ defmodule Homelab.Deployments.Readiness do
 
     check(:resilience, "Health & limits", health? and limited?, detail, "settings")
   end
+
+  # Only shown for a container that shares another's network namespace — for everything
+  # else these are not gaps, they are not applicable.
+  defp netns_checks(%Deployment{network_parent_id: nil}), do: []
+
+  defp netns_checks(%Deployment{} = deployment) do
+    case Netns.donor(deployment) do
+      nil -> []
+      donor -> [netns_donor_check(deployment, donor), netns_firewall_check(deployment, donor)]
+    end
+  end
+
+  # A child has no network of its own: if the donor is not running, the child is not
+  # "degraded", it cannot start at all. And once the donor has been re-created, the
+  # child is pinned to a container id that no longer exists — Docker refuses to start
+  # it, with an error that points at the wrong thing.
+  defp netns_donor_check(deployment, donor) do
+    stale? = Netns.stale?(deployment, donor)
+    running? = donor.status == :running
+
+    {pass?, detail} =
+      cond do
+        stale? ->
+          {false,
+           "#{donor_name(donor)} was re-created, so this container is pinned to a container " <>
+             "that no longer exists and cannot start. Re-deploy the group."}
+
+        running? ->
+          {true, "Routing all traffic through #{donor_name(donor)}."}
+
+        true ->
+          {false,
+           "#{donor_name(donor)} is #{donor.status} — this container has no network until it runs."}
+      end
+
+    check(:netns_donor, "Network container", pass?, detail, "settings")
+  end
+
+  # The single most common way this arrangement fails, and the one with no error
+  # message anywhere: gluetun's kill-switch drops traffic to a port it was not told
+  # about, so Traefik gets a 502 and neither container logs a thing.
+  defp netns_firewall_check(deployment, donor) do
+    ports = Netns.declared_ports(deployment)
+    allowed = firewall_ports(donor)
+
+    cond do
+      donor.app_template.netns_donor_kind != "gluetun" ->
+        check(
+          :netns_firewall,
+          "Reachable through the tunnel",
+          true,
+          "No firewall rules to derive for this network container.",
+          "settings"
+        )
+
+      ports == [] ->
+        check(
+          :netns_firewall,
+          "Reachable through the tunnel",
+          true,
+          "No ports declared, so nothing needs to be let in.",
+          "settings"
+        )
+
+      Enum.all?(ports, &(&1 in allowed)) ->
+        check(
+          :netns_firewall,
+          "Reachable through the tunnel",
+          true,
+          "#{donor_name(donor)} lets #{Enum.join(ports, ", ")} in.",
+          "settings"
+        )
+
+      true ->
+        missing = Enum.reject(ports, &(&1 in allowed))
+
+        check(
+          :netns_firewall,
+          "Reachable through the tunnel",
+          false,
+          "#{donor_name(donor)}'s firewall does not allow #{Enum.join(missing, ", ")}, so a " <>
+            "request to those ports is dropped with no error. Re-deploy #{donor_name(donor)} " <>
+            "to apply the derived rules, or set FIREWALL_INPUT_PORTS by hand.",
+          "settings"
+        )
+    end
+  end
+
+  # The donor's effective `FIREWALL_INPUT_PORTS`: what the platform derives, with an
+  # operator override on top — the same merge order `SpecBuilder.build_env/5` uses.
+  #
+  # This deliberately reads the CONFIGURATION rather than the deployed container. Reading
+  # `env_overrides` alone (as this first did) could never see the derived value at all,
+  # because deriving it means putting it in the spec's env, never in the overrides — so
+  # the gate reported a permanent failure for every correctly-configured donor and told
+  # the operator to re-deploy something that had already happened. A check that cannot
+  # pass trains people to ignore it, and this is the one that catches a real 502.
+  #
+  # "Configured but not yet applied" is a different question, and `netns_donor_check/2`
+  # right above already answers it via `Netns.stale?/2`.
+  defp firewall_ports(donor) do
+    derived =
+      SpecBuilder.donor_env(donor.app_template, donor.tenant, Netns.children(donor))
+      |> Map.get("FIREWALL_INPUT_PORTS", "")
+
+    (donor.env_overrides || %{})
+    |> Map.get("FIREWALL_INPUT_PORTS", derived)
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.flat_map(fn port ->
+      case Integer.parse(String.trim(port)) do
+        {n, ""} -> [n]
+        _ -> []
+      end
+    end)
+  end
+
+  defp donor_name(%Deployment{app_template: %{name: name}}) when is_binary(name), do: name
+  defp donor_name(%Deployment{id: id}), do: "deployment #{id}"
 
   # -- Helpers --
 
