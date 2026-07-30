@@ -83,6 +83,28 @@ defmodule Homelab.Deployments.AdoptionNetnsTest do
 
       assert service.container_id == @gluetun_id
     end
+
+    test "the flat preview lists agree with the order things will actually run in" do
+      # The operator reads `plan.phase1`/`phase2` in the preview, and infers the execution
+      # order from it — reasonably, since it IS sequential. Deriving those lists from the
+      # unordered services while executing the ordered ones gives a preview that lies
+      # about the one property the operator is checking.
+      plan = AdoptionPlanner.build_plan([child_review(), donor_review()])
+
+      quiesce_order =
+        plan.phase1
+        |> Enum.filter(&(&1.type == :quiesce_old))
+        |> Enum.map(& &1.resource_handle["container"])
+
+      assert quiesce_order == [@gluetun_id, "old-sabnzbd"]
+
+      cutover_order =
+        plan.phase2
+        |> Enum.filter(&(&1.type == :adopt_container))
+        |> Enum.map(& &1.resource_handle["container"])
+
+      assert cutover_order == [@gluetun_id, "old-sabnzbd"]
+    end
   end
 
   describe "applying" do
