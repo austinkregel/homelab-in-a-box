@@ -336,43 +336,94 @@ defmodule Homelab.Networking do
     record = Repo.preload(record, :dns_zone)
     zone = record.dns_zone
 
-    providers = providers_for_scope(record.scope)
+    case providers_for_scope(record.scope) do
+      [] ->
+        # No provider configured for this scope. The record exists locally and resolves
+        # nowhere; saying so is the whole point.
+        record_sync_failure(record, "no DNS provider is configured for the #{record.scope} scope")
 
-    Enum.each(providers, fn provider ->
-      zone_ref = zone.provider_zone_id || zone.name
+      providers ->
+        providers
+        |> Enum.map(&push_to_one_provider(&1, record, zone))
+        |> collect_sync_result(record)
+    end
+  end
 
-      payload = %{
-        name: record.name,
-        type: record.type,
-        value: record.value,
-        ttl: record.ttl
-      }
+  defp push_to_one_provider(provider, record, zone) do
+    zone_ref = zone.provider_zone_id || zone.name
 
-      result =
-        case find_provider_record(provider, zone_ref, record, zone) do
-          {:ok, %{id: existing_id}} -> provider.update_record(zone_ref, existing_id, payload)
-          :not_found -> provider.create_record(zone_ref, payload)
-          {:error, _} -> fallback_create(provider, zone_ref, payload, record)
+    payload = %{
+      name: record.name,
+      type: record.type,
+      value: record.value,
+      ttl: record.ttl
+    }
+
+    result =
+      case find_provider_record(provider, zone_ref, record, zone) do
+        {:ok, %{id: existing_id}} -> provider.update_record(zone_ref, existing_id, payload)
+        :not_found -> provider.create_record(zone_ref, payload)
+        {:error, _} -> fallback_create(provider, zone_ref, payload, record)
+      end
+
+    case result do
+      {:ok, %{id: provider_record_id}} when not is_nil(provider_record_id) ->
+        update_dns_record(record, %{provider_record_id: provider_record_id})
+        :ok
+
+      {:error, {:api_error, 404, _}} when not is_nil(record.provider_record_id) ->
+        # Stored id is stale (record removed at the provider) — retry as a create.
+        case provider.create_record(zone_ref, payload) do
+          {:ok, %{id: new_id}} when not is_nil(new_id) ->
+            update_dns_record(record, %{provider_record_id: new_id})
+            :ok
+
+          {:error, reason} ->
+            {:error, describe(provider, reason)}
+
+          _ ->
+            {:error, describe(provider, :no_record_id_returned)}
         end
 
-      case result do
-        {:ok, %{id: provider_record_id}} when not is_nil(provider_record_id) ->
-          update_dns_record(record, %{provider_record_id: provider_record_id})
+      {:error, reason} ->
+        {:error, describe(provider, reason)}
 
-        {:error, {:api_error, 404, _}} when not is_nil(record.provider_record_id) ->
-          # Stored id is stale (record removed at the provider) — retry as a create.
-          case provider.create_record(zone_ref, payload) do
-            {:ok, %{id: new_id}} when not is_nil(new_id) ->
-              update_dns_record(record, %{provider_record_id: new_id})
+      _ ->
+        {:error, describe(provider, :no_record_id_returned)}
+    end
+  end
 
-            _ ->
-              :ok
-          end
+  # Every failure here used to collapse to `:ok` — an `Enum.each` with three `-> :ok`
+  # discards — so an expired token, a 403 or a wrong zone id all produced "DNS record
+  # created!". Now the outcome is recorded ON the row and returned to the caller, so the
+  # UI can say what happened and the failure survives a page reload.
+  defp collect_sync_result(results, record) do
+    case Enum.filter(results, &match?({:error, _}, &1)) do
+      [] ->
+        update_dns_record(record, %{
+          last_synced_at: DateTime.utc_now() |> DateTime.truncate(:second),
+          last_sync_error: nil
+        })
 
-        _ ->
-          :ok
-      end
-    end)
+        :ok
+
+      errors ->
+        record_sync_failure(record, Enum.map_join(errors, "; ", fn {:error, m} -> m end))
+    end
+  end
+
+  defp record_sync_failure(record, message) do
+    update_dns_record(record, %{last_sync_error: String.slice(message, 0, 500)})
+    {:error, message}
+  end
+
+  defp describe(provider, reason) do
+    name =
+      provider
+      |> Module.split()
+      |> List.last()
+
+    "#{name}: #{inspect(reason)}"
   end
 
   # Resolves the provider-side record to update, if any. A stored
