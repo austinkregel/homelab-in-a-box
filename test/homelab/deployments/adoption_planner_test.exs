@@ -237,10 +237,114 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, :boom} end)
       assert {:error, :boom} = AdoptionPlanner.review()
     end
+
+    # `to_review/1` builds its map from an EXPLICIT key list, so a captured field that is
+    # not named there is dropped. Dropping this one turned `Adoption.refuse_netns_child/1`
+    # into dead code that always matched nil — and a VPN-tunneled container was adopted
+    # onto the tenant network, leaking every packet from the first second while reporting
+    # a successful import.
+    test "carries the container's network namespace parent through to the review" do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-qbittorrent",
+             "Config" => %{"Image" => "qbittorrent:latest", "User" => ""},
+             "HostConfig" => %{
+               "RestartPolicy" => %{"Name" => "always"},
+               "NetworkMode" => "container:gluetun-abc"
+             },
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/homelab/appdata/qb",
+                 "Destination" => "/config",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      assert {:ok, [service]} = AdoptionPlanner.review()
+      assert service.netns_parent_container_id == "gluetun-abc"
+
+      # ...and it survives into the plan, which is what the refusal reads.
+      plan = AdoptionPlanner.build_plan([service])
+      assert [%{netns_parent_container_id: "gluetun-abc"}] = plan.services
+    end
+
+    test "a container on its own network carries no namespace parent" do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => ""},
+             "HostConfig" => %{
+               "RestartPolicy" => %{"Name" => "always"},
+               "NetworkMode" => "some_bridge"
+             },
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/homelab/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      assert {:ok, [service]} = AdoptionPlanner.review()
+      assert service.netns_parent_container_id == nil
+    end
   end
 
   # A stack that is entirely folder mounts should not be forced through a copy it never
   # asked for. :in_place mounts the ORIGINAL directory into the managed container.
+  # `rw` was read off the live container and dropped in `volume_entry/3`, so a mount the
+  # original could only READ came back writable — the adopted app could delete a media
+  # library the original was deliberately fenced out of, and nothing in the UI said so.
+  describe "read-only mounts" do
+    defp read_only_mount do
+      %{preserve_mount() | rw: false, target: "/media", source: "/srv/media"}
+    end
+
+    test "a read-only mount is adopted read-only, in place", _ctx do
+      plan =
+        AdoptionPlanner.build_plan([review_fixture(%{preserve: [read_only_mount()]})],
+          strategy: :in_place
+        )
+
+      [service] = plan.services
+      assert [%{"read_only" => true}] = service.template_attrs.volumes
+    end
+
+    test "...and when the data is migrated into a managed volume", _ctx do
+      plan = AdoptionPlanner.build_plan([review_fixture(%{preserve: [read_only_mount()]})])
+
+      [service] = plan.services
+      assert [%{"read_only" => true}] = service.template_attrs.volumes
+    end
+
+    test "a writable mount stays writable" do
+      plan = AdoptionPlanner.build_plan([review_fixture()], strategy: :in_place)
+
+      [service] = plan.services
+      assert [%{"read_only" => false}] = service.template_attrs.volumes
+    end
+  end
+
   describe "build_plan/2 with strategy: :in_place" do
     test "the managed container mounts the original folder, not a copy of it" do
       plan = AdoptionPlanner.build_plan([review_fixture()], strategy: :in_place)
