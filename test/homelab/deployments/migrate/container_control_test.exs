@@ -101,10 +101,40 @@ defmodule Homelab.Deployments.Migrate.ContainerControlTest do
                "internal" => "5432",
                "external" => "5432",
                "protocol" => "tcp",
+               "host_ip" => nil,
                "published" => true
              } in bindings
 
       refute Enum.any?(bindings, &(&1["internal"] == "9000"))
+    end
+
+    # `HostIp` is the INTERFACE the operator chose. It was discarded, so a
+    # `127.0.0.1:5432:5432` database — deliberately reachable only from the host — came
+    # back published on 0.0.0.0, i.e. the whole LAN. The port number and protocol
+    # survived, so the imported result looked identical.
+    test "a loopback-only binding keeps its interface" do
+      stub(Homelab.Mocks.DockerClient, :get, fn "/containers/c1/json", _ ->
+        {:ok,
+         %{
+           "HostConfig" => %{
+             "PortBindings" => %{
+               "5432/tcp" => [%{"HostIp" => "127.0.0.1", "HostPort" => "5432"}],
+               "8080/tcp" => [%{"HostIp" => "", "HostPort" => "8080"}],
+               "9090/tcp" => [%{"HostIp" => "0.0.0.0", "HostPort" => "9090"}]
+             }
+           }
+         }}
+      end)
+
+      assert {:ok, bindings} = ContainerControl.port_bindings("c1")
+
+      assert %{"internal" => "5432", "host_ip" => "127.0.0.1"} =
+               Enum.find(bindings, &(&1["internal"] == "5432"))
+
+      # "" and "0.0.0.0" both mean every interface — Docker's default. Storing either
+      # would make the map claim an explicit choice the operator never made.
+      assert %{"host_ip" => nil} = Enum.find(bindings, &(&1["internal"] == "8080"))
+      assert %{"host_ip" => nil} = Enum.find(bindings, &(&1["internal"] == "9090"))
     end
 
     test "returns [] when there are no port bindings" do
