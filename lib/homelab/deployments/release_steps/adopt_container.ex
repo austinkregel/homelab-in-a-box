@@ -27,7 +27,7 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainer do
   require Logger
 
   alias Homelab.Deployments
-  alias Homelab.Deployments.{PermanentHome, Releases, SpecBuilder}
+  alias Homelab.Deployments.{PermanentHome, SpecBuilder}
   alias Homelab.Deployments.Migrate.{ContainerControl, LocalCopyEngine}
 
   @deployable_from [:pending, :deploying, :failed, :stopped]
@@ -46,8 +46,9 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainer do
       deployment = Deployments.get_deployment!(deployment.id)
 
       with {:ok, spec} <- SpecBuilder.build(deployment) do
-        spec = %{spec | env: Map.merge(spec.env, Releases.decrypted_secrets(deployment.id))}
-
+        # Secrets come from `SpecBuilder.build_env/5` now — see the note there. The
+        # credentials `AdoptCredentials` imported from the original container reach the
+        # replacement on every deploy path, not just this one.
         case orchestrator().deploy(spec) do
           {:ok, new_id} ->
             Deployments.transition_status(deployment, :deploying, @deployable_from,
