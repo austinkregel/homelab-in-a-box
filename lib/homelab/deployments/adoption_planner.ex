@@ -51,12 +51,28 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # plan one release per service; the top-level flat lists stay for the
       # preview UI (and existing aggregate tests).
       services:
-        Enum.map(services, fn s ->
-          Map.merge(s.service, %{phase1: s.phase1, phase2: s.phase2})
-        end),
+        services
+        |> Enum.map(fn s -> Map.merge(s.service, %{phase1: s.phase1, phase2: s.phase2}) end)
+        |> order_donors_first(),
       phase1: Enum.flat_map(services, & &1.phase1),
       phase2: Enum.flat_map(services, & &1.phase2)
     }
+  end
+
+  # A donor is applied before anything living in its namespace.
+  #
+  # `Adoption` resolves a child's `network_parent_id` from the services already applied,
+  # so a child that came first would find nothing and be refused — the order is what
+  # makes the resolution possible, not a mere optimisation. Depth is 1 (see `Netns`), so
+  # one stable partition is a complete topological sort; there are no grandchildren to
+  # order against.
+  #
+  # Stable within each group, so the operator's selection order is otherwise preserved.
+  defp order_donors_first(services) do
+    {children, rest} =
+      Enum.split_with(services, &(not is_nil(Map.get(&1, :netns_parent_container_id))))
+
+    rest ++ children
   end
 
   # --- internals ------------------------------------------------------------
@@ -103,7 +119,7 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # cutover container can bind the original's host ports (spec_builder only binds
       # them in that mode) — unless the original was on the host's network, which
       # publishes no bindings to import and needs the namespace itself carried over.
-      exposure_mode: if(Map.get(review, :host_network, false), do: :host_network, else: :host),
+      exposure_mode: adopted_exposure(review),
       volumes: Enum.map(review.preserve, &volume_entry(name, &1, strategy)),
       # The cutover renames the container. Its siblings do not know that: an app's config
       # says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Carry the names it already
@@ -124,14 +140,36 @@ defmodule Homelab.Deployments.AdoptionPlanner do
         template_attrs: template_attrs,
         deployment_attrs: deployment_attrs(review),
         targets: targets,
+        # This service's OWN original container id. `Adoption` matches it against other
+        # services' `netns_parent_container_id` to work out which deployment is adopting
+        # a given donor — the resolution that had to exist before a child could be
+        # adopted at all rather than refused.
+        container_id: container,
         # The container id whose network namespace the original lived in, when it lived
-        # in one (`network_mode: service:x`). Carried so `Adoption` can refuse rather
-        # than adopt it onto the tenant network — see apply_service/2.
+        # in one (`network_mode: service:x`). `Adoption` turns it into a
+        # `network_parent_id` once the donor's deployment is known.
         netns_parent_container_id: Map.get(review, :netns_parent_container_id)
       },
       phase1: phase1,
       phase2: phase2
     }
+  end
+
+  # A container in ANOTHER container's namespace has no ports of its own to bind and no
+  # namespace of its own to replace, so `Netns` refuses both host modes — and because
+  # adoption writes exposure onto the TEMPLATE, that is where the guard reads it from. So
+  # planning a child as `:host` (which every non-host-network service used to get) made
+  # the deployment unsavable, with the error naming a field the operator never touched.
+  #
+  # `:service` is what it actually is: no published ports, reachable only through its
+  # donor. If the operator later wants a route, that is a domain plus a routed port on
+  # the deployment page, and `SpecBuilder` emits the labels onto the donor.
+  defp adopted_exposure(review) do
+    cond do
+      Map.get(review, :netns_parent_container_id) -> :service
+      Map.get(review, :host_network, false) -> :host_network
+      true -> :host
+    end
   end
 
   # Per-DEPLOYMENT properties of the original, as distinct from what the template
