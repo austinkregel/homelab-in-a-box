@@ -904,8 +904,11 @@ defmodule HomelabWeb.DeployWizardLive do
            |> put_flash(:info, "#{template.name} deployment started!")
            |> push_navigate(to: ~p"/")}
 
+        # `inspect(changeset.errors)` put a keyword list on screen with its `%{count}`
+        # placeholders still unresolved. Same messages, rendered as a sentence.
         {:error, %Ecto.Changeset{} = changeset} ->
-          {:noreply, put_flash(socket, :error, "Deployment failed: #{inspect(changeset.errors)}")}
+          {:noreply,
+           put_flash(socket, :error, "Deployment failed: #{changeset_message(changeset)}")}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, "Deployment failed: #{inspect(reason)}")}
@@ -3841,17 +3844,11 @@ defmodule HomelabWeb.DeployWizardLive do
     end
   end
 
-  defp changeset_message(%Ecto.Changeset{} = changeset) do
-    changeset
-    |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
-      Enum.reduce(opts, message, fn {key, value}, acc ->
-        String.replace(acc, "%{#{key}}", to_string(value))
-      end)
-    end)
-    |> Enum.map_join("; ", fn {field, messages} ->
-      "#{field} #{Enum.join(messages, ", ")}"
-    end)
-  end
+  # One definition, shared with the deployment page — see `HomelabWeb.ChangesetErrors`.
+  # The copy that lived here printed the raw field name in front of every message, which
+  # reads as "network parent id Docker Swarm cannot share a network namespace".
+  defp changeset_message(%Ecto.Changeset{} = changeset),
+    do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
 
   # Indexes the config step's edited rows by the key the flattening deduped on.
   defp index_by(rows, key) do
