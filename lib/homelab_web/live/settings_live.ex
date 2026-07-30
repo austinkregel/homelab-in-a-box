@@ -304,6 +304,25 @@ defmodule HomelabWeb.SettingsLive do
     end
   end
 
+  def handle_event("reclaim_deployment", %{"id" => id}, socket) do
+    deployment = Homelab.Deployments.get_deployment!(String.to_integer(id))
+
+    case Homelab.Deployments.Reclaim.reclaim(deployment) do
+      {:ok, reclaimed} ->
+        {:noreply,
+         socket
+         |> load_section_data("import")
+         |> put_flash(
+           :info,
+           "Reclaimed #{reclaimed.app_template.name} — recreated as container " <>
+             "#{String.slice(reclaimed.external_id || "", 0, 12)}."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not reclaim it — #{reclaim_error(reason)}")}
+    end
+  end
+
   def handle_event("save_orchestrator", %{"driver" => driver_id}, socket) do
     Settings.set("orchestrator", driver_id)
 
@@ -628,6 +647,10 @@ defmodule HomelabWeb.SettingsLive do
   defp load_section_data(socket, "import") do
     socket
     |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+    # Deployments left behind by an orchestrator switch. Distinct from discovery: these are
+    # already managed, their data is already plane-owned, and there is nothing to migrate
+    # but the workload itself. See `Homelab.Deployments.Reclaim`.
+    |> assign(:stranded, Homelab.Deployments.Reclaim.stranded())
     |> assign_new(:adoption_total, fn -> nil end)
     |> assign_new(:import_services, fn -> nil end)
     |> assign_new(:import_selected, fn -> MapSet.new() end)
@@ -2047,6 +2070,56 @@ defmodule HomelabWeb.SettingsLive do
   defp render_import(assigns) do
     ~H"""
     <div class="p-4 space-y-4">
+      <%!-- Deployments whose workload still belongs to Swarm after the orchestrator was
+            switched. Shown here rather than on each deployment page because the operator
+            arrives looking for "why does the UI say my running container is missing", and
+            this is the answer to all of them at once. --%>
+      <div
+        :if={@stranded != []}
+        class="rounded-lg border border-warning/30 bg-warning/5 p-4 space-y-3"
+      >
+        <div>
+          <h2 class="text-sm font-semibold text-base-content flex items-center gap-2">
+            <.icon name="hero-exclamation-triangle" class="size-4 text-warning" />
+            {length(@stranded)} deployment(s) still running under Docker Swarm
+          </h2>
+          <p class="text-xs text-base-content/60 mt-1 leading-relaxed">
+            These were deployed as Swarm services, so their containers are running but the
+            platform cannot see them — it looks up a container by what is actually a service
+            id, which is why they read as <span class="font-mono">Container not found</span>.
+            Reclaiming removes the Swarm service and recreates the workload under the active
+            orchestrator. The volumes are untouched, so the data carries over; the service is
+            briefly down while it is recreated.
+          </p>
+        </div>
+
+        <div
+          :for={entry <- @stranded}
+          class="flex items-center justify-between gap-3 rounded-md bg-base-100 p-2.5"
+        >
+          <div class="min-w-0">
+            <p class="text-sm text-base-content truncate">
+              {entry.deployment.app_template.name}
+              <span class="text-base-content/40 font-mono text-xs">
+                {entry.service_name}
+              </span>
+            </p>
+            <p class="text-[11px] text-base-content/40 font-mono">
+              service {String.slice(entry.service_id, 0, 12)} · {length(entry.containers)} task container(s)
+            </p>
+          </div>
+          <button
+            type="button"
+            phx-click="reclaim_deployment"
+            phx-value-id={entry.deployment.id}
+            data-confirm={"Remove the Swarm service for #{entry.deployment.app_template.name} and recreate it under the active orchestrator? It will be briefly unavailable."}
+            class="px-3 py-1.5 rounded-md bg-warning text-warning-content text-xs font-medium hover:bg-warning/90 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            Reclaim
+          </button>
+        </div>
+      </div>
+
       <div class="flex items-start justify-between gap-4">
         <div>
           <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
@@ -2604,6 +2677,25 @@ defmodule HomelabWeb.SettingsLive do
     do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
 
   defp import_error(reason), do: inspect(reason)
+
+  defp reclaim_error({:service_removal_failed, service_id, reason}) do
+    "the Swarm service #{short_id(service_id)} could not be removed (#{inspect(reason)}). " <>
+      "Nothing was redeployed — a second container alongside the running task would have " <>
+      "put two writers on the same volumes."
+  end
+
+  defp reclaim_error({:tasks_still_running, _service_id, ids}) do
+    "the service was removed but #{length(ids)} task container(s) are still running. " <>
+      "Nothing was redeployed, for the same reason. Retry once Docker has stopped them."
+  end
+
+  defp reclaim_error({:redeploy_failed, reason}) do
+    "the Swarm service was removed, but the replacement did not start (#{inspect(reason)}). " <>
+      "The deployment is no longer stranded — use Redeploy on its page once the cause is fixed."
+  end
+
+  defp reclaim_error(:nothing_to_reclaim), do: "it has no workload recorded."
+  defp reclaim_error(reason), do: inspect(reason)
 
   defp short_id(id) when is_binary(id), do: String.slice(id, 0, 12)
   defp short_id(id), do: inspect(id)
