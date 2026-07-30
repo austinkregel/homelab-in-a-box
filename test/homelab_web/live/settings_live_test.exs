@@ -532,6 +532,111 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  # Every writer here used to be `if value != "", do: set` — which made blank mean
+  # "leave alone" for fields where blank is a real choice. The "None" option on all
+  # three provider selects did nothing, and no credential could be removed, both under a
+  # "DNS settings saved!" flash.
+  describe "clearing DNS settings" do
+    setup %{conn: conn} do
+      Homelab.Settings.set("public_dns_provider", "cloudflare")
+      Homelab.Settings.set("registrar", "cloudflare")
+      Homelab.Settings.set("cloudflare_api_token", "tok-123", encrypt: true)
+
+      on_exit(fn ->
+        Enum.each(
+          ~w(public_dns_provider registrar cloudflare_api_token namecheap_use_sandbox),
+          &Homelab.Settings.delete/1
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "dns"})
+      %{view: view}
+    end
+
+    test "choosing None actually stops the platform using that provider", %{view: view} do
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"public_dns_provider" => ""}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("public_dns_provider") == nil
+    end
+
+    test "a provider that IS chosen is still stored, so clearing is not one-way", %{view: view} do
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"public_dns_provider" => ""}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("public_dns_provider") == nil
+
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"public_dns_provider" => "cloudflare"}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("public_dns_provider") == "cloudflare"
+    end
+
+    test "a blank SECRET means unchanged, because the field never renders its value", %{
+      view: view
+    } do
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"cloudflare_api_token" => ""}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("cloudflare_api_token") == "tok-123"
+    end
+
+    test "clear_setting is how a credential is actually removed", %{view: view} do
+      render_click(view, "clear_setting", %{"key" => "cloudflare_api_token"})
+
+      assert Homelab.Settings.get("cloudflare_api_token") == nil
+    end
+
+    test "a hidden checkbox is not written, so an unrelated save cannot flip it", %{view: view} do
+      # An unchecked box posts nothing, and so does a box inside an `:if`-hidden section.
+      # Writing "false" for both meant any DNS save made while the registrar was NOT
+      # namecheap silently took a sandboxed registrar to the production API.
+      Homelab.Settings.set("namecheap_use_sandbox", "true")
+
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"registrar" => "cloudflare"}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("namecheap_use_sandbox") == "true"
+    end
+
+    test "the checkbox IS written when its section is on screen", %{view: view} do
+      Homelab.Settings.set("namecheap_use_sandbox", "true")
+
+      view
+      |> form("#dns-settings-form", %{"dns" => %{"registrar" => "namecheap"}})
+      |> render_submit()
+
+      assert Homelab.Settings.get("namecheap_use_sandbox") == "false"
+    end
+  end
+
+  # The form had no `phx-change`, so the `:if`-gated credential blocks never appeared
+  # until after a save — the operator's first save set a registrar with no credentials
+  # and was told it worked.
+  describe "dns_selection_changed" do
+    test "picking a registrar reveals its credential fields immediately", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "dns"})
+
+      refute has_element?(view, ~s(input[name="dns[namecheap_api_user]"]))
+
+      html =
+        view
+        |> form("#dns-settings-form", %{"dns" => %{"registrar" => "namecheap"}})
+        |> render_change()
+
+      assert html =~ "dns[namecheap_api_user]"
+      # ...and nothing was saved by merely looking at it.
+      assert Homelab.Settings.get("registrar") == nil
+    end
+  end
+
   describe "save_dns with various provider configs" do
     test "saves DNS form with registrar selection", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
