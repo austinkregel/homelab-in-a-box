@@ -5,6 +5,8 @@ defmodule HomelabWeb.BackupsLiveTest do
   import Homelab.Factory
   import Mox
 
+  alias Homelab.Backups.BackupJob
+
   setup :set_mox_global
   setup :verify_on_exit!
 
@@ -136,13 +138,61 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, deployment: deployment}
     end
 
-    test "triggers a manual backup", %{conn: conn, deployment: dep} do
+    # `execute_backup/1` is SYNCHRONOUS and its return was discarded, so the flash said
+    # "Backup triggered successfully!" whatever happened — including when the provider
+    # failed and the row was written `status: :failed`. `Readiness` reads these jobs, so
+    # the deployment then reported protection it did not have.
+    test "a successful backup is reported as completed", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/backups")
 
-      html =
-        render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
+      html = render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
 
-      assert html =~ "Backup triggered successfully"
+      assert html =~ "Backup completed"
+      assert Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id).status == :completed
+    end
+
+    test "a failing provider is reported as a failure, not a success", %{
+      conn: conn,
+      deployment: dep
+    } do
+      Homelab.Mocks.BackupProvider
+      |> stub(:backup, fn _source, _repo, _tags -> {:error, :repository_not_found} end)
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+
+      html = render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
+
+      assert html =~ "Backup failed"
+      refute html =~ "successfully"
+
+      job = Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id)
+      assert job.status == :failed
+      assert job.error_message != nil
+    end
+
+    test "the source path is the operator's managed root, not a hardcoded /data", %{
+      conn: conn,
+      deployment: dep,
+      template: template
+    } do
+      # `/data/tenants/<tenant>/<app>` is a directory nothing in this codebase creates,
+      # while the real location is an editable Settings value.
+      test_pid = self()
+
+      Homelab.Mocks.BackupProvider
+      |> stub(:backup, fn source, repo, _tags ->
+        send(test_pid, {:backup_called, source, repo})
+        {:ok, "snap_1"}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+      render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
+
+      assert_received {:backup_called, source, repo}
+      assert source == Homelab.Deployments.PermanentHome.service_dir(template.slug)
+      refute source =~ "/data/tenants"
+      # ...and an absolute, configured repository rather than a bare relative name.
+      assert String.starts_with?(repo, "/")
     end
 
     test "closes dropdown after triggering backup", %{conn: conn, deployment: dep} do
@@ -150,8 +200,9 @@ defmodule HomelabWeb.BackupsLiveTest do
       render_click(view, "toggle_backup_dropdown", %{})
 
       render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
-      html = render(view)
-      assert html =~ "Backup triggered"
+
+      # The dropdown closes whether the backup worked or not.
+      refute has_element?(view, "#backup-dropdown")
     end
   end
 
