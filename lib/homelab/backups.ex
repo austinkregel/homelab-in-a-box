@@ -6,6 +6,7 @@ defmodule Homelab.Backups do
   import Ecto.Query
   alias Homelab.Repo
   alias Homelab.Backups.BackupJob
+  alias Homelab.Deployments.PermanentHome
 
   def list_backup_jobs do
     BackupJob
@@ -60,20 +61,54 @@ defmodule Homelab.Backups do
     |> Repo.update()
   end
 
+  @doc """
+  Runs a backup job through the configured provider.
+
+  The source path used to be a hardcoded `/data/tenants/<tenant>/<app>` — a directory
+  nothing in this codebase ever creates. Managed data lives under
+  `PermanentHome.managed_root/0`, which is an operator-editable setting (Settings →
+  Storage), so the literal was not merely wrong, it ignored a value already plumbed
+  through and configurable. The repo was likewise a bare relative name rather than the
+  provider's configured repository.
+
+  `size_bytes` was written as a literal `0` on every success. `format_size(0)` renders
+  "—", so the Size column could never show anything — and worse, `0` is what an EMPTY
+  backup would report, making the two indistinguishable. It is `nil` now, which means
+  "not reported" honestly. The provider contract returns only a snapshot id, so making
+  this a real number needs `backup/3` to surface restic's `total_bytes_processed`; that
+  is a contract change and is deliberately not bundled here.
+  """
   def execute_backup(%BackupJob{} = job) do
     backup_provider = Homelab.Config.backup_provider()
     deployment = Repo.preload(job, deployment: [:tenant, :app_template]).deployment
 
     with {:ok, updated_job} <- start_backup(job),
-         source_path = "/data/tenants/#{deployment.tenant.slug}/#{deployment.app_template.slug}",
-         repo = "homelab-#{deployment.tenant.slug}",
+         source_path = backup_source_path(deployment),
+         repo = backup_repo(),
          tags = ["deployment:#{deployment.id}", "app:#{deployment.app_template.slug}"],
          {:ok, snapshot_id} <- backup_provider.backup(source_path, repo, tags) do
-      complete_backup(updated_job, snapshot_id, 0)
+      complete_backup(updated_job, snapshot_id, nil)
     else
       {:error, reason} ->
         fail_backup(job, inspect(reason))
     end
+  end
+
+  # Where this deployment's managed data actually is.
+  #
+  # Was `/data/tenants/<tenant>/<app>` — a directory nothing in this codebase creates.
+  # `PermanentHome.backing_dir/2` is per-MOUNT, so a whole-deployment backup takes the
+  # service directory that contains every mount's backing dir.
+  defp backup_source_path(deployment) do
+    PermanentHome.service_dir(deployment.app_template.slug)
+  end
+
+  # The provider's CONFIGURED repository, not a per-tenant relative name that was almost
+  # certainly never `restic init`'d. Restic resolves a relative repo against the process
+  # cwd, so `homelab-<tenant>` was not even a stable location.
+  defp backup_repo do
+    Application.get_env(:homelab, Homelab.BackupProviders.Restic, [])
+    |> Keyword.get(:repo, "/backups/restic-repo")
   end
 
   def delete_backup_job(%BackupJob{} = job) do
@@ -92,9 +127,18 @@ defmodule Homelab.Backups do
 
   def restore_backup(backup_id) when is_integer(backup_id) do
     with {:ok, job} <- get_backup_job(backup_id),
+         job = Repo.preload(job, deployment: :app_template),
          backup_provider = Homelab.Config.backup_provider(),
-         :ok <- backup_provider.restore(job.snapshot_id, "/data/restore") do
+         :ok <- backup_provider.restore(job.snapshot_id, restore_target(job)) do
       :ok
     end
   end
+
+  # Restores INTO the deployment's own managed directory, not a hardcoded `/data/restore`
+  # scratch path that no container ever mounts — restoring there succeeded and put the
+  # data nowhere useful, while the UI flashed "restore completed successfully".
+  defp restore_target(%BackupJob{deployment: %{app_template: %{slug: slug}}}),
+    do: PermanentHome.service_dir(slug)
+
+  defp restore_target(_job), do: PermanentHome.managed_root()
 end
