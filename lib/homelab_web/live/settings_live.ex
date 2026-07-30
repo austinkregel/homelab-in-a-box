@@ -415,67 +415,74 @@ defmodule HomelabWeb.SettingsLive do
     {:noreply, load_section_data(socket, "danger_zone")}
   end
 
+  # Reveals the credential fields for whichever provider is selected, without saving.
+  # Reads the SELECTS only — the secret inputs are left alone so a half-typed token is
+  # never echoed back or persisted mid-edit.
+  def handle_event("dns_selection_changed", %{"dns" => params}, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_registrar, params["registrar"] || socket.assigns.selected_registrar)
+     |> assign(
+       :selected_public_dns,
+       params["public_dns_provider"] || socket.assigns.selected_public_dns
+     )
+     |> assign(
+       :selected_internal_dns,
+       params["internal_dns_provider"] || socket.assigns.selected_internal_dns
+     )}
+  end
+
+  def handle_event("dns_selection_changed", _params, socket), do: {:noreply, socket}
+
   def handle_event("save_dns", %{"dns" => params}, socket) do
-    if params["cloudflare_api_token"] && params["cloudflare_api_token"] != "" do
-      Settings.set("cloudflare_api_token", params["cloudflare_api_token"], encrypt: true)
-    end
+    # Secrets: the field renders a `••••••••` placeholder and never the value, so a blank
+    # submission cannot be told apart from "leave it alone" — it means unchanged. The
+    # "Clear" affordance next to each one is how you actually remove a credential.
+    put_secret(params, "cloudflare_api_token")
+    put_secret(params, "unifi_api_key")
+    put_secret(params, "pihole_api_key")
+    put_secret(params, "namecheap_api_key")
 
-    if params["registrar"] && params["registrar"] != "" do
-      Settings.set("registrar", params["registrar"])
-    end
+    # Everything else renders its current value back into the form, so a blank IS a
+    # deliberate clear. Every one of these used to be `if value != "", do: set` — which
+    # made the "None" option on all three provider selects do nothing at all, with a
+    # "DNS settings saved!" flash and the old provider back in the box on re-render.
+    # There was no other way to stop the platform writing records at Cloudflare.
+    put_setting(params, "registrar")
+    put_setting(params, "public_dns_provider")
+    put_setting(params, "internal_dns_provider")
+    put_setting(params, "unifi_host")
+    put_setting(params, "unifi_site")
+    put_setting(params, "unifi_api_version")
+    put_setting(params, "pihole_url")
+    put_setting(params, "namecheap_api_user")
+    put_setting(params, "namecheap_client_ip")
 
-    if params["public_dns_provider"] && params["public_dns_provider"] != "" do
-      Settings.set("public_dns_provider", params["public_dns_provider"])
-    end
-
-    if params["internal_dns_provider"] && params["internal_dns_provider"] != "" do
-      Settings.set("internal_dns_provider", params["internal_dns_provider"])
-    end
-
-    if params["unifi_host"] && params["unifi_host"] != "" do
-      Settings.set("unifi_host", params["unifi_host"])
-    end
-
-    if params["unifi_api_key"] && params["unifi_api_key"] != "" do
-      Settings.set("unifi_api_key", params["unifi_api_key"], encrypt: true)
-    end
-
-    if params["unifi_site"] && params["unifi_site"] != "" do
-      Settings.set("unifi_site", params["unifi_site"])
-    end
-
-    if params["unifi_api_version"] && params["unifi_api_version"] != "" do
-      Settings.set("unifi_api_version", params["unifi_api_version"])
-    end
-
-    Settings.set("unifi_skip_tls_verify", params["unifi_skip_tls_verify"] || "false")
-
-    if params["pihole_url"] && params["pihole_url"] != "" do
-      Settings.set("pihole_url", params["pihole_url"])
-    end
-
-    if params["pihole_api_key"] && params["pihole_api_key"] != "" do
-      Settings.set("pihole_api_key", params["pihole_api_key"], encrypt: true)
-    end
-
-    if params["namecheap_api_user"] && params["namecheap_api_user"] != "" do
-      Settings.set("namecheap_api_user", params["namecheap_api_user"])
-    end
-
-    if params["namecheap_api_key"] && params["namecheap_api_key"] != "" do
-      Settings.set("namecheap_api_key", params["namecheap_api_key"], encrypt: true)
-    end
-
-    if params["namecheap_client_ip"] && params["namecheap_client_ip"] != "" do
-      Settings.set("namecheap_client_ip", params["namecheap_client_ip"])
-    end
-
-    Settings.set("namecheap_use_sandbox", params["namecheap_use_sandbox"] || "false")
+    # Checkboxes post nothing when unchecked — and nothing when their whole section is
+    # `:if`-hidden, which is indistinguishable. Only write one when its section was
+    # actually on screen, or saving from a different registrar silently flips it.
+    put_checkbox(params, "unifi_skip_tls_verify", params["public_dns_provider"] == "unifi")
+    put_checkbox(params, "namecheap_use_sandbox", params["registrar"] == "namecheap")
 
     {:noreply,
      socket
      |> load_section_data("dns")
      |> put_flash(:info, "DNS settings saved!")}
+  end
+
+  # The only way to REMOVE a stored credential.
+  #
+  # Secret fields render a `••••••••` placeholder and never their value, so a blank
+  # submission means "unchanged" — which left every token, key and password in
+  # `system_settings` permanently, including ones the operator had revoked at the
+  # provider and believed were gone from here.
+  def handle_event("clear_setting", %{"key" => key}, socket) do
+    Settings.delete(key)
+
+    {:noreply,
+     socket
+     |> load_section_data(socket.assigns.active_section)
+     |> put_flash(:info, "Cleared #{key}.")}
   end
 
   def handle_event("update_user_role", %{"user_id" => user_id, "role" => role}, socket) do
@@ -1452,7 +1459,17 @@ defmodule HomelabWeb.SettingsLive do
   defp render_dns(assigns) do
     ~H"""
     <div class="p-4 space-y-6">
-      <.form for={%{}} id="dns-settings-form" phx-submit="save_dns" class="space-y-6">
+      <%!-- `phx-change` was missing entirely, so the three `:if`-gated credential blocks
+            below (Cloudflare token, the Namecheap fields, the internal-DNS fields) never
+            appeared until AFTER a save reloaded the section. The operator's first save
+            therefore set a registrar with no credentials, and was told it worked. --%>
+      <.form
+        for={%{}}
+        id="dns-settings-form"
+        phx-change="dns_selection_changed"
+        phx-submit="save_dns"
+        class="space-y-6"
+      >
         <%!-- Registrar --%>
         <div>
           <h2 class="text-lg font-semibold text-base-content mb-2">Domain Registrar</h2>
@@ -1491,6 +1508,19 @@ defmodule HomelabWeb.SettingsLive do
               <p class="text-xs text-base-content/35 mt-1">
                 Used for both registrar sync and public DNS record management.
               </p>
+              <%!-- A blank secret field means "unchanged" (the value is never rendered),
+                    so this is the only way to actually remove a stored credential —
+                    including one already revoked at the provider. --%>
+              <button
+                :if={@cloudflare_token_set?}
+                type="button"
+                phx-click="clear_setting"
+                phx-value-key="cloudflare_api_token"
+                data-confirm="Remove the stored Cloudflare API token?"
+                class="mt-1 text-xs text-error/70 hover:text-error transition-colors cursor-pointer"
+              >
+                Clear stored token
+              </button>
             </div>
 
             <div :if={@selected_registrar == "namecheap"} class="space-y-3">
@@ -2550,5 +2580,47 @@ defmodule HomelabWeb.SettingsLive do
       </div>
     </div>
     """
+  end
+
+  # --- Settings writes -------------------------------------------------------
+  #
+  # The distinction these three exist for: "the field was not on screen" and "the field
+  # was on screen and the operator emptied it" arrive identically as a missing or blank
+  # param, and every writer here used to collapse both to "leave it alone". That made
+  # the "None" option on all three DNS provider selects unreachable, and made every
+  # credential impossible to remove — a token you believe you revoked was still in
+  # `system_settings`.
+
+  # Absent from params → the field was not rendered; leave the stored value alone.
+  # Present and blank → the operator cleared it; delete it.
+  defp put_setting(params, key) do
+    case Map.get(params, key, :absent) do
+      :absent ->
+        :ok
+
+      value when is_binary(value) ->
+        if String.trim(value) == "",
+          do: Settings.delete(key),
+          else: Settings.set(key, String.trim(value))
+
+      _ ->
+        :ok
+    end
+  end
+
+  # A secret field renders a placeholder, never its value, so blank means "unchanged" and
+  # there is no way to express "clear" through it. `clear_setting` is that affordance.
+  defp put_secret(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" -> Settings.set(key, value, encrypt: true)
+      _ -> :ok
+    end
+  end
+
+  # An unchecked box posts nothing — and so does a box inside an `:if`-hidden section.
+  # Only write one when its section was actually rendered, or an unrelated save silently
+  # flips it (this is what pointed a sandboxed Namecheap registrar at production).
+  defp put_checkbox(params, key, rendered?) do
+    if rendered?, do: Settings.set(key, params[key] || "false"), else: :ok
   end
 end
