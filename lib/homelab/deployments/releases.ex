@@ -323,12 +323,56 @@ defmodule Homelab.Deployments.Releases do
     {:ok, count}
   end
 
-  @doc "All decrypted secrets for a deployment as a `%{key => plaintext}` map."
+  @doc """
+  All decrypted secrets for a deployment as a `%{key => plaintext}` map.
+
+  A secret that FAILS to decrypt is omitted and logged, never returned as `nil`.
+
+  `Crypto.decrypt/1` returns `nil` when GCM verification fails — which in practice
+  means the `homelab-iab-secrets` volume was recreated or `SECRET_KEY_BASE` changed,
+  and the plaintext is gone for good. This map is merged straight into the container's
+  env by the deploy path, so a `nil` here became an env var with no value handed to the
+  daemon: an app would start against an empty password and either be rejected with a
+  confusing auth error or, worse, treat its store as uninitialised.
+
+  `Crypto`'s own moduledoc warns about exactly this shape for the `:error` atom ("would
+  sail on to be JSON-encoded as the string \\"error\\" and used as a *password*"); the
+  `nil` it returns instead was unfiltered at every call site. Dropping the key means the
+  container is missing a variable it needs, which fails loudly and correctly, instead of
+  being handed a blank one.
+  """
   def decrypted_secrets(deployment_id) do
     DeploymentSecret
     |> where([s], s.deployment_id == ^deployment_id)
     |> Repo.all()
-    |> Map.new(fn s -> {s.key, Crypto.decrypt(s.value)} end)
+    |> decrypt_secrets()
+  end
+
+  @doc """
+  Decrypts already-loaded `DeploymentSecret` rows. See `decrypted_secrets/1` for why a
+  row that fails to decrypt is dropped rather than returned as `nil`.
+  """
+  def decrypt_secrets(secrets) when is_list(secrets) do
+    secrets
+    |> Enum.flat_map(fn secret ->
+      case Crypto.decrypt(secret.value) do
+        nil ->
+          require Logger
+
+          Logger.error(
+            "[releases] secret #{secret.key} for deployment #{secret.deployment_id} could " <>
+              "not be decrypted and is being omitted from the container env. The encryption " <>
+              "key changed (the homelab-iab-secrets volume was recreated, or SECRET_KEY_BASE " <>
+              "differs); this value is unrecoverable and must be re-entered."
+          )
+
+          []
+
+        plaintext ->
+          [{secret.key, plaintext}]
+      end
+    end)
+    |> Map.new()
   end
 
   # --- helpers --------------------------------------------------------------
