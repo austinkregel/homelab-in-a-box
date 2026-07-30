@@ -48,7 +48,8 @@ defmodule Homelab.Deployments.Adoption do
   defp apply_service(service, tenant_id) do
     steps = service.phase1 ++ service.phase2
 
-    with {:ok, template} <- upsert_template(service.template_attrs),
+    with :ok <- refuse_netns_child(service),
+         {:ok, template} <- upsert_template(service.template_attrs),
          {:ok, deployment} <-
            get_or_create_deployment(tenant_id, template.id, service[:deployment_attrs] || %{}),
          :ok <- ensure_no_active_release(deployment.id),
@@ -57,6 +58,26 @@ defmodule Homelab.Deployments.Adoption do
       # must be able to read the release row).
       {:ok, _job} = ReleaseRunner.enqueue(release)
       {:ok, %{service: service.name, deployment: deployment, release: release}}
+    end
+  end
+
+  # A container living in ANOTHER container's network namespace cannot be adopted yet,
+  # and adopting it anyway is not a partial success — it is a leak.
+  #
+  # The replacement would come up on the tenant network instead of inside the tunnel,
+  # so an app whose entire purpose is that none of its traffic escapes the VPN would
+  # start sending all of it straight out, while reporting a successful adoption. There
+  # is no state in between: either it is in the namespace or it is not.
+  #
+  # Adopting one properly needs cross-service resolution (the donor's container id maps
+  # to whichever deployment is adopting THAT container) and cross-service ordering,
+  # which `apply_service/2` — one service, one release, enqueued immediately — cannot
+  # express. Until that exists, refuse where the damage would be done, and let the
+  # operator re-create it through the deploy wizard, which does support this.
+  defp refuse_netns_child(service) do
+    case Map.get(service, :netns_parent_container_id) do
+      nil -> :ok
+      container_id -> {:error, {:netns_child_not_adoptable, container_id}}
     end
   end
 
