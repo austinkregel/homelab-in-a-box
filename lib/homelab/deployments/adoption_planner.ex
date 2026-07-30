@@ -19,7 +19,12 @@ defmodule Homelab.Deployments.AdoptionPlanner do
   """
   def review do
     case AdoptionDiscovery.discover_in_scope() do
-      {:ok, captures} -> {:ok, Enum.map(captures, &to_review/1)}
+      # Ordered donor-first here too, so the list of checkboxes reads in the order things
+      # will actually be applied. Discovery order is the daemon's, which put a tunneled app
+      # above the container holding its network — and since the apply IS sequential and
+      # halts on the first failure, that ordering read as the cause of the failure rather
+      # than as an unrelated detail of how the list happened to be sorted.
+      {:ok, captures} -> {:ok, captures |> Enum.map(&to_review/1) |> order_donors_first()}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -44,16 +49,23 @@ defmodule Homelab.Deployments.AdoptionPlanner do
   """
   def build_plan(selected_reviews, opts \\ []) when is_list(selected_reviews) do
     strategy = Keyword.get(opts, :strategy, :migrate)
-    services = Enum.map(selected_reviews, &plan_service(&1, strategy))
+
+    # Ordered ONCE, here, and everything below derives from that single list.
+    #
+    # Deriving the flat preview lists from the unordered services while executing the
+    # ordered ones gave a preview that disagreed with what would happen — and the
+    # execution order is exactly what an operator reads a sequential preview to check.
+    services =
+      selected_reviews
+      |> Enum.map(&plan_service(&1, strategy))
+      |> Enum.map(fn s -> Map.merge(s.service, %{phase1: s.phase1, phase2: s.phase2}) end)
+      |> order_donors_first()
 
     %{
       # Each service carries its own ordered phase1/phase2 so the apply path can
       # plan one release per service; the top-level flat lists stay for the
       # preview UI (and existing aggregate tests).
-      services:
-        services
-        |> Enum.map(fn s -> Map.merge(s.service, %{phase1: s.phase1, phase2: s.phase2}) end)
-        |> order_donors_first(),
+      services: services,
       phase1: Enum.flat_map(services, & &1.phase1),
       phase2: Enum.flat_map(services, & &1.phase2)
     }
