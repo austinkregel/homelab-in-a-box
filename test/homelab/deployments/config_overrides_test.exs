@@ -65,6 +65,11 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
     Map.merge(
       %Deployment{
         id: 1,
+        # Explicitly childless: SpecBuilder asks a donor for its children (their routes
+        # go on ITS labels) and looks them up when the association is not loaded, which
+        # these sandbox-free struct-in/spec-out tests cannot do.
+        network_children: [],
+        secrets: [],
         tenant: tenant(),
         tenant_id: 1,
         app_template: t,
@@ -142,6 +147,18 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
         assert change(%{replicas_override: 2, exposure_mode_override: "public"}).valid?
       end)
     end
+
+    test "rejected when host mode comes from the TEMPLATE rather than an override" do
+      # Adoption writes exposure to the template and leaves the override nil, so reading
+      # only the override made this guard blind for every adopted deployment — the ones
+      # most likely to be host-mode in the first place.
+      with_orchestrator(Homelab.Orchestrators.DockerSwarm, fn ->
+        host_template = template(%{exposure_mode: :host})
+
+        refute change(%{replicas_override: 2}, host_template).valid?
+        assert change(%{replicas_override: 2}, template(%{exposure_mode: :public})).valid?
+      end)
+    end
   end
 
   describe "command and entrypoint" do
@@ -196,8 +213,15 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
 
   # --- helpers ---
 
-  defp change(attrs) do
-    Deployment.changeset(%Deployment{}, Map.merge(%{tenant_id: 1, app_template_id: 1}, attrs))
+  # The template is LOADED onto the struct, not just referenced by id. The replica guard
+  # resolves the EFFECTIVE exposure — override first, template default otherwise — because
+  # adoption writes exposure to the template and leaves the override nil, which made a
+  # guard that read only the override blind for exactly those deployments. With no
+  # template loaded it would have to fetch one, which these sandbox-free tests cannot do.
+  defp change(attrs, template \\ nil) do
+    data = %Deployment{app_template: template || template()}
+
+    Deployment.changeset(data, Map.merge(%{tenant_id: 1, app_template_id: 1}, attrs))
   end
 
   defp with_orchestrator(module, fun) do
