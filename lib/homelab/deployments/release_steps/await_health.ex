@@ -22,8 +22,20 @@ defmodule Homelab.Deployments.ReleaseSteps.AwaitHealth do
   @impl true
   def run(step, ctx) do
     deployment_id = Map.get(step.resource_handle, "deployment_id") || ctx.deployment.id
-    deadline = System.monotonic_time(:millisecond) + timeout_ms()
+    deadline = System.monotonic_time(:millisecond) + step_timeout_ms(step)
     poll(deployment_id, deadline)
+  end
+
+  # A per-step override, because not every wait is waiting for the same thing. The default
+  # is sized for "this container should come up"; adoption's wait for a network donor is
+  # queued behind ANOTHER service's data copy, which for a media library is minutes to
+  # hours. Sharing one global timeout means either that rolls back for no reason or every
+  # ordinary healthcheck hangs far too long.
+  defp step_timeout_ms(step) do
+    case Map.get(step.resource_handle, "timeout_ms") do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _ -> timeout_ms()
+    end
   end
 
   defp poll(deployment_id, deadline) do
