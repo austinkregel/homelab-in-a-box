@@ -43,13 +43,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
       case Client.post("/containers/create?name=#{spec.service_name}", body) do
         {:ok, %{"Id" => id}} ->
-          case Client.post("/containers/#{id}/start") do
-            {:ok, _} ->
-              maybe_connect_routing_network(id, spec)
-              {:ok, id}
-
-            {:error, reason} ->
-              {:error, reason}
+          with {:ok, _} <- Client.post("/containers/#{id}/start"),
+               :ok <- maybe_connect_routing_network(id, spec) do
+            {:ok, id}
           end
 
         {:error, {:conflict, _}} ->
@@ -58,13 +54,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
           case Client.post("/containers/create?name=#{spec.service_name}", body) do
             {:ok, %{"Id" => id}} ->
-              case Client.post("/containers/#{id}/start") do
-                {:ok, _} ->
-                  maybe_connect_routing_network(id, spec)
-                  {:ok, id}
-
-                {:error, reason} ->
-                  {:error, reason}
+              with {:ok, _} <- Client.post("/containers/#{id}/start"),
+                   :ok <- maybe_connect_routing_network(id, spec) do
+                {:ok, id}
               end
 
             {:error, reason} ->
@@ -233,29 +225,85 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # no route to publish for it either, so there is nothing this would accomplish.
   defp maybe_connect_routing_network(_container_id, %{host_network: true}), do: :ok
 
+  # Nor is a container in ANOTHER container's namespace: the daemon rejects
+  # `/networks/<n>/connect` on it with the identical error, for the identical reason.
+  # Its route is carried by its donor, which IS attached to ingress — see
+  # Homelab.Deployments.Netns.
+  defp maybe_connect_routing_network(_container_id, %{netns_child: true}), do: :ok
+
+  # Every result here used to be discarded, and `deploy/1` returned `{:ok, id}` regardless.
+  # These two calls are the ones that decide whether Traefik can reach the container at
+  # all: a routed app that failed to join ingress deployed "successfully", went `:running`,
+  # and served 502s with nothing in any log. Same for a gluetun donor that must be
+  # multi-homed so its children's routes resolve.
   defp maybe_connect_routing_network(container_id, spec) do
-    bridge_networks = Map.get(spec, :bridge_networks, [])
+    networks =
+      Map.get(spec, :bridge_networks, []) ++
+        if spec.labels["traefik.enable"] == "true", do: [@routing_network], else: []
 
-    Enum.each(bridge_networks, fn net ->
-      ensure_network(net)
-      Client.post("/networks/#{net}/connect", %{"Container" => container_id})
+    Enum.reduce_while(networks, :ok, fn net, :ok ->
+      with :ok <- ensure_network(net),
+           {:ok, _} <- Client.post("/networks/#{net}/connect", %{"Container" => container_id}) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, {:network_attach_failed, net, reason}}}
+      end
     end)
+  end
 
-    if spec.labels["traefik.enable"] == "true" do
-      ensure_network(@routing_network)
-      Client.post("/networks/#{@routing_network}/connect", %{"Container" => container_id})
+  @impl true
+  # Attaches the CONTAINER to the given network — the one Traefik resolves its backend
+  # on. Idempotent: the daemon answers 403 "already exists in network" when it is
+  # already attached, which is success as far as callers are concerned.
+  def publish(container_id, network) when is_binary(container_id) and is_binary(network) do
+    with :ok <- ensure_network(network),
+         {:ok, _} <- Client.post("/networks/#{network}/connect", %{"Container" => container_id}) do
+      :ok
+    else
+      {:error, {:conflict, _}} -> :ok
+      {:error, {:http_error, 403, body}} -> already_attached_or_error(container_id, network, body)
+      {:error, reason} -> {:error, {:publish_failed, container_id, network, reason}}
     end
   end
 
-  @impl true
-  def publish(network) do
-    ensure_network(network)
-    Homelab.Infrastructure.connect_traefik_to_network(network)
-  end
+  def publish(_container_id, _network), do: :ok
 
   @impl true
-  def unpublish(network) do
-    Homelab.Infrastructure.disconnect_traefik_from_network(network)
+  # Detaching is what actually severs the route: Traefik loses the backend IP and stops
+  # routing. `Force` because the container may be running — that is the whole point.
+  #
+  # Detaches from THIS network only. A routed workload is multi-homed (its private tenant
+  # network plus ingress), and severing its public path must not cut it off from its own
+  # datastores.
+  def unpublish(container_id, network) when is_binary(container_id) and is_binary(network) do
+    case Client.post("/networks/#{network}/disconnect", %{
+           "Container" => container_id,
+           "Force" => true
+         }) do
+      {:ok, _} -> :ok
+      # Not on the network, or the network/container is gone — already severed.
+      {:error, {:not_found, _}} -> :ok
+      {:error, {:http_error, 404, _}} -> :ok
+      {:error, {:http_error, 403, _}} -> :ok
+      {:error, reason} -> {:error, {:unpublish_failed, container_id, network, reason}}
+    end
+  end
+
+  def unpublish(_container_id, _network), do: :ok
+
+  # 403 on connect means two very different things, and they must not be conflated.
+  #
+  # "already exists in network" is success. But the daemon also answers 403 for a
+  # container sharing another's network namespace, which cannot be attached at all —
+  # and swallowing THAT would be the "report success having done nothing" pattern this
+  # code exists to avoid. `Deployments.publish_deployment/1` already declines to call
+  # this for such a workload; this is the backstop if something else does.
+  defp already_attached_or_error(container_id, network, body) do
+    if body |> to_string() |> String.downcase() =~ "already exists" do
+      :ok
+    else
+      {:error, {:publish_failed, container_id, network, {:http_error, 403, body}}}
+    end
   end
 
   # --- Image Management ---
@@ -337,9 +385,69 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
     |> maybe_put_user(Map.get(spec, :user))
     |> maybe_put_gpu(Map.get(spec, :gpu))
+    |> maybe_put_devices(Map.get(spec, :devices))
+    |> maybe_put_capabilities(spec)
+    |> maybe_put_sysctls(Map.get(spec, :sysctls))
     |> maybe_put_aliases(spec)
     |> maybe_put_list("Cmd", Map.get(spec, :command))
     |> maybe_put_list("Entrypoint", Map.get(spec, :entrypoint))
+  end
+
+  # What the container may ask the kernel for. Both lists are sent as-is; RuntimeSpec
+  # has already normalized the spelling, so the daemon never sees `NET_ADMIN` and
+  # `CAP_NET_ADMIN` as two separate grants of the same permission.
+  defp maybe_put_capabilities(payload, spec) do
+    payload
+    |> put_capability_list("CapAdd", Map.get(spec, :capabilities_add))
+    |> put_capability_list("CapDrop", Map.get(spec, :capabilities_drop))
+  end
+
+  defp put_capability_list(payload, _key, nil), do: payload
+  defp put_capability_list(payload, _key, []), do: payload
+
+  defp put_capability_list(payload, key, caps) when is_list(caps),
+    do: put_in_host_config(payload, key, caps)
+
+  defp put_capability_list(payload, _key, _caps), do: payload
+
+  # Docker takes sysctl VALUES as strings and rejects an integer outright, which is
+  # why RuntimeSpec stringifies rather than trusting whatever the form posted.
+  defp maybe_put_sysctls(payload, sysctls) when is_map(sysctls) and map_size(sysctls) > 0,
+    do: put_in_host_config(payload, "Sysctls", sysctls)
+
+  defp maybe_put_sysctls(payload, _sysctls), do: payload
+
+  # Operator-requested device passthrough (/dev/net/tun for a VPN client, a USB dongle
+  # for a Zigbee coordinator).
+  defp maybe_put_devices(payload, devices) when is_list(devices) and devices != [] do
+    append_devices(
+      payload,
+      Enum.map(devices, fn device ->
+        %{
+          "PathOnHost" => device["host_path"],
+          "PathInContainer" => device["container_path"],
+          "CgroupPermissions" => device["permissions"]
+        }
+      end)
+    )
+  end
+
+  defp maybe_put_devices(payload, _devices), do: payload
+
+  # `HostConfig.Devices` has TWO producers -- the operator's list and the AMD GPU
+  # branch -- and it is a single API key. Writing it with put_in_host_config/3 means
+  # whichever runs second silently erases the other: a ROCm workload that also passes
+  # a USB dongle would lose /dev/kfd and fail as what looks like a driver bug. Both
+  # producers append instead, deduped on the path INSIDE the container (the one Docker
+  # actually keys a device on).
+  defp append_devices(payload, new_devices) do
+    existing = get_in(payload, ["HostConfig", "Devices"]) || []
+
+    put_in_host_config(
+      payload,
+      "Devices",
+      Enum.uniq_by(existing ++ new_devices, & &1["PathInContainer"])
+    )
   end
 
   # nil = let the image's own default apply. Adoption sets these to what the ORIGINAL
@@ -360,6 +468,12 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # supported only for containers in user defined networks"). SpecBuilder already drops
   # them for that mode; this makes it unrepresentable rather than merely unbuilt.
   defp maybe_put_aliases(payload, %{host_network: true}), do: payload
+
+  # Same for a container network mode: the daemon rejects a create carrying
+  # `NetworkingConfig` alongside it ("conflicting options"), and there is no endpoint to
+  # register an alias on anyway. Siblings in one namespace reach each other on
+  # `localhost`, not by name.
+  defp maybe_put_aliases(payload, %{netns_child: true}), do: payload
 
   defp maybe_put_aliases(payload, spec) do
     case Map.get(spec, :network_aliases, []) do
@@ -411,7 +525,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
       end)
 
     payload
-    |> put_in_host_config("Devices", devices)
+    # Appends rather than sets: the operator's own devices land in the same API key,
+    # and a plain put would silently drop whichever list was written first.
+    |> append_devices(devices)
     # Without membership of the video/render groups the device nodes are present but
     # unreadable, and ROCm reports "no permission" rather than "no device".
     |> put_in_host_config("GroupAdd", ["video", "render"])
@@ -442,16 +558,20 @@ defmodule Homelab.Orchestrators.DockerEngine do
     Map.put(payload, "Healthcheck", healthcheck)
   end
 
+  # The `/<proto>` suffix is part of the KEY the daemon matches on, so ExposedPorts and
+  # PortBindings must agree on it. A binding under `27900/tcp` for a container listening
+  # on 27900/udp is not a partial success — the daemon accepts it, the container starts,
+  # and the UDP socket is simply never reachable from off-box. Nothing errors.
   defp build_port_config(ports) when is_list(ports) and length(ports) > 0 do
     exposed =
       ports
-      |> Enum.map(fn p -> {"#{p.internal}/tcp", %{}} end)
+      |> Enum.map(fn p -> {port_key(p), %{}} end)
       |> Map.new()
 
     bindings =
       ports
       |> Enum.map(fn p ->
-        {"#{p.internal}/tcp", [%{"HostPort" => to_string(p.external)}]}
+        {port_key(p), [host_binding(p)]}
       end)
       |> Map.new()
 
@@ -460,12 +580,30 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   defp build_port_config(_), do: {%{}, %{}}
 
+  # `HostIp` pins the binding to one interface. Omitting it means 0.0.0.0 — every
+  # interface — so an adopted `127.0.0.1:5432:5432` database that was deliberately
+  # reachable only from the host was silently republished onto the LAN.
+  defp host_binding(port) do
+    base = %{"HostPort" => to_string(port.external)}
+
+    case Map.get(port, :host_ip) do
+      host_ip when is_binary(host_ip) and host_ip != "" -> Map.put(base, "HostIp", host_ip)
+      _ -> base
+    end
+  end
+
+  # Specs built before UDP support carry no :protocol key at all; those ports are TCP.
+  defp port_key(p), do: "#{p.internal}/#{Map.get(p, :protocol) || "tcp"}"
+
   defp build_mounts(volumes) do
     Enum.map(volumes, fn vol ->
       mount = %{
         "Target" => vol.target,
         "Source" => vol.source,
-        "Type" => Map.get(vol, :type, "volume")
+        "Type" => Map.get(vol, :type, "volume"),
+        # Omitting this key means read-write to the daemon, which is how a mount the
+        # operator had deliberately made `:ro` came back writable after adoption.
+        "ReadOnly" => Map.get(vol, :read_only, false)
       }
 
       if mount["Type"] == "volume" do
