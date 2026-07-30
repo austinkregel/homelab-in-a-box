@@ -104,9 +104,17 @@ defmodule Homelab.Catalog.Enrichers.ImageInspectorTest do
       assert "8080" in internals
     end
 
-    test "parses UDP port specification" do
+    test "parses UDP port specification, keeping the transport and not just the number" do
+      # Asserting only on "internal" is what let the protocol be silently dropped: the
+      # number survives the loss, so the port map still looks entirely correct.
       ports = ImageInspector.parse_exposed_ports(%{"53/udp" => %{}})
       assert hd(ports)["internal"] == "53"
+      assert hd(ports)["protocol"] == "udp"
+    end
+
+    test "labels a tcp port and a suffix-less key as tcp" do
+      assert hd(ImageInspector.parse_exposed_ports(%{"80/tcp" => %{}}))["protocol"] == "tcp"
+      assert hd(ImageInspector.parse_exposed_ports(%{"80" => %{}}))["protocol"] == "tcp"
     end
 
     test "includes role from PortRoles" do
