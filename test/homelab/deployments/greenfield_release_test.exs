@@ -59,6 +59,53 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
            ]
   end
 
+  # `EnsureDatastoreGrants` was registered in config, fully implemented, tested at the
+  # SQL level — and no planner emitted it, so `Grants.reconcile/1` had exactly one caller
+  # and that caller was unreachable. The bug it exists for is quiet: a datastore whose
+  # volume already holds data ignores MARIADB_USER/PASSWORD (the image's init runs once,
+  # on an empty data dir), so the app is handed a password the database never took, the
+  # release still reaches `:running` because AwaitHealth only checks container health,
+  # and the failure surfaces later as `Access denied` from inside the app.
+  #
+  # The assertion above froze the omission: it lists the step types verbatim.
+  test "a datastore companion gets its grants reconciled before the app starts", %{
+    app: app,
+    companion: companion
+  } do
+    {:ok, _} =
+      Homelab.Catalog.update_app_template(companion.app_template, %{image: "mariadb:11"})
+
+    companion = Deployments.get_deployment!(companion.id)
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    steps = Enum.sort_by(release.steps, & &1.position)
+    types = Enum.map(steps, & &1.type)
+
+    assert :ensure_datastore_grants in types
+
+    grants = Enum.find(steps, &(&1.type == :ensure_datastore_grants))
+
+    assert grants.resource_handle == %{
+             "deployment_id" => companion.id,
+             "app_deployment_id" => app.id
+           }
+
+    # After the datastore is healthy, before the app container is created.
+    assert grants.position > Enum.find(steps, &(&1.type == :await_health)).position
+    assert grants.position < Enum.find(steps, &(&1.type == :app_container)).position
+  end
+
+  test "a companion that is not a datastore gets no grants step", %{
+    app: app,
+    companion: companion
+  } do
+    # `clean_template/1` uses a plain image; only engines Grants can actually drive are
+    # planned, rather than emitting a step that would fail.
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+
+    refute :ensure_datastore_grants in Enum.map(release.steps, & &1.type)
+  end
+
   test "no ingress step when the app has no domain", %{companion: companion} do
     tenant = insert(:tenant, slug: "nodomain")
     app = pending_deployment(tenant, "app2", domain: nil)
@@ -77,7 +124,7 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
       {:ok, %{id: "x", state: :running, health: :healthy}}
     end)
 
-    stub(Homelab.Mocks.Orchestrator, :publish, fn _net -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
 
     {:ok, release} = Deployments.deploy_release(app, [companion])
     assert :ok = ReleaseRunner.run(release.id, owner: "t")
