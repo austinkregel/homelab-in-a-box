@@ -287,6 +287,121 @@ defmodule HomelabWeb.DomainsLiveTest do
       assert updated.ttl == 600
     end
 
+    # This form's three selects were raw `<select>`s with no `selected=`, so `@modal_form`
+    # never reached them and the browser picked the first option. Opening a CNAME to
+    # change its TTL submitted type=A and scope=public — and the change was then PUSHED
+    # to the provider, overwriting its copy.
+    #
+    # The test above could not see it: it supplies type and scope by hand on a record
+    # that is already A/public. These render the form and read back what it would post.
+    test "editing a CNAME renders it selected, so a save cannot silently make it an A", %{
+      conn: conn,
+      zone: zone
+    } do
+      record =
+        insert(:dns_record,
+          dns_zone: zone,
+          name: "www",
+          type: "CNAME",
+          value: "example.com",
+          scope: :internal,
+          managed: false
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "switch_tab", %{"tab" => "records"})
+      render_click(view, "open_edit_record", %{"id" => to_string(record.id)})
+
+      assert has_element?(
+               view,
+               ~s(select[name="record[type]"] option[value="CNAME"][selected])
+             ),
+             "the record's own type must be pre-selected, or the browser posts the first option"
+
+      assert has_element?(
+               view,
+               ~s(select[name="record[scope]"] option[value="internal"][selected])
+             ),
+             "an internal record must not silently become public on edit"
+
+      assert has_element?(
+               view,
+               ~s(select[name="record[dns_zone_id]"] option[value="#{zone.id}"][selected])
+             )
+
+      # And the A option must NOT be the selected one, which is what the browser would
+      # otherwise post.
+      refute has_element?(view, ~s(select[name="record[type]"] option[value="A"][selected]))
+    end
+
+    # Every provider failure was swallowed into `:ok` by three `-> :ok` discards, and the
+    # flash always said success — a record that resolved nowhere looked identical to one
+    # serving traffic, with no field that could say otherwise.
+    test "a provider failure is reported and recorded on the row", %{conn: conn, zone: zone} do
+      Homelab.Mocks.DnsProvider
+      |> stub(:list_records, fn _zone -> {:ok, []} end)
+      |> stub(:create_record, fn _zone, _attrs -> {:error, {:api_error, 403, "bad token"}} end)
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "switch_tab", %{"tab" => "records"})
+      render_click(view, "open_add_record", %{})
+
+      html =
+        view
+        |> form("#add-record-form", %{
+          "record" => %{
+            "dns_zone_id" => to_string(zone.id),
+            "name" => "doomed",
+            "type" => "A",
+            "value" => "10.0.0.9",
+            "ttl" => "300",
+            "scope" => "public"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "could not be published"
+
+      record = Homelab.Repo.get_by!(Homelab.Networking.DnsRecord, name: "doomed")
+      assert record.last_sync_error =~ "403"
+      assert record.last_synced_at == nil
+
+      # ...and it stays visible after the flash is gone.
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      html = render_click(view, "switch_tab", %{"tab" => "records"})
+      assert html =~ "Not published"
+    end
+
+    test "a successful push records when it synced", %{conn: conn, zone: zone} do
+      Homelab.Mocks.DnsProvider
+      |> stub(:list_records, fn _zone -> {:ok, []} end)
+      |> stub(:create_record, fn _zone, _attrs -> {:ok, %{id: "rec_ok"}} end)
+
+      {:ok, view, _html} = live(conn, ~p"/domains")
+      render_click(view, "switch_tab", %{"tab" => "records"})
+      render_click(view, "open_add_record", %{})
+
+      html =
+        view
+        |> form("#add-record-form", %{
+          "record" => %{
+            "dns_zone_id" => to_string(zone.id),
+            "name" => "fine",
+            "type" => "A",
+            "value" => "10.0.0.10",
+            "ttl" => "300",
+            "scope" => "public"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "published"
+
+      record = Homelab.Repo.get_by!(Homelab.Networking.DnsRecord, name: "fine")
+      assert record.last_sync_error == nil
+      assert record.last_synced_at != nil
+    end
+
     test "delete_record deletes a DNS record", %{conn: conn, zone: zone} do
       record = insert(:dns_record, dns_zone: zone, name: "todelete", value: "10.0.0.1")
 
