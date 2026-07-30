@@ -77,7 +77,15 @@ defmodule Homelab.Infrastructure do
       name: "Pi-hole",
       image: "pihole/pihole:latest",
       env: ["TZ=UTC"],
-      ports: [%{"host" => 53, "container" => 53}, %{"host" => 8053, "container" => 80}],
+      # 53 is published TWICE, once per transport. Resolvers send queries over UDP and
+      # fall back to TCP only for truncated/zone-transfer traffic, so the tcp-only
+      # binding this used to get meant Pi-hole answered essentially nothing while
+      # looking correctly provisioned.
+      ports: [
+        %{"host" => 53, "container" => 53, "protocol" => "udp"},
+        %{"host" => 53, "container" => 53, "protocol" => "tcp"},
+        %{"host" => 8053, "container" => 80}
+      ],
       volumes: [
         %{"source" => "homelab-pihole-etc", "target" => "/etc/pihole", "type" => "volume"},
         %{"source" => "homelab-pihole-dns", "target" => "/etc/dnsmasq.d", "type" => "volume"}
@@ -447,10 +455,14 @@ defmodule Homelab.Infrastructure do
     Logger.info("Infrastructure: pulling image #{template.image}...")
     _ = Client.post_stream("/images/create?fromImage=#{URI.encode(template.image)}")
 
+    # Keyed by port AND protocol, so a service needing both transports on one port
+    # (Pi-hole's 53) contributes two distinct bindings instead of one silently
+    # overwriting the other.
     port_bindings =
       template.ports
       |> Enum.reduce(%{}, fn p, acc ->
-        Map.put(acc, "#{p["container"]}/tcp", [%{"HostPort" => to_string(p["host"])}])
+        key = "#{p["container"]}/#{p["protocol"] || "tcp"}"
+        Map.put(acc, key, [%{"HostPort" => to_string(p["host"])}])
       end)
 
     mounts =
@@ -544,22 +556,20 @@ defmodule Homelab.Infrastructure do
   end
 
   @doc """
-  Connects Traefik only to the networks of currently-running, ingress-published
-  deployments. Called after Traefik starts. Fail-closed: it deliberately does NOT
-  reconnect Traefik to unready, failed, or orphaned deployment networks — that is
-  the reconciler's job to enforce continuously.
+  Re-attaches currently-running, ingress-published workloads to the shared ingress
+  network after Traefik starts.
+
+  Fail-closed: it deliberately does NOT re-attach unready, failed or orphaned
+  deployments — that is the reconciler's job to enforce continuously.
+
+  This used to connect TRAEFIK to each deployment's own `homelab_<t>_<a>_net`, a
+  network nothing is ever attached to, so it did nothing at all. Traefik itself is
+  permanently on `homelab-iab-internal` (`NetworkMode` at container create), so the
+  side that can actually be missing is the WORKLOAD's.
   """
   def sync_traefik_networks do
     Homelab.Deployments.list_published_running()
-    |> Enum.each(fn deployment ->
-      network =
-        Homelab.Deployments.SpecBuilder.deployment_network(
-          deployment.tenant,
-          deployment.app_template
-        )
-
-      connect_traefik_to_network(network)
-    end)
+    |> Enum.each(&Homelab.Deployments.publish_deployment/1)
 
     :ok
   end
