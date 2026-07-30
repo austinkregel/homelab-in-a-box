@@ -105,20 +105,35 @@ defmodule Homelab.Deployments.Migrate.ContainerControl do
           [p] -> {p, "tcp"}
         end
 
-      for %{"HostPort" => host_port} <- host_list || [], host_port not in [nil, ""] do
+      for %{"HostPort" => host_port} = binding <- host_list || [], host_port not in [nil, ""] do
         # `published: true` is not decoration. SpecBuilder.bind_host_ports/1 binds only the
         # ports carrying it, so without it every imported binding was silently dropped and
         # the adopted service came up unreachable on the very ports it used to serve.
         #
         # A port we read out of the original's HostConfig.PortBindings is, by definition,
         # one the operator published on the host.
+        #
+        # `HostIp` is the INTERFACE the operator chose to publish on, and it was
+        # discarded here. A `127.0.0.1:5432:5432` database — deliberately reachable
+        # only from the host — was re-published on 0.0.0.0, putting it on the LAN.
+        # Nothing in the UI showed the interface, so the imported result looked
+        # identical. An absent or empty value means all interfaces, which is Docker's
+        # own default and what most bindings mean.
         %{
           "internal" => port,
           "external" => host_port,
           "protocol" => proto,
+          "host_ip" => blank_to_nil(binding["HostIp"]),
           "published" => true
         }
       end
     end)
   end
+
+  # Docker reports "all interfaces" as `""` and sometimes `"0.0.0.0"`. Both mean the
+  # default, and storing either would make the port map claim an explicit choice the
+  # operator never made.
+  defp blank_to_nil(host_ip) when host_ip in [nil, "", "0.0.0.0"], do: nil
+  defp blank_to_nil(host_ip) when is_binary(host_ip), do: String.trim(host_ip)
+  defp blank_to_nil(_host_ip), do: nil
 end
