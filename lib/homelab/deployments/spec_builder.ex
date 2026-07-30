@@ -58,6 +58,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.GpuSpec
+  alias Homelab.Deployments.Netns
 
   @type image_source :: :registry | :local
 
@@ -71,6 +72,10 @@ defmodule Homelab.Deployments.SpecBuilder do
           ports: [map()],
           network: String.t(),
           host_network: boolean(),
+          capabilities_add: [String.t()],
+          capabilities_drop: [String.t()],
+          devices: [map()],
+          sysctls: map(),
           labels: map(),
           replicas: pos_integer(),
           restart_policy: String.t(),
@@ -85,12 +90,23 @@ defmodule Homelab.Deployments.SpecBuilder do
     template = deployment.app_template
     tenant = deployment.tenant
 
-    with :ok <- validate_required_env(template, deployment.env_overrides) do
+    ingress_network = Homelab.Infrastructure.internal_network()
+
+    with :ok <- validate_required_env(template, deployment.env_overrides),
+         {:ok, netns_donor} <- resolve_netns_donor(deployment) do
       # Access model: only :host binds host ports; proxy/:service never do, and
       # :host_network has nothing to bind — it is already on the host's ports.
       service_mode? = Access.effective_exposure(deployment) == :service
       host_network? = Access.host_network_mode?(deployment)
-      ports = build_ports(deployment)
+      netns_child? = netns_donor != nil
+
+      # Whatever lives in THIS deployment's namespace. A donor carries its children's
+      # routes, because a child has no endpoint for Traefik to discover — see the
+      # netns section of the moduledoc.
+      netns_children = if netns_child?, do: [], else: Netns.children(deployment)
+      routed_children = Enum.filter(netns_children, &routed?/1)
+
+      ports = if netns_child?, do: [], else: build_ports(deployment)
 
       # Network model (see moduledoc): the PRIMARY network is the tenant-scoped
       # PRIVATE app network — web ↔ its datastores talk here, and Traefik never
@@ -101,11 +117,35 @@ defmodule Homelab.Deployments.SpecBuilder do
       #
       # `:host_network` replaces the primary with Docker's predefined `host` network:
       # no tenant isolation, because there is no network to isolate it on.
-      primary_network = if host_network?, do: "host", else: tenant_network(tenant)
-      bridge_networks = []
+      #
+      # A netns CHILD replaces it with the donor's namespace. It then has no network of
+      # its own at all — hence the narrowed spec below, and the donor carrying its route.
+      primary_network =
+        cond do
+          netns_child? -> Netns.network_mode(netns_donor)
+          host_network? -> "host"
+          true -> tenant_network(tenant)
+        end
+
+      # A donor with a routed child must be reachable BY TRAEFIK, because the child's
+      # route resolves to the donor's address. This is the one real use of
+      # `bridge_networks` for a deployment — it was plumbed through both drivers and the
+      # orchestrator behaviour and then hardcoded to [] here, so nothing ever multi-homed.
+      bridge_networks = if routed_children == [], do: [], else: [ingress_network]
 
       base_labels = build_labels(template, tenant, deployment)
-      routing_labels = build_routing_labels(deployment, Homelab.Infrastructure.internal_network())
+
+      # A child emits NO routing labels of its own: Traefik would resolve it to an
+      # endpoint that does not exist and the workload would be skipped. Its labels are
+      # built onto the donor instead, one set per routed child.
+      routing_labels =
+        if netns_child? do
+          %{}
+        else
+          deployment
+          |> build_routing_labels(ingress_network)
+          |> Map.merge(children_routing_labels(routed_children, ingress_network))
+        end
 
       gpu = GpuSpec.parse(Access.effective_resource_limits(deployment))
 
@@ -118,7 +158,7 @@ defmodule Homelab.Deployments.SpecBuilder do
         # Preserve the adopted container's uid:gid (never chown adopted data). nil
         # for greenfield deploys, which run as the image's default user.
         user: template.user,
-        env: build_env(template, tenant, deployment, gpu),
+        env: build_env(template, tenant, deployment, gpu, netns_children),
         volumes: build_volumes(template, tenant, Access.effective_volumes(deployment)),
         ports: ports,
         network: primary_network,
@@ -127,15 +167,31 @@ defmodule Homelab.Deployments.SpecBuilder do
         # rather than string-matching the network name, and it is what tells them to
         # skip everything host mode forbids (see moduledoc).
         host_network: host_network?,
+        # The container lives in ANOTHER CONTAINER's network namespace. Read by the
+        # drivers for the same reason as `host_network`: it is what tells them to skip
+        # the port bindings, the NetworkingConfig and the ingress attach that the daemon
+        # rejects outright next to a container network mode rather than ignoring.
+        netns_child: netns_child?,
+        netns_parent_id: netns_donor && netns_donor.id,
         # Extra names this container answers to on its network. Adoption fills these with
         # the original's compose service name, so the rest of the stack keeps resolving it.
-        # Meaningless — and rejected by the daemon — on the host network, which has no
-        # embedded DNS to register a name with.
+        # Meaningless — and rejected by the daemon — on the host network or in another
+        # container's, neither of which has an endpoint to register a name on.
         network_aliases:
-          if(host_network?, do: [], else: Access.effective_network_aliases(deployment)),
+          if(host_network? or netns_child?,
+            do: [],
+            else: Access.effective_network_aliases(deployment)
+          ),
         # nil = the image's default. Adoption sets these to what the original actually ran.
         command: Access.effective_command(deployment),
         entrypoint: Access.effective_entrypoint(deployment),
+        # Kernel privileges. Like the GPU, these are INTENT rather than an API payload:
+        # the Engine passes a device straight through, Swarm cannot pass one at all and
+        # refuses rather than pretending. Capabilities and sysctls both drivers can do.
+        capabilities_add: Access.effective_capabilities_add(deployment),
+        capabilities_drop: Access.effective_capabilities_drop(deployment),
+        devices: Access.effective_devices(deployment),
+        sysctls: Access.effective_sysctls(deployment),
         labels: Map.merge(base_labels, routing_labels),
         replicas: Access.effective_replicas(deployment),
         # How the container behaves when it exits. Both drivers hardcoded on-failure/3
@@ -162,6 +218,50 @@ defmodule Homelab.Deployments.SpecBuilder do
 
       {:ok, spec}
     end
+  end
+
+  # The deployment whose namespace this one must join, if any.
+  #
+  # Fails LOUDLY when the donor has no container yet. A create naming a container id
+  # that does not exist produces a container the daemon will never start ("cannot join
+  # network of a non running container"), and the app is then down with an error that
+  # points at the wrong thing. Release ordering (`deploy_release/2` puts the donor in
+  # first and awaits it healthy) is what normally prevents this; if it did not hold,
+  # that is a bug worth surfacing rather than a container worth creating.
+  defp resolve_netns_donor(%Deployment{network_parent_id: nil}), do: {:ok, nil}
+
+  defp resolve_netns_donor(%Deployment{} = deployment) do
+    case Netns.donor(deployment) do
+      nil ->
+        {:error, {:netns_donor_missing, deployment.network_parent_id}}
+
+      %Deployment{external_id: nil} = donor ->
+        {:error, {:netns_donor_not_running, donor.id}}
+
+      donor ->
+        {:ok, donor}
+    end
+  end
+
+  defp routed?(%Deployment{domain: domain} = child)
+       when is_binary(domain) and domain != "",
+       do: Access.proxy_mode?(child)
+
+  defp routed?(_child), do: false
+
+  # A routed child's Traefik labels, built onto the DONOR.
+  #
+  # This is the whole trick: the child has no IP, but its ports ARE the donor's ports,
+  # and the donor is multi-homed onto ingress. So the label set is exactly what the
+  # child would have emitted for itself — the same rule, middlewares, stickiness and
+  # extra routes — carried by the container Traefik can actually resolve.
+  #
+  # Router names derive from each child's DOMAIN, so two children never collide; two
+  # children on one domain is a configuration the operator has to resolve anyway.
+  defp children_routing_labels(routed_children, ingress_network) do
+    Enum.reduce(routed_children, %{}, fn child, acc ->
+      Map.merge(acc, build_routing_labels(child, ingress_network))
+    end)
   end
 
   # Whether the image MUST be pulled, which is what a failed pull means.
@@ -256,21 +356,14 @@ defmodule Homelab.Deployments.SpecBuilder do
     "homelab_#{sanitize(tenant.slug)}_#{sanitize(template.slug)}"
   end
 
-  @doc """
-  Builds a per-deployment isolated network name.
-  """
-  def deployment_network(tenant, template) do
-    deployment_network_for(tenant.slug, template.slug)
-  end
-
-  @doc """
-  Builds a per-deployment network name directly from tenant and app slugs
-  (e.g. from container labels, when no struct is at hand).
-  """
-  def deployment_network_for(tenant_slug, app_slug)
-      when is_binary(tenant_slug) and is_binary(app_slug) do
-    "homelab_#{sanitize(tenant_slug)}_#{sanitize(app_slug)}_net"
-  end
+  # `deployment_network/2` and `deployment_network_for/2` are gone.
+  #
+  # They named `homelab_<tenant>_<app>_net`, a per-deployment network that NOTHING was
+  # ever attached to — the moduledoc above called it vestigial and retained it only for
+  # `publish`/`unpublish`. Those now attach and detach the WORKLOAD from the shared
+  # ingress network, which is what actually decides reachability, so the last reason to
+  # compute the name is gone. Keeping it would leave a plausible-looking helper that
+  # silently does nothing, which is the bug class this pass exists to remove.
 
   @doc """
   Builds the tenant-scoped network name used to bridge related deployments.
@@ -285,7 +378,7 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> String.replace(~r/[^a-z0-9_.-]/, "_")
   end
 
-  defp build_env(template, tenant, deployment, gpu) do
+  defp build_env(template, tenant, deployment, gpu, netns_children) do
     base_env = template.default_env || %{}
     oidc_env = if template.auth_integration, do: oidc_env_vars(tenant, template), else: %{}
     overrides = deployment.env_overrides || %{}
@@ -293,8 +386,78 @@ defmodule Homelab.Deployments.SpecBuilder do
     base_env
     |> Map.merge(oidc_env)
     |> Map.merge(gpu_env(gpu))
+    |> Map.merge(donor_env(template, tenant, netns_children))
     |> Map.merge(overrides)
+    |> Map.merge(deployment_secrets(deployment))
   end
+
+  # Generated and adopted credentials, merged LAST so nothing can shadow them.
+  #
+  # This belongs here, not in the callers. It used to live in the release-step handlers
+  # — `DeployContainer` and `AdoptContainer` each merged it onto the spec themselves —
+  # which meant the two IMPERATIVE deploy paths (`start_deployment/1` and `do_deploy/1`)
+  # silently did not. `recreate_deployment/1` is `start_deployment/1`, and that is what
+  # every config save on the deployment page runs. So saving one env var recreated the
+  # container with every generated DB password and every adopted credential missing,
+  # while pressing "Redeploy" (which plans a release) put them back. The behaviour
+  # depended on which button you pressed.
+  #
+  # There are four `build/1` callers; putting the merge at the seam they all share makes
+  # forgetting it impossible rather than merely unlikely.
+  #
+  # An unsaved deployment has no id and therefore no secrets — and `decrypted_secrets/1`
+  # omits anything that fails to decrypt, so a lost key yields a MISSING variable (loud)
+  # rather than a blank one (silent).
+  # Prefers an already-loaded `:secrets` — including an explicit `[]`, which is a caller
+  # stating this deployment has none — and falls back to a query. Not-loaded means look
+  # it up rather than assume nothing, because assuming nothing is the bug being fixed.
+  defp deployment_secrets(%Deployment{secrets: secrets}) when is_list(secrets),
+    do: Homelab.Deployments.Releases.decrypt_secrets(secrets)
+
+  defp deployment_secrets(%Deployment{id: nil}), do: %{}
+
+  defp deployment_secrets(%Deployment{id: id}),
+    do: Homelab.Deployments.Releases.decrypted_secrets(id)
+
+  @doc """
+  The env a network donor needs so its children are actually reachable.
+
+  Sharing a namespace is generic; making the shared namespace USABLE is not. Gluetun
+  runs a kill-switch firewall that drops everything not bound for the tunnel, so:
+
+    * `FIREWALL_INPUT_PORTS` — without a child's port here, Traefik's connection to the
+      donor is dropped on arrival. The symptom is a 502 with nothing in any log, and it
+      is by a wide margin the most common way this pattern fails.
+    * `FIREWALL_OUTBOUND_SUBNETS` — without the Docker subnets here the request arrives
+      and the REPLY is dropped, which looks like a hung request rather than a blocked one.
+
+  Both are derivable from what the plane already knows: its children's ports and the
+  networks it created. Gated on `netns_donor_kind` so this stays image-specific
+  knowledge about gluetun rather than something imposed on every donor, and merged
+  BEFORE `env_overrides` so an operator who wants to write them by hand always wins.
+  """
+  def donor_env(%{netns_donor_kind: "gluetun"}, tenant, netns_children)
+      when netns_children != [] do
+    ports =
+      netns_children
+      |> Enum.flat_map(&Netns.declared_ports/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    subnets =
+      [tenant_network(tenant), Homelab.Infrastructure.internal_network()]
+      |> Enum.flat_map(&Homelab.Docker.Network.subnets/1)
+      |> Enum.uniq()
+
+    %{}
+    |> put_unless_empty("FIREWALL_INPUT_PORTS", Enum.join(ports, ","))
+    |> put_unless_empty("FIREWALL_OUTBOUND_SUBNETS", Enum.join(subnets, ","))
+  end
+
+  def donor_env(_template, _tenant, _netns_children), do: %{}
+
+  defp put_unless_empty(map, _key, ""), do: map
+  defp put_unless_empty(map, key, value), do: Map.put(map, key, value)
 
   # The visible-devices var is what the vendor runtime hook actually reads to decide
   # which GPUs to inject. Under Swarm it is the ONLY injection mechanism (the generic
@@ -325,18 +488,28 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> Enum.map(fn vol ->
       container_path = vol["container_path"] || vol["path"] || "/data"
 
+      # Carried through to both drivers. A mount the operator made read-only stays
+      # read-only; omitting it is what silently widened adopted mounts to writable.
+      read_only = vol["read_only"] in [true, "true"]
+
       case vol["source"] do
         source when is_binary(source) and source != "" ->
           # Adoption passthrough: reference an existing/managed volume by name, or
           # a `type: "bind"` at a host path, exactly as captured — do not compute a
           # synthetic tenant-scoped name that would shadow the real data.
-          %{source: source, target: container_path, type: vol["type"] || "volume"}
+          %{
+            source: source,
+            target: container_path,
+            type: vol["type"] || "volume",
+            read_only: read_only
+          }
 
         _ ->
           %{
             source: volume_name(tenant.slug, template.slug, container_path),
             target: container_path,
-            type: "volume"
+            type: "volume",
+            read_only: read_only
           }
       end
     end)
@@ -382,7 +555,17 @@ defmodule Homelab.Deployments.SpecBuilder do
 
       role = port["role"] || Homelab.Catalog.Enrichers.PortRoles.infer(internal)
 
-      %{internal: internal, external: external, role: role}
+      %{
+        internal: internal,
+        external: external,
+        role: role,
+        protocol: Access.port_protocol(port),
+        # The INTERFACE this port is published on. nil = every interface, Docker's
+        # default. Preserving it is what stops an adopted `127.0.0.1:` binding — a
+        # database the operator deliberately kept host-local — from being republished
+        # on the LAN.
+        host_ip: port["host_ip"]
+      }
     end)
   end
 
@@ -587,11 +770,18 @@ defmodule Homelab.Deployments.SpecBuilder do
   def routed_port(%Deployment{routed_port: port}) when is_integer(port), do: to_string(port)
   def routed_port(%Deployment{} = deployment), do: guess_port(Access.effective_ports(deployment))
 
+  # UDP ports are excluded from the guess entirely, never merely deprioritized. This
+  # picks an HTTP backend for Traefik, and Traefik's http services speak TCP only — a
+  # UDP port is not a worse candidate than a TCP one, it is not a candidate. A game
+  # server publishing 27900/udp alongside a TCP admin port must never have its route
+  # handed to the UDP port just because it came first in the array.
   defp guess_port(ports) when is_list(ports) do
+    routable = Enum.reject(ports, &Access.udp?/1)
+
     port =
-      Enum.find(ports, fn p -> p["role"] == "web" end) ||
-        Enum.find(ports, fn p -> !p["optional"] end) ||
-        List.first(ports)
+      Enum.find(routable, fn p -> p["role"] == "web" end) ||
+        Enum.find(routable, fn p -> !p["optional"] end) ||
+        List.first(routable)
 
     case port do
       nil -> "80"
