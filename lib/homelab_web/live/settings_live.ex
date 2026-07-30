@@ -299,7 +299,7 @@ defmodule HomelabWeb.SettingsLive do
 
           {:error, {service, reason}} ->
             {:noreply,
-             put_flash(socket, :error, "Import failed for #{service}: #{inspect(reason)}")}
+             put_flash(socket, :error, "Import failed for #{service}: #{import_error(reason)}")}
         end
     end
   end
@@ -2581,6 +2581,32 @@ defmodule HomelabWeb.SettingsLive do
     </div>
     """
   end
+
+  # --- Import errors ---------------------------------------------------------
+  #
+  # `inspect(reason)` put a raw tuple and a 64-character container id on screen, which is
+  # what "Import failed for sabnzbd: {:netns_child_not_adoptable, "68aa952b..."}" was. The
+  # id is the only actionable part of that message and it was the least readable.
+
+  defp import_error({:netns_donor_not_selected, container_id}) do
+    "it routes all of its traffic through container #{short_id(container_id)}, which is not " <>
+      "in this import. Select that container too — a VPN client and the apps behind it have " <>
+      "to be adopted together, or the apps would come up outside the tunnel."
+  end
+
+  defp import_error(:already_adopted),
+    do: "it is already adopted. Remove the existing deployment first if you want to redo it."
+
+  defp import_error(:release_in_flight),
+    do: "a release is already running for it. Wait for that to finish, then retry."
+
+  defp import_error(%Ecto.Changeset{} = changeset),
+    do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
+
+  defp import_error(reason), do: inspect(reason)
+
+  defp short_id(id) when is_binary(id), do: String.slice(id, 0, 12)
+  defp short_id(id), do: inspect(id)
 
   # --- Settings writes -------------------------------------------------------
   #
