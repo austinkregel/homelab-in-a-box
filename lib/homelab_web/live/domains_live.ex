@@ -214,14 +214,34 @@ defmodule HomelabWeb.DomainsLive do
 
     case result do
       {:ok, record} ->
-        Networking.push_record_to_provider(record)
         verb = if socket.assigns[:editing_record_id], do: "updated", else: "created"
 
-        {:noreply,
-         socket
-         |> load_all_data()
-         |> assign(show_modal: nil, modal_form: nil, editing_record_id: nil)
-         |> put_flash(:info, "DNS record #{verb}!")}
+        # The push result used to be discarded and the flash always said success, so an
+        # expired token or an unconfigured provider produced a record that resolved
+        # nowhere and reported as done. The row now carries the failure too, so it
+        # survives the reload rather than living only in a flash.
+        #
+        # Push BEFORE reloading, or the table would render the row's sync state from
+        # before the attempt and the badge would lag by one save.
+        push_result = Networking.push_record_to_provider(record)
+
+        socket =
+          socket
+          |> load_all_data()
+          |> assign(show_modal: nil, modal_form: nil, editing_record_id: nil)
+
+        case push_result do
+          :ok ->
+            {:noreply, put_flash(socket, :info, "DNS record #{verb} and published.")}
+
+          {:error, message} ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "DNS record #{verb}, but it could not be published — #{message}"
+             )}
+        end
 
       {:error, changeset} ->
         {:noreply, assign(socket, modal_form: to_form(changeset, as: :record))}
@@ -526,13 +546,26 @@ defmodule HomelabWeb.DomainsLive do
           >
             <div>
               <label class="block text-sm font-medium text-base-content/70 mb-1.5">Zone</label>
+              <%!-- `selected` from the form, not from the browser's "first option wins".
+                    These three selects are raw <select>s with hand-written names rather
+                    than `.input field={...}`, so `@modal_form` never reached them: every
+                    option rendered unselected and editing an existing record submitted
+                    whatever happened to be first. --%>
               <select
                 name="record[dns_zone_id]"
                 class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
                 required
               >
-                <option value="" disabled selected>Select a zone...</option>
-                <option :for={z <- @zones} value={z.id}>{z.name}</option>
+                <option value="" disabled selected={@modal_form[:dns_zone_id].value in [nil, ""]}>
+                  Select a zone...
+                </option>
+                <option
+                  :for={z <- @zones}
+                  value={z.id}
+                  selected={to_string(z.id) == to_string(@modal_form[:dns_zone_id].value)}
+                >
+                  {z.name}
+                </option>
               </select>
             </div>
             <div class="grid grid-cols-2 gap-3">
@@ -552,11 +585,20 @@ defmodule HomelabWeb.DomainsLive do
                 <label class="block text-sm font-medium text-base-content/70 mb-1.5">
                   Type
                 </label>
+                <%!-- Without `selected`, opening a CNAME to change its TTL submitted
+                      type=A — and `push_record_to_provider/1` then overwrote the
+                      provider's copy with it. --%>
                 <select
                   name="record[type]"
                   class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
                 >
-                  <option :for={t <- ~w(A AAAA CNAME MX TXT SRV NS)} value={t}>{t}</option>
+                  <option
+                    :for={t <- ~w(A AAAA CNAME MX TXT SRV NS)}
+                    value={t}
+                    selected={t == to_string(@modal_form[:type].value || "A")}
+                  >
+                    {t}
+                  </option>
                 </select>
               </div>
             </div>
@@ -585,13 +627,26 @@ defmodule HomelabWeb.DomainsLive do
                 <label class="block text-sm font-medium text-base-content/70 mb-1.5">
                   Scope
                 </label>
+                <%!-- Same: an `internal`-scoped record silently became `public` on any
+                      edit, and was then pushed to the PUBLIC provider carrying whatever
+                      internal address it held. --%>
                 <select
                   name="record[scope]"
                   class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
                 >
-                  <option value="public">Public</option>
-                  <option value="internal">Internal</option>
-                  <option value="both">Both</option>
+                  <option
+                    :for={
+                      {value, label} <- [
+                        {"public", "Public"},
+                        {"internal", "Internal"},
+                        {"both", "Both"}
+                      ]
+                    }
+                    value={value}
+                    selected={value == to_string(@modal_form[:scope].value || "public")}
+                  >
+                    {label}
+                  </option>
                 </select>
               </div>
             </div>
@@ -880,6 +935,16 @@ defmodule HomelabWeb.DomainsLive do
                 </span>
                 <span :if={!record.managed} class="text-[11px] font-medium text-base-content/30">
                   Manual
+                </span>
+                <%!-- A record that never reached its provider used to look exactly like
+                      one serving traffic: every failure was swallowed and the flash said
+                      success. The flash is gone by the next page load; this is not. --%>
+                <span
+                  :if={record.last_sync_error}
+                  class="flex items-center gap-1 text-[11px] font-medium text-error mt-0.5"
+                  title={record.last_sync_error}
+                >
+                  <.icon name="hero-exclamation-triangle-mini" class="size-3" /> Not published
                 </span>
               </td>
               <td class="px-6 py-4 text-right">
