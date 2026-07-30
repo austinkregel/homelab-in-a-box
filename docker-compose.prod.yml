@@ -80,8 +80,25 @@ services:
     #     - stack-internal
 
 volumes:
+  # `external: true` so `docker compose down -v` CANNOT remove it.
+  #
+  # This volume holds `secret_key_base`, which is the AES key for every encrypted
+  # value in the database — `deployment_secrets` (generated DB passwords, adopted
+  # credentials) and the encrypted rows in `system_settings` (OIDC client secret,
+  # registry tokens).
+  #
+  # The database volume `homelab-iab-postgres-data` is NOT declared here: the app
+  # creates it itself through the Docker socket in `Bootstrap.ensure_volume/1`, so
+  # compose has never known about it. That asymmetry made `down -v` destroy the KEY
+  # and keep the DATA — leaving every encrypted row as permanently undecryptable
+  # ciphertext, with no way to recover a generated password the operator never saw.
+  #
+  # Bootstrap creates this volume on first boot, so `external` costs nothing on a
+  # fresh install. To genuinely start over, use build_from_scratch.sh, which removes
+  # the key and the database together.
   homelab-iab-secrets:
     name: homelab-iab-secrets
+    external: true
 
 networks:
   # Named exactly so the app's bootstrap (which expects `homelab-iab-internal`)
