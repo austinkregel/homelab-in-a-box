@@ -389,6 +389,48 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
              ]
     end
 
+    test "identity labels land on the TASK CONTAINER, routing labels do not" do
+      # Every consumer of these reads containers: `list_services/0` filters on
+      # `homelab.managed=true` and the orphan sweep reads `homelab.tenant`/`homelab.app`
+      # off a container. Service-only labels made a Swarm workload invisible to all of it —
+      # the reconciler failed a perfectly healthy deployment with "Container not found",
+      # and after an orchestrator switch there was nothing left to match it back by.
+      #
+      # traefik.* stays OFF the container: Traefik skips a workload that carries both
+      # providers' labels, so copying them here would un-route every Swarm service.
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc1"}}
+      end)
+
+      labels = %{
+        "homelab.managed" => "true",
+        "homelab.tenant" => "home",
+        "homelab.app" => "plex",
+        "homelab.deployment_id" => "42",
+        "traefik.enable" => "true",
+        "traefik.swarm.network" => "homelab-iab-internal"
+      }
+
+      assert {:ok, "svc1"} = DockerSwarm.deploy(Map.put(build_spec(), :labels, labels))
+
+      assert_received {:create_body, body}
+      container_labels = get_in(body, ["TaskTemplate", "ContainerSpec", "Labels"])
+
+      assert container_labels == %{
+               "homelab.managed" => "true",
+               "homelab.tenant" => "home",
+               "homelab.app" => "plex",
+               "homelab.deployment_id" => "42"
+             }
+
+      # The service still carries the full set, routing included.
+      assert body["Labels"] == labels
+    end
+
     test "capabilities and sysctls use Swarm's OWN ContainerSpec names, not the Engine's" do
       # `CapabilityAdd`/`CapabilityDrop`, not `CapAdd`/`CapDrop`. Swarm silently ignores
       # an unrecognised ContainerSpec key, so the wrong name is a service that starts
