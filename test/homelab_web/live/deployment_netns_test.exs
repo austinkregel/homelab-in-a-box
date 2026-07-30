@@ -98,6 +98,28 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     assert html =~ "Through Gluetun"
   end
 
+  test "a refused choice says WHY, not 'could not save the configuration'", ctx do
+    # A donor in another space is refused by `Netns.validate_parent_same_tenant/2`. The
+    # point here is not that rule — it is that its message reaches the operator at all.
+    # Every refusal on this form used to collapse to six words that named neither the
+    # setting nor the reason, which is indistinguishable from the feature being broken.
+    stranger =
+      insert(:deployment,
+        tenant: insert(:tenant),
+        app_template: insert(:app_template, name: "Elsewhere", slug: "elsewhere", ports: []),
+        status: :running,
+        external_id: "elsewhere-1"
+      )
+
+    html =
+      ctx.conn
+      |> settings_form(ctx.app)
+      |> save(%{"network_parent_id" => to_string(stranger.id)})
+
+    assert html =~ "must be in the same space"
+    refute html =~ "Could not save the configuration."
+  end
+
   test "picking a container routes this deployment through it", %{
     conn: conn,
     app: app,
