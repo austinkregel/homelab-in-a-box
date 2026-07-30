@@ -39,13 +39,27 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # From a release tag like `v1.2.3`: publishes 1.2.3, 1.2, and 1, plus
-          # `latest` for non-prerelease releases. Manual runs fall back to the
-          # short commit SHA.
+          # `latest`. Manual runs fall back to the short commit SHA.
+          #
+          # `latest` used to be gated on `github.event_name == 'release'`, which is
+          # never true here: this workflow triggers on `push: tags` and
+          # `workflow_dispatch`, and publishing a GitHub Release fires the tag PUSH
+          # event, not `release`. So the condition was always false and `latest` was
+          # NEVER published — while docker-compose.prod.yml defaults to
+          # `${HOMELAB_IMAGE_TAG:-latest}`. Every install on the default tag was
+          # pinned to whatever `latest` happened to be, and `docker compose pull`
+          # could not move it.
+          #
+          # `flavor: latest=auto` is the action's own rule for this and gets the
+          # prerelease case right without a hand-written condition: it tags `latest`
+          # for a semver tag and withholds it for one carrying a prerelease component
+          # (`v1.2.3-rc1`), which a bare `startsWith(github.ref, ...)` would not.
+          flavor: |
+            latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=sha,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Set up Docker Buildx
