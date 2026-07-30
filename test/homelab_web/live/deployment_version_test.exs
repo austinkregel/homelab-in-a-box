@@ -187,7 +187,7 @@ defmodule HomelabWeb.DeploymentVersionTest do
         |> form("#version-form", %{"version" => %{"image" => "not a valid ref"}})
         |> render_submit()
 
-      assert html =~ "Could not save"
+      assert html =~ "is not a valid image reference"
       assert Repo.reload!(deployment).image_override == nil
     end
 
