@@ -3,6 +3,9 @@ defmodule HomelabWeb.CatalogLive do
 
   alias Homelab.Catalog
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Deployments.Access
+  alias Homelab.Deployments.ConfigForm
+  alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.MetadataEnricher
 
   alias Homelab.Tenants
@@ -251,6 +254,17 @@ defmodule HomelabWeb.CatalogLive do
      |> assign(:selected_entry, nil)}
   end
 
+  # The deploy form had no `phx-change` at all, so nothing the operator typed reached the
+  # assigns until submit. That is why the Storage select could not reveal the "Host
+  # folder" field next to it, and why adding or removing a row discarded every edit made
+  # to the other rows. Same shape as the Settings DNS form.
+  def handle_event("deploy_config_changed", params, socket) do
+    {:noreply,
+     socket
+     |> assign(:deploy_ports, sync_rows(params["ports"], socket.assigns.deploy_ports))
+     |> assign(:deploy_volumes, sync_rows(params["volumes"], socket.assigns.deploy_volumes))}
+  end
+
   def handle_event("add_port", _params, socket) do
     ports =
       (socket.assigns.deploy_ports || []) ++
@@ -261,6 +275,7 @@ defmodule HomelabWeb.CatalogLive do
             "description" => "",
             "optional" => "true",
             "role" => "other",
+            "protocol" => "tcp",
             "published" => false
           }
         ]
@@ -276,7 +291,16 @@ defmodule HomelabWeb.CatalogLive do
   def handle_event("add_volume", _params, socket) do
     volumes =
       (socket.assigns.deploy_volumes || []) ++
-        [%{"container_path" => "", "description" => "", "optional" => "true"}]
+        [
+          %{
+            "container_path" => "",
+            "description" => "",
+            "optional" => "true",
+            "type" => "volume",
+            "source" => "",
+            "read_only" => false
+          }
+        ]
 
     {:noreply, assign(socket, :deploy_volumes, volumes)}
   end
@@ -326,32 +350,30 @@ defmodule HomelabWeb.CatalogLive do
     # A domain only applies to reverse-proxy access.
     domain = if exposure_mode in ~w(public sso_protected private), do: params["domain"], else: nil
 
-    template_updates = %{}
-
-    template_updates =
-      if ports != template.ports,
-        do: Map.put(template_updates, :ports, ports),
-        else: template_updates
-
-    template_updates =
-      if volumes != template.volumes,
-        do: Map.put(template_updates, :volumes, volumes),
-        else: template_updates
-
-    template_updates =
-      if exposure_mode != to_string(template.exposure_mode),
-        do: Map.put(template_updates, :exposure_mode, String.to_existing_atom(exposure_mode)),
-        else: template_updates
-
-    if map_size(template_updates) > 0 do
-      Catalog.update_app_template(template, template_updates)
-    end
-
+    # Everything the operator edited here belongs to THIS deployment, never to the
+    # template.
+    #
+    # This used to write ports, volumes and exposure_mode back onto `app_templates` —
+    # a row every space shares. Deploying nginx into space B with different ports
+    # rewrote the template that space A's existing deployment inherits from, and space A
+    # picked up B's ports on its next converge. Commit eb1fecf established exactly this
+    # rule for the deploy wizard ("never rewrite a shared template on deploy") and this
+    # path was missed.
+    #
+    # The guards made it worse rather than better: `ports != template.ports` compared a
+    # freshly-parsed map against a stored one with different keys, so it was always true
+    # and the write always happened.
+    #
+    # `blank_to_nil_list` because an empty override is NOT "inherit" — `Access` inherits
+    # only on nil, so storing [] would win over the template rather than defer to it.
     attrs = %{
       tenant_id: String.to_integer(tenant_id),
       app_template_id: template.id,
       domain: domain,
-      env_overrides: env_overrides
+      env_overrides: env_overrides,
+      ports_override: blank_to_nil_list(ports),
+      volumes_override: blank_to_nil_list(volumes),
+      exposure_mode_override: exposure_mode
     }
 
     case Homelab.Deployments.deploy_now(attrs) do
@@ -769,7 +791,13 @@ defmodule HomelabWeb.CatalogLive do
                 entry={@selected_entry}
               />
 
-              <.form for={@deploy_form} id="deploy-form" phx-submit="deploy" class="space-y-5">
+              <.form
+                for={@deploy_form}
+                id="deploy-form"
+                phx-change="deploy_config_changed"
+                phx-submit="deploy"
+                class="space-y-5"
+              >
                 <%!-- Ports --%>
                 <div class="space-y-2">
                   <p class="text-xs font-semibold text-base-content/60 flex items-center gap-1.5">
@@ -839,6 +867,24 @@ defmodule HomelabWeb.CatalogLive do
                           placeholder="80"
                           class="w-full rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-1.5 px-2.5 focus:ring-2 focus:ring-primary/50"
                         />
+                      </div>
+                      <%!-- The protocol had no input at all, so `Access.port_protocol/1`
+                            fell through to "tcp" and a UDP port (DNS, WireGuard, a game
+                            server) was silently downgraded on every deploy from here. --%>
+                      <div class="w-20">
+                        <label class="block text-[10px] text-base-content/30 mb-0.5">Proto</label>
+                        <select
+                          name={"ports[#{idx}][protocol]"}
+                          class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-1.5 focus:ring-2 focus:ring-primary/50"
+                        >
+                          <option
+                            :for={proto <- ~w(tcp udp)}
+                            value={proto}
+                            selected={proto == Access.port_protocol(port)}
+                          >
+                            {String.upcase(proto)}
+                          </option>
+                        </select>
                       </div>
                       <div class="w-24">
                         <label class="block text-[10px] text-base-content/30 mb-0.5">Role</label>
@@ -924,6 +970,33 @@ defmodule HomelabWeb.CatalogLive do
                         name={"volumes[#{idx}][optional]"}
                         value={to_string(vol["optional"] || false)}
                       />
+                      <%!-- Storage and host folder had NO inputs here, so a template
+                            nominating a bind mount round-tripped through this form as a
+                            bare container path: VolumeSpec then inferred a managed
+                            volume, and the app came up mounting an empty one where the
+                            operator's data was. --%>
+                      <div class="w-24 shrink-0">
+                        <label class="block text-[10px] text-base-content/30 mb-0.5">Storage</label>
+                        <select
+                          name={"volumes[#{idx}][type]"}
+                          class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-1.5 focus:ring-2 focus:ring-primary/50"
+                        >
+                          <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
+                          <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
+                        </select>
+                      </div>
+                      <div :if={vol["type"] == "bind"} class="flex-1">
+                        <label class="block text-[10px] text-base-content/30 mb-0.5">
+                          Host folder
+                        </label>
+                        <input
+                          type="text"
+                          name={"volumes[#{idx}][source]"}
+                          value={vol["source"] || ""}
+                          placeholder="/srv/media"
+                          class="w-full rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-1.5 px-2.5 focus:ring-2 focus:ring-primary/50"
+                        />
+                      </div>
                       <div class="flex-1">
                         <label class="block text-[10px] text-base-content/30 mb-0.5">
                           Container path
@@ -936,6 +1009,19 @@ defmodule HomelabWeb.CatalogLive do
                           class="w-full rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-1.5 px-2.5 focus:ring-2 focus:ring-primary/50"
                         />
                       </div>
+                      <label
+                        class="flex items-center gap-1.5 text-[11px] text-base-content/60 whitespace-nowrap pt-4"
+                        title="Mount read-only — the container cannot write through it"
+                      >
+                        <input type="hidden" name={"volumes[#{idx}][read_only]"} value="false" />
+                        <input
+                          type="checkbox"
+                          name={"volumes[#{idx}][read_only]"}
+                          value="true"
+                          checked={vol["read_only"] == true}
+                          class="rounded border-base-content/20"
+                        /> ro
+                      </label>
                     </div>
                   </div>
                   <button
@@ -1416,36 +1502,43 @@ defmodule HomelabWeb.CatalogLive do
     if base == "" or String.length(base) < 2, do: "custom-app", else: base
   end
 
-  defp parse_port_params(nil), do: []
+  # Through `ConfigForm`/`VolumeSpec`, the same normalizers the wizard and the Settings
+  # editor use, rather than a third hand-rolled parser.
+  #
+  # The hand-rolled ones dropped fields the shape carries: ports lost nothing visible
+  # but `host_ip`, and volumes lost `type` AND `source` — so a template nominating a host
+  # folder (`type: "bind", source: "/mnt/media"`) round-tripped through this form as a
+  # bare container path. `VolumeSpec` then inferred `type: "volume"`, validation passed
+  # because it was no longer a bind, and the app came up mounting an empty named volume
+  # where the operator's media library had been.
+  # Merges the posted values onto the rows we already hold, by index, rather than
+  # replacing them — a field the form does not render (a description carried in a hidden
+  # input, say) must survive a change event rather than be wiped by its absence.
+  defp sync_rows(nil, existing), do: existing || []
 
-  defp parse_port_params(ports_map) when is_map(ports_map) do
-    ports_map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, port} ->
-      %{
-        "internal" => port["internal"],
-        "external" => port["external"],
-        "description" => port["description"],
-        "optional" => port["optional"] == "true",
-        "role" => port["role"] || "other",
-        "published" => port["published"] == "true"
-      }
+  defp sync_rows(params, existing) when is_map(params) do
+    (existing || [])
+    |> Enum.with_index()
+    |> Enum.map(fn {row, idx} ->
+      case params[to_string(idx)] do
+        nil -> row
+        posted -> Map.merge(row, posted)
+      end
     end)
   end
 
-  defp parse_volume_params(nil), do: []
+  defp sync_rows(_params, existing), do: existing || []
 
-  defp parse_volume_params(volumes_map) when is_map(volumes_map) do
-    volumes_map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, vol} ->
-      %{
-        "container_path" => vol["container_path"],
-        "description" => vol["description"],
-        "optional" => vol["optional"] == "true"
-      }
-    end)
-  end
+  defp parse_port_params(ports_map), do: ConfigForm.parse_ports(ports_map)
+
+  defp parse_volume_params(volumes_map), do: VolumeSpec.parse(volumes_map)
+
+  # `[]` here means "this template declares none", which is NOT the same as "no
+  # override": `Access.effective_*` inherits only on nil, so storing [] would win over
+  # the template rather than defer to it.
+  defp blank_to_nil_list([]), do: nil
+  defp blank_to_nil_list(nil), do: nil
+  defp blank_to_nil_list(list), do: list
 
   defp slugify(name) do
     name
