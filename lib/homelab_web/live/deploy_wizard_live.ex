@@ -3,6 +3,7 @@ defmodule HomelabWeb.DeployWizardLive do
 
   alias Homelab.Catalog
   alias Homelab.Deployments.Access
+  alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.CatalogEntry
   alias Homelab.Catalog.MetadataEnricher
@@ -47,6 +48,18 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:adv_routed_port, "")
       |> assign(:adv_sticky, false)
       |> assign(:adv_restart_policy, "on-failure")
+      # Kernel privileges, at CREATE time. An app that needs NET_ADMIN or a device to
+      # function at all cannot be deployed first and fixed afterwards — it fails its
+      # healthcheck, the release rolls back, and the Runtime card that would have fixed
+      # it never becomes reachable.
+      |> assign(:adv_capabilities_add, "")
+      |> assign(:adv_devices, "")
+      |> assign(:adv_sysctls, "")
+      # Whose network stack this container will use. Offered at CREATE rather than only
+      # afterwards, because an app meant to live behind a VPN must not come up outside
+      # it even once — the first boot is the leak.
+      |> assign(:network_parent_id, nil)
+      |> assign(:netns_candidates, [])
       |> assign(:enriching, nil)
       |> assign(:custom_image, "")
       |> assign(:custom_name, "")
@@ -196,6 +209,7 @@ defmodule HomelabWeb.DeployWizardLive do
               "external" => p["external"],
               "description" => p["description"],
               "role" => p["role"],
+              "protocol" => Access.port_protocol(p),
               "optional" => p["optional"]
             }
           end),
@@ -359,7 +373,10 @@ defmodule HomelabWeb.DeployWizardLive do
      |> assign(:adv_cpu_shares, advanced["cpu_shares"] || "")
      |> assign(:adv_routed_port, advanced["routed_port"] || "")
      |> assign(:adv_restart_policy, advanced["restart_policy"] || "on-failure")
-     |> assign(:adv_sticky, advanced["sticky"] == "true")}
+     |> assign(:adv_sticky, advanced["sticky"] == "true")
+     |> assign(:adv_capabilities_add, advanced["capabilities_add"] || "")
+     |> assign(:adv_devices, advanced["devices"] || "")
+     |> assign(:adv_sysctls, advanced["sysctls"] || "")}
   end
 
   # --- Events: Compose ---
@@ -428,6 +445,7 @@ defmodule HomelabWeb.DeployWizardLive do
             "description" => "",
             "optional" => "true",
             "role" => "other",
+            "protocol" => "tcp",
             "published" => false
           }
         ]
@@ -785,6 +803,18 @@ defmodule HomelabWeb.DeployWizardLive do
       socket
       |> assign(:domain, network_params["domain"] || socket.assigns.domain)
       |> assign(:tenant_id, non_blank(network_params["tenant_id"]) || socket.assigns.tenant_id)
+      # `""` is a real value — the operator choosing "its own network" — so it must not
+      # fall through to the previous choice the way a blank domain does.
+      |> assign(
+        :network_parent_id,
+        Map.get(network_params, "network_parent_id", socket.assigns.network_parent_id)
+      )
+      # The candidate list is per-space, so changing space changes it.
+      |> assign_netns_candidates()
+      # Host ports and host networking are unreachable from inside another container's
+      # namespace. Silently leaving one selected would deploy an access mode the
+      # changeset then refuses, with the error pointing at a field two steps back.
+      |> reset_access_if_netns()
 
     {:noreply, socket}
   end
@@ -800,8 +830,12 @@ defmodule HomelabWeb.DeployWizardLive do
   # Access model: choose the access mode (proxy/host/internal) and, for proxy,
   # the auth level. Both derive the canonical `exposure_mode`.
   def handle_event("update_access", %{"access" => access}, socket) do
-    exposure = Access.exposure_for(access, socket.assigns.auth)
-    {:noreply, socket |> assign(:access, access) |> assign(:exposure_mode, exposure)}
+    if netns_forbidden_access?(socket.assigns.network_parent_id, access) do
+      {:noreply, socket}
+    else
+      exposure = Access.exposure_for(access, socket.assigns.auth)
+      {:noreply, socket |> assign(:access, access) |> assign(:exposure_mode, exposure)}
+    end
   end
 
   def handle_event("update_auth", %{"auth" => auth}, socket) do
@@ -861,6 +895,7 @@ defmodule HomelabWeb.DeployWizardLive do
           image_override: socket.assigns[:image_override]
         }
         |> Map.merge(advanced_attrs(socket))
+        |> Map.merge(netns_attrs(socket))
 
       case Homelab.Deployments.deploy_now(attrs) do
         {:ok, _deployment} ->
@@ -891,6 +926,25 @@ defmodule HomelabWeb.DeployWizardLive do
       ports = parse_port_params(params["ports"])
       volumes = parse_volume_params(params["volumes"])
 
+      # The config step edits a FLATTENED, deduped view of every service's ports, volumes
+      # and env — and this handler used to read each service's RAW parsed values instead,
+      # so every edit made on that screen was silently discarded.
+      #
+      # It bites hardest on folder mounts. Compose writes them relative (`./config:/config`),
+      # which cannot be resolved without the project directory, so the config step exists
+      # precisely to let the operator supply the real host path — and then the import used
+      # the relative one anyway, failed volume validation, dropped the service, and reported
+      # "Could not start the deployment". The wizard looked like it did not support folder
+      # mounts at all.
+      #
+      # Edits are keyed back to services by the SAME key the flattening deduped on, which is
+      # the only correspondence that exists.
+      edits = %{
+        volumes: index_by(volumes, "container_path"),
+        ports: index_by(ports, "internal"),
+        env: index_by(parse_env_rows(params), "key")
+      }
+
       main_result =
         if main_template && main_template.id do
           template_updates = %{
@@ -901,21 +955,47 @@ defmodule HomelabWeb.DeployWizardLive do
 
           Catalog.update_app_template(main_template, template_updates)
 
-          Homelab.Deployments.create_deployment(%{
-            tenant_id: String.to_integer(tenant_id),
-            app_template_id: main_template.id,
-            domain: domain,
-            env_overrides: env_overrides
-          })
+          Homelab.Deployments.create_deployment(
+            %{
+              tenant_id: String.to_integer(tenant_id),
+              app_template_id: main_template.id,
+              domain: domain,
+              env_overrides: env_overrides
+            }
+            # The Advanced panel is rendered on the review step for BOTH paths, but only
+            # the plain "deploy" handler ever read it — a compose import silently threw
+            # away every limit, routed port and restart policy the operator had just
+            # filled in, with the panel still showing them on screen.
+            |> Map.merge(advanced_attrs(socket))
+          )
         end
 
-      # Create the companion deployment ROWS (no domain — companions are internal
-      # dependencies, never ingress-published). The release saga deploys them.
-      companion_deployments =
+      # Which compose service is the APP. `deploy_release/2` needs one: it deploys the
+      # companions first and the app last, and only the app's ingress is published.
+      #
+      # When a template was chosen separately, that is the app and every compose service
+      # is a companion. When it was NOT — a plain "paste a compose file" import, which is
+      # the common case — nothing used to fill the role: `main_result` stayed nil, so the
+      # handler created every deployment ROW and then fell through to "Could not start the
+      # deployment", leaving orphaned `:pending` rows and planning no release at all. The
+      # import dead-ended at exactly the point it looked like it had worked.
+      primary_name =
+        if main_result, do: nil, else: ComposeParser.primary_name(socket.assigns.compose_services)
+
+      # Create the compose deployment ROWS. Companions carry no domain — they are internal
+      # dependencies, never ingress-published. The release saga deploys them.
+      compose_deployments =
         socket.assigns.compose_services
         |> Enum.map(fn svc ->
+          primary? = primary_name != nil and svc[:name] == primary_name
           slug = slugify(svc[:name] || "compose-service")
           image = svc[:image] || ""
+
+          # This service's rows, with whatever the operator changed on the config step
+          # applied over them. Without this the screen is decorative on the compose path.
+          svc_ports = apply_edits(svc[:ports], edits.ports, "internal")
+          svc_volumes = apply_edits(svc[:volumes], edits.volumes, "container_path", "path")
+          svc_env = apply_edits(svc[:env], edits.env, "key")
 
           template_attrs = %{
             slug: slug,
@@ -925,49 +1005,103 @@ defmodule HomelabWeb.DeployWizardLive do
             description: "From compose file",
             source: "compose",
             source_id: image,
-            ports: svc[:ports] || [],
+            ports: svc_ports,
             # Through VolumeSpec, so a companion's folder mounts keep their host paths.
             # A database companion is exactly where dropping them hurts most.
-            volumes: VolumeSpec.parse(svc[:volumes] || []),
+            volumes: VolumeSpec.parse(svc_volumes),
             default_env:
-              svc[:env]
+              svc_env
               |> Enum.filter(fn %{"value" => v} -> v != "" end)
               |> Map.new(fn %{"key" => k, "value" => v} -> {k, v} end),
             required_env:
-              svc[:env]
+              svc_env
               |> Enum.filter(fn %{"value" => v} -> v == "" end)
               |> Enum.map(fn %{"key" => k} -> k end),
             depends_on: svc[:depends_on] || [],
-            exposure_mode: String.to_existing_atom(exposure_mode)
+            exposure_mode: String.to_existing_atom(exposure_mode),
+            # What the service is allowed to ask the KERNEL for. Dropping these was the
+            # difference between an import that looks complete and a container that
+            # cannot do its job — a VPN client with no NET_ADMIN starts, fails to open
+            # a tunnel, and reports it as its own error.
+            capabilities_add: blank_to_nil_list(svc[:capabilities_add]),
+            capabilities_drop: blank_to_nil_list(svc[:capabilities_drop]),
+            devices: blank_to_nil_list(svc[:devices]),
+            sysctls: svc[:sysctls] || %{},
+            # Both already existed on the template and were still never imported.
+            command: svc[:command],
+            entrypoint: svc[:entrypoint]
           }
 
-          template = resolve_compose_template(slug, template_attrs)
-
-          if template do
+          with {:ok, template} <- resolve_compose_template(slug, template_attrs) do
             svc_env_overrides =
-              (svc[:env] || [])
+              svc_env
               |> Enum.reject(fn %{"value" => v} -> v == "" end)
               |> Map.new(fn %{"key" => k, "value" => v} -> {k, v} end)
 
-            case Homelab.Deployments.create_deployment(%{
-                   tenant_id: String.to_integer(tenant_id),
-                   app_template_id: template.id,
-                   domain: nil,
-                   env_overrides: svc_env_overrides,
-                   # This compose service's shape belongs to THIS deployment, not to a
-                   # template other deployments inherit from.
-                   ports_override: blank_to_nil_list(template_attrs.ports),
-                   volumes_override: blank_to_nil_list(template_attrs.volumes)
-                 }) do
-              {:ok, deployment} -> deployment
-              _ -> nil
+            attrs =
+              %{
+                tenant_id: String.to_integer(tenant_id),
+                app_template_id: template.id,
+                domain: if(primary?, do: domain, else: nil),
+                env_overrides: svc_env_overrides,
+                # This compose service's shape belongs to THIS deployment, not to a
+                # template other deployments inherit from.
+                ports_override: blank_to_nil_list(template_attrs.ports),
+                volumes_override: blank_to_nil_list(template_attrs.volumes),
+                # `restart:` has a home (`restart_policy_override`) but has never been
+                # imported, so every compose service arrived on the platform default
+                # regardless of what its file said.
+                restart_policy_override: svc[:restart]
+              }
+              # The Advanced panel describes ONE workload, so it applies to the app and
+              # not to its companions — a routed port or memory ceiling copied onto five
+              # services is not what the operator asked for.
+              |> then(fn attrs ->
+                if primary?, do: Map.merge(attrs, advanced_attrs(socket)), else: attrs
+              end)
+
+            case Homelab.Deployments.create_deployment(attrs) do
+              {:ok, deployment} ->
+                {:ok, {primary?, deployment}}
+
+              {:error, changeset} ->
+                {:error, {svc[:name] || slug, changeset_message(changeset)}}
             end
+          else
+            {:error, message} -> {:error, {svc[:name] || slug, message}}
           end
         end)
-        |> Enum.reject(&is_nil/1)
 
-      case main_result do
-        {:ok, app_deployment} ->
+      {created, failures} =
+        Enum.split_with(compose_deployments, &match?({:ok, _}, &1))
+
+      compose_deployments = Enum.map(created, fn {:ok, entry} -> entry end)
+      failures = Enum.map(failures, fn {:error, failure} -> failure end)
+
+      {app_deployment, companion_deployments} =
+        resolve_compose_app(main_result, compose_deployments)
+
+      cond do
+        # Nothing usable came out. Say WHICH service and WHY — the old flash named
+        # neither, which is how "this wizard does not support folder mounts" became the
+        # obvious conclusion from "my compose file imported to nothing".
+        is_nil(app_deployment) ->
+          {:noreply, put_flash(socket, :error, compose_failure_message(failures))}
+
+        failures != [] ->
+          {:ok, _release} =
+            Homelab.Deployments.deploy_release(app_deployment, companion_deployments)
+
+          {:noreply,
+           socket
+           |> put_flash(
+             :error,
+             "Deployed #{length(companion_deployments) + 1} service(s), but skipped " <>
+               "#{describe_failures(failures)}"
+           )
+           |> push_navigate(to: ~p"/")}
+
+        true ->
           {:ok, _release} =
             Homelab.Deployments.deploy_release(app_deployment, companion_deployments)
 
@@ -978,10 +1112,39 @@ defmodule HomelabWeb.DeployWizardLive do
              "Deployment started — provisioning #{length(companion_deployments) + 1} service(s)."
            )
            |> push_navigate(to: ~p"/")}
-
-        _ ->
-          {:noreply, put_flash(socket, :error, "Could not start the deployment.")}
       end
+    end
+  end
+
+  defp compose_failure_message([]), do: "Could not start the deployment."
+
+  defp compose_failure_message(failures),
+    do: "Could not start the deployment — #{describe_failures(failures)}"
+
+  defp describe_failures(failures) do
+    Enum.map_join(failures, "; ", fn {name, message} -> "#{name}: #{message}" end)
+  end
+
+  # Splits the created rows into the one app and its companions.
+  #
+  # A separately-chosen template is the app and every compose service is a companion.
+  # Otherwise the app is the row flagged primary during creation; the fallback to the
+  # first row matters when the primary service's template could not be resolved, and is
+  # still better than the old behaviour of deploying nothing.
+  defp resolve_compose_app({:ok, main_deployment}, compose_deployments) do
+    {main_deployment, Enum.map(compose_deployments, fn {_primary?, d} -> d end)}
+  end
+
+  defp resolve_compose_app(_main_result, compose_deployments) do
+    case Enum.split_with(compose_deployments, fn {primary?, _d} -> primary? end) do
+      {[{_primary?, app} | extra], companions} ->
+        {app, Enum.map(extra ++ companions, fn {_primary?, d} -> d end)}
+
+      {[], [{_primary?, app} | companions]} ->
+        {app, Enum.map(companions, fn {_primary?, d} -> d end)}
+
+      {[], []} ->
+        {nil, []}
     end
   end
 
@@ -1072,6 +1235,7 @@ defmodule HomelabWeb.DeployWizardLive do
             "external" => port["external"],
             "description" => port["description"],
             "role" => port["role"] || "other",
+            "protocol" => Access.port_protocol(port),
             "optional" => port["optional"] || false,
             "published" => port["published"] || false
           }
@@ -1213,6 +1377,9 @@ defmodule HomelabWeb.DeployWizardLive do
             adv_routed_port={@adv_routed_port}
             adv_restart_policy={@adv_restart_policy}
             adv_sticky={@adv_sticky}
+            adv_capabilities_add={@adv_capabilities_add}
+            adv_devices={@adv_devices}
+            adv_sysctls={@adv_sysctls}
           />
         <% else %>
           <.step_indicator current={@step} deploy_type={@deploy_type} />
@@ -1244,6 +1411,8 @@ defmodule HomelabWeb.DeployWizardLive do
               exposure_mode={@exposure_mode}
               tenant_id={@tenant_id}
               tenants={@tenants}
+              network_parent_id={@network_parent_id}
+              netns_candidates={@netns_candidates}
             />
             <.step_config
               :if={@step == "config"}
@@ -1279,6 +1448,9 @@ defmodule HomelabWeb.DeployWizardLive do
               adv_routed_port={@adv_routed_port}
               adv_restart_policy={@adv_restart_policy}
               adv_sticky={@adv_sticky}
+              adv_capabilities_add={@adv_capabilities_add}
+              adv_devices={@adv_devices}
+              adv_sysctls={@adv_sysctls}
             />
           </div>
         <% end %>
@@ -1824,6 +1996,21 @@ defmodule HomelabWeb.DeployWizardLive do
                         class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
                       />
                     </div>
+                    <div class="w-20">
+                      <label class="block text-[10px] text-base-content/30 mb-0.5">Proto</label>
+                      <select
+                        name={"ports[#{idx}][protocol]"}
+                        class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-1.5 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option
+                          :for={proto <- ~w(tcp udp)}
+                          value={proto}
+                          selected={proto == Access.port_protocol(port)}
+                        >
+                          {String.upcase(proto)}
+                        </option>
+                      </select>
+                    </div>
                     <div class="w-24">
                       <label class="block text-[10px] text-base-content/30 mb-0.5">Role</label>
                       <select
@@ -1842,6 +2029,15 @@ defmodule HomelabWeb.DeployWizardLive do
                       </select>
                     </div>
                   </div>
+                  <%!-- A UDP port cannot be reached through Traefik, whose http services
+                     speak TCP only. Said at the point of choice rather than left to be
+                     discovered after a clean-looking deploy that routes nothing. --%>
+                  <p
+                    :if={Access.udp?(port) && @exposure_mode not in ~w(host host_network)}
+                    class="mt-1 text-[10px] text-warning"
+                  >
+                    UDP is not proxied — use Host ports access to publish it.
+                  </p>
                   <%!-- Host binding only appears in Host-ports access; every listed
                      port binds. Proxy/internal modes keep the value but don't bind. --%>
                   <div :if={@exposure_mode == "host"} class="flex items-center gap-2 mt-1.5">
@@ -2381,6 +2577,50 @@ defmodule HomelabWeb.DeployWizardLive do
             Enables reverse proxy routing on ports 80/443.
           </p>
         </div>
+
+        <%!-- Whose network stack this container uses. Offered here rather than only
+              after deploying, because an app meant to run behind a VPN must never come
+              up outside it even once. --%>
+        <div
+          :if={@netns_candidates != []}
+          class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2"
+        >
+          <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
+            <.icon name="hero-lock-closed-mini" class="size-4 text-warning" /> Network
+          </h3>
+          <select
+            id="netns-select"
+            name="network[network_parent_id]"
+            class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >
+            <option value="" selected={@network_parent_id in [nil, ""]}>
+              Its own network (default)
+            </option>
+            <option
+              :for={candidate <- @netns_candidates}
+              value={to_string(candidate.id)}
+              selected={to_string(candidate.id) == to_string(@network_parent_id)}
+            >
+              Through {candidate.app_template.name}
+            </option>
+          </select>
+          <p
+            :if={@network_parent_id in [nil, ""]}
+            class="text-[10px] text-base-content/30 mt-1.5"
+          >
+            Route all of this container's traffic through another container — how an app is
+            put behind a VPN client.
+          </p>
+          <div
+            :if={@network_parent_id not in [nil, ""]}
+            class="rounded-md bg-warning/10 border border-warning/20 p-2.5 mt-2 text-[11px] text-base-content/70 leading-relaxed"
+          >
+            Every packet goes through that container, and nothing goes around it. This one gets
+            no ports, no network aliases and no address of its own; anything else sharing that
+            network reaches it on <code phx-no-curly-interpolation>localhost</code>, and Traefik reaches it via the other
+            container. Host ports and host networking are not available.
+          </div>
+        </div>
       </.form>
 
       <%!-- Access (single coherent choice: proxy XOR host ports XOR host network XOR internal) --%>
@@ -2402,6 +2642,8 @@ defmodule HomelabWeb.DeployWizardLive do
             icon="hero-server-stack"
             title="Host ports"
             desc="Bind container ports to the host"
+            disabled={@network_parent_id not in [nil, ""]}
+            disabled_desc="No ports of its own to bind while routing through another container"
           />
           <.access_option
             access="host_network"
@@ -2409,6 +2651,8 @@ defmodule HomelabWeb.DeployWizardLive do
             icon="hero-signal"
             title="Host network"
             desc="Share the host's network namespace"
+            disabled={@network_parent_id not in [nil, ""]}
+            disabled_desc="A container has one network namespace, and this one uses another container's"
           />
           <.access_option
             access="internal"
@@ -2485,23 +2729,38 @@ defmodule HomelabWeb.DeployWizardLive do
     """
   end
 
+  # `disabled` rather than hidden: a tile that vanishes reads as a missing feature,
+  # where a greyed one with a reason reads as a consequence of the choice above it.
+  attr :access, :string, required: true
+  attr :current, :string, required: true
+  attr :icon, :string, required: true
+  attr :title, :string, required: true
+  attr :desc, :string, required: true
+  attr :disabled, :boolean, default: false
+  attr :disabled_desc, :string, default: nil
+
   defp access_option(assigns) do
     ~H"""
     <button
       type="button"
       phx-click="update_access"
       phx-value-access={@access}
+      disabled={@disabled}
       class={[
-        "text-left py-2.5 px-3 rounded-md border-2 transition-all cursor-pointer",
-        if(@current == @access,
+        "text-left py-2.5 px-3 rounded-md border-2 transition-all",
+        if(@disabled, do: "opacity-40 cursor-not-allowed", else: "cursor-pointer"),
+        if(@current == @access and not @disabled,
           do: "border-primary bg-primary/5",
-          else: "border-base-content/5 bg-base-200/30 hover:border-base-content/15"
-        )
+          else: "border-base-content/5 bg-base-200/30"
+        ),
+        not @disabled && "hover:border-base-content/15"
       ]}
     >
       <.icon name={@icon} class="size-4 mb-1 text-primary" />
       <h4 class="text-xs font-semibold text-base-content">{@title}</h4>
-      <p class="text-[10px] text-base-content/40 mt-0.5 leading-snug">{@desc}</p>
+      <p class="text-[10px] text-base-content/40 mt-0.5 leading-snug">
+        {if(@disabled and @disabled_desc, do: @disabled_desc, else: @desc)}
+      </p>
     </button>
     """
   end
@@ -2538,6 +2797,9 @@ defmodule HomelabWeb.DeployWizardLive do
   attr :routed_port, :string, required: true
   attr :restart_policy, :string, required: true
   attr :sticky, :boolean, required: true
+  attr :capabilities_add, :string, required: true
+  attr :devices, :string, required: true
+  attr :sysctls, :string, required: true
 
   defp advanced_panel(assigns) do
     ~H"""
@@ -2623,6 +2885,50 @@ defmodule HomelabWeb.DeployWizardLive do
             class="rounded border-base-content/20"
           /> Sticky sessions — pin each visitor to one replica
         </label>
+
+        <div class="sm:col-span-2 pt-3 mt-1 border-t border-base-content/5">
+          <h5 class="text-xs font-semibold text-base-content/70">Kernel privileges</h5>
+          <p class="text-[10px] text-base-content/40 mt-0.5 leading-snug">
+            Needed by VPN clients, USB/serial coordinators and anything managing its own
+            network stack. Free text here; the deployment's Runtime card gives each of these
+            a proper editor once it exists.
+          </p>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">Capabilities added</label>
+          <textarea
+            name="advanced[capabilities_add]"
+            rows="2"
+            placeholder="NET_ADMIN"
+            class="rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >{@capabilities_add}</textarea>
+          <p class="text-xs text-base-content/40">One per line. The CAP_ prefix is optional.</p>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-xs font-medium text-base-content/50">Devices</label>
+          <textarea
+            name="advanced[devices]"
+            rows="2"
+            placeholder="/dev/net/tun"
+            class="rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >{@devices}</textarea>
+          <p class="text-xs text-base-content/40">
+            One per line, <code phx-no-curly-interpolation>host[:container[:rwm]]</code>.
+          </p>
+        </div>
+        <div class="flex flex-col gap-1 sm:col-span-2">
+          <label class="text-xs font-medium text-base-content/50">Sysctls</label>
+          <textarea
+            name="advanced[sysctls]"
+            rows="2"
+            placeholder="net.ipv4.conf.all.src_valid_mark=1"
+            class="rounded-md bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >{@sysctls}</textarea>
+          <p class="text-xs text-base-content/40">
+            One <code phx-no-curly-interpolation>key=value</code>
+            per line. Only net.*, fs.mqueue.* and the kernel IPC limits.
+          </p>
+        </div>
       </.form>
     </details>
     """
@@ -2656,6 +2962,9 @@ defmodule HomelabWeb.DeployWizardLive do
         routed_port={@adv_routed_port}
         restart_policy={@adv_restart_policy}
         sticky={@adv_sticky}
+        capabilities_add={@adv_capabilities_add}
+        devices={@adv_devices}
+        sysctls={@adv_sysctls}
       />
 
       <.form
@@ -2745,6 +3054,11 @@ defmodule HomelabWeb.DeployWizardLive do
                 <input type="hidden" name={"ports[#{idx}][role]"} value={port["role"] || "other"} />
                 <input
                   type="hidden"
+                  name={"ports[#{idx}][protocol]"}
+                  value={Access.port_protocol(port)}
+                />
+                <input
+                  type="hidden"
                   name={"ports[#{idx}][description]"}
                   value={port["description"] || ""}
                 />
@@ -2764,6 +3078,7 @@ defmodule HomelabWeb.DeployWizardLive do
                 <% else %>
                   {port["internal"]}
                 <% end %>
+                <span :if={Access.udp?(port)} class="text-base-content/40">/udp</span>
                 <span :if={port["role"] == "web"} class="text-[9px] text-info font-sans">web</span>
               </span>
             </div>
@@ -2957,6 +3272,9 @@ defmodule HomelabWeb.DeployWizardLive do
           routed_port={@adv_routed_port}
           restart_policy={@adv_restart_policy}
           sticky={@adv_sticky}
+          capabilities_add={@adv_capabilities_add}
+          devices={@adv_devices}
+          sysctls={@adv_sysctls}
         />
         <div class="rounded-lg bg-base-100 border border-base-content/[0.06] p-4">
           <h4 class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-3">
@@ -2987,6 +3305,12 @@ defmodule HomelabWeb.DeployWizardLive do
               type="hidden"
               name={"ports[#{idx}][role]"}
               value={port["role"] || "other"}
+            />
+            <input
+              :for={{port, idx} <- Enum.with_index(@ports)}
+              type="hidden"
+              name={"ports[#{idx}][protocol]"}
+              value={Access.port_protocol(port)}
             />
             <input
               :for={{port, idx} <- Enum.with_index(@ports)}
@@ -3081,6 +3405,18 @@ defmodule HomelabWeb.DeployWizardLive do
       end)
 
     required_items ++ default_items
+  end
+
+  # The env editor's rows as rows, blanks KEPT — a blank value is not noise here, it is
+  # what marks a variable required. `build_env_overrides/1` drops them because it builds
+  # the override map; the compose path needs the distinction.
+  defp parse_env_rows(params) do
+    params["env"]
+    |> Kernel.||(%{})
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{"key" => row["key"] || "", "value" => row["value"] || ""}
+    end)
   end
 
   defp build_env_overrides(params) do
@@ -3250,6 +3586,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> put_present(p, "internal")
       |> put_present(p, "external")
       |> put_present(p, "role")
+      |> put_present(p, "protocol")
       |> Map.put("published", p["published"] == "true")
     end)
   end
@@ -3315,14 +3652,10 @@ defmodule HomelabWeb.DeployWizardLive do
     end
   end
 
-  defp sensitive_key?(nil), do: false
-
-  defp sensitive_key?(key) do
-    key = String.upcase(key)
-
-    String.contains?(key, "PASSWORD") or String.contains?(key, "SECRET") or
-      String.contains?(key, "KEY") or String.contains?(key, "TOKEN")
-  end
+  # One definition, shared with the API serializer and the deployment page. The copy
+  # that lived here missed `DATABASE_URL`, `*_PASS` and `*_DSN`, and treated
+  # `PUBLIC_KEY` as a secret — see `Homelab.SecretKeys`.
+  defp sensitive_key?(key), do: Homelab.SecretKeys.sensitive?(key)
 
   defp format_exposure("public"), do: "Public"
   defp format_exposure("sso_protected"), do: "SSO Protected"
@@ -3360,6 +3693,101 @@ defmodule HomelabWeb.DeployWizardLive do
       )
     )
     |> put_if(:proxy_options, if(socket.assigns.adv_sticky, do: %{"sticky" => true}))
+    # Left absent when blank rather than stored as [], so the template still wins —
+    # same rule the rest of this function follows. An operator who wants to CLEAR what
+    # the template grants does it on the Runtime card, which can express [].
+    |> put_if(
+      :capabilities_add_override,
+      blank_to_nil_list(RuntimeSpec.parse_capabilities(socket.assigns.adv_capabilities_add))
+    )
+    |> put_if(
+      :devices_override,
+      blank_to_nil_list(parse_device_lines(socket.assigns.adv_devices))
+    )
+    |> put_if(:sysctls_override, blank_to_nil_map(parse_sysctl_lines(socket.assigns.adv_sysctls)))
+  end
+
+  # `/dev/net/tun` or `/dev/sda:/dev/xvda:rw`, one per line — the compose spelling, so
+  # an operator can paste a line straight out of the file they are replacing.
+  defp parse_device_lines(text) do
+    (text || "")
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> RuntimeSpec.parse_devices()
+  end
+
+  defp parse_sysctl_lines(text) do
+    (text || "")
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> RuntimeSpec.parse_sysctls()
+  end
+
+  defp blank_to_nil_map(map) when map_size(map) == 0, do: nil
+  defp blank_to_nil_map(map), do: map
+
+  # Deployments in the chosen space that could host this container's network namespace.
+  # Excludes anything already inside another namespace (chains are not supported) and
+  # host-networked containers (which have no namespace of their own to share).
+  defp assign_netns_candidates(socket) do
+    candidates =
+      case socket.assigns.tenant_id do
+        nil ->
+          []
+
+        "" ->
+          []
+
+        tenant_id ->
+          tenant_id
+          |> to_string()
+          |> String.to_integer()
+          |> Homelab.Deployments.list_deployments_for_tenant()
+          |> Enum.filter(fn candidate ->
+            is_nil(candidate.network_parent_id) and not Access.host_network_mode?(candidate)
+          end)
+          |> Enum.sort_by(& &1.app_template.name)
+      end
+
+    socket
+    |> assign(:netns_candidates, candidates)
+    # A donor selected and then made ineligible (space changed, container removed) must
+    # not survive as an id pointing at nothing.
+    |> then(fn socket ->
+      if socket.assigns.network_parent_id in [nil, ""] or
+           Enum.any?(
+             candidates,
+             &(to_string(&1.id) == to_string(socket.assigns.network_parent_id))
+           ) do
+        socket
+      else
+        assign(socket, :network_parent_id, nil)
+      end
+    end)
+  end
+
+  defp reset_access_if_netns(socket) do
+    if netns_forbidden_access?(socket.assigns.network_parent_id, socket.assigns.access) do
+      socket
+      |> assign(:access, "proxy")
+      |> assign(:exposure_mode, Access.exposure_for("proxy", socket.assigns.auth))
+    else
+      socket
+    end
+  end
+
+  defp netns_forbidden_access?(parent_id, access) when parent_id not in [nil, ""],
+    do: access in ["host", "host_network"]
+
+  defp netns_forbidden_access?(_parent_id, _access), do: false
+
+  defp netns_attrs(socket) do
+    case socket.assigns.network_parent_id do
+      id when id in [nil, ""] -> %{}
+      id -> %{network_parent_id: to_string(id) |> String.to_integer()}
+    end
   end
 
   defp put_if(map, _key, nil), do: map
@@ -3393,7 +3821,7 @@ defmodule HomelabWeb.DeployWizardLive do
     case Catalog.get_app_template_by_slug(slug) do
       {:ok, template} ->
         if template.image == attrs.image,
-          do: template,
+          do: {:ok, template},
           else: create_template(%{attrs | slug: unique_slug(slug)})
 
       {:error, :not_found} ->
@@ -3401,12 +3829,61 @@ defmodule HomelabWeb.DeployWizardLive do
     end
   end
 
+  # `{:error, message}` rather than nil, because the alternative is what this used to do:
+  # swallow the changeset, hand back nil, and let the caller's `reject(&is_nil/1)` delete
+  # the service. A compose file whose folder mount could not be resolved imported to
+  # NOTHING — no template, no deployment — under a flash that said "Could not start the
+  # deployment", which names neither the service nor the reason.
   defp create_template(attrs) do
     case Catalog.create_app_template(attrs) do
-      {:ok, template} -> template
-      {:error, _changeset} -> nil
+      {:ok, template} -> {:ok, template}
+      {:error, changeset} -> {:error, changeset_message(changeset)}
     end
   end
+
+  defp changeset_message(%Ecto.Changeset{} = changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
+      Enum.reduce(opts, message, fn {key, value}, acc ->
+        String.replace(acc, "%{#{key}}", to_string(value))
+      end)
+    end)
+    |> Enum.map_join("; ", fn {field, messages} ->
+      "#{field} #{Enum.join(messages, ", ")}"
+    end)
+  end
+
+  # Indexes the config step's edited rows by the key the flattening deduped on.
+  defp index_by(rows, key) do
+    rows
+    |> List.wrap()
+    |> Enum.reject(&blank?(&1[key]))
+    |> Map.new(&{to_string(&1[key]), &1})
+  end
+
+  # Overlays the operator's edits onto one service's rows, matched on `key` (with an
+  # optional fallback key, since the compose parser names a mount path `path` and the
+  # form names it `container_path`).
+  #
+  # Only rows this service actually declared are kept: a row the operator ADDED belongs
+  # to whichever service they were looking at, and there is no way to know which — so
+  # inventing an owner would silently attach one app's volume to another.
+  defp apply_edits(rows, edited, key, fallback_key \\ nil) do
+    rows
+    |> List.wrap()
+    |> Enum.map(fn row ->
+      lookup = row[key] || (fallback_key && row[fallback_key])
+
+      case Map.get(edited, to_string(lookup)) do
+        nil -> row
+        edit -> Map.merge(row, edit)
+      end
+    end)
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: false
 
   defp unique_slug(slug), do: "#{slug}-#{System.unique_integer([:positive]) |> rem(10_000)}"
 
@@ -3446,9 +3923,18 @@ defmodule HomelabWeb.DeployWizardLive do
             true -> "#{image_slug}:latest"
           end
 
+        # Through VolumeSpec, and carrying `type`/`source` — dropping them here forced
+        # every catalog app onto a managed volume regardless of what the entry said, so
+        # an app meant to read an existing library came up pointed at an empty one.
         volumes =
           Enum.map(entry.required_volumes, fn vol ->
-            %{"container_path" => vol["path"], "description" => vol["description"]}
+            VolumeSpec.normalize(%{
+              "container_path" => vol["container_path"] || vol["path"],
+              "type" => vol["type"],
+              "source" => vol["source"],
+              "description" => vol["description"],
+              "optional" => vol["optional"]
+            })
           end)
 
         ports =
@@ -3476,7 +3962,15 @@ defmodule HomelabWeb.DeployWizardLive do
           required_env: entry.required_env || [],
           default_env: entry.default_env || %{},
           volumes: volumes,
-          ports: ports
+          ports: ports,
+          # What the app needs from the kernel, and whether it can host other
+          # containers' networking. `blank_to_nil_list` so an entry that declares none
+          # leaves the columns NULL rather than storing an empty override.
+          capabilities_add: blank_to_nil_list(entry.capabilities_add),
+          capabilities_drop: blank_to_nil_list(entry.capabilities_drop),
+          devices: blank_to_nil_list(entry.devices),
+          sysctls: entry.sysctls || %{},
+          netns_donor_kind: entry.netns_donor_kind
         }
 
         case Catalog.create_app_template(attrs) do
@@ -3512,6 +4006,16 @@ defmodule HomelabWeb.DeployWizardLive do
       required_volumes: data["required_volumes"] || [],
       default_env: data["default_env"] || %{},
       required_env: data["required_env"] || [],
+      # `encode_entry/1` serializes the WHOLE struct, but this rebuilds it field by field
+      # — so anything omitted here silently reverts to its defstruct default. Leaving
+      # these five out meant the catalog's Gluetun entry round-tripped through the picker
+      # with NET_ADMIN, /dev/net/tun and its sysctl stripped, and deployed a VPN client
+      # that cannot open a tunnel while reporting success.
+      capabilities_add: data["capabilities_add"] || [],
+      capabilities_drop: data["capabilities_drop"] || [],
+      devices: data["devices"] || [],
+      sysctls: data["sysctls"] || %{},
+      netns_donor_kind: data["netns_donor_kind"],
       alt_sources: data["alt_sources"] || [],
       stars: data["stars"] || 0,
       pulls: data["pulls"] || 0,
