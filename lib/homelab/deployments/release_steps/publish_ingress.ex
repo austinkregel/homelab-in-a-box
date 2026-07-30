@@ -1,12 +1,19 @@
 defmodule Homelab.Deployments.ReleaseSteps.PublishIngress do
   @moduledoc """
-  Grants external reachability by connecting the reverse proxy to the deployment's
-  network — the single, idempotent action that exposes a release, run only after
-  the app has reached healthy. Mirrors the reconciler's ingress invariant.
+  Grants external reachability by attaching the app's workload to the shared ingress
+  network — the single, idempotent action that exposes a release, run only after the
+  app has reached healthy. Mirrors the reconciler's ingress invariant.
 
-  Network is `resource_handle["network"]` or, failing that, derived from the app
-  deployment. `compensate/2` unpublishes, so a rolled-back release is never left
-  externally reachable.
+  `compensate/2` detaches it again, so a rolled-back release is never left externally
+  reachable.
+
+  That last sentence used to be false. Both this step and its compensation acted on
+  `homelab_<tenant>_<app>_net`, a per-deployment network nothing is ever attached to —
+  connecting and disconnecting Traefik from an empty network changes nothing, so a
+  rolled-back release stayed reachable and the step reported success either way.
+  Traefik resolves a backend by the container's address on the network named in its
+  `traefik.docker.network` label, so it is the WORKLOAD's membership of that network
+  that decides reachability.
   """
 
   @behaviour Homelab.Deployments.ReleaseStep.Handler
@@ -14,35 +21,44 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishIngress do
   require Logger
 
   alias Homelab.Deployments
-  alias Homelab.Deployments.SpecBuilder
 
   @impl true
-  def run(step, ctx) do
-    network = network_for(step, ctx)
+  def run(_step, ctx) do
+    deployment = Deployments.get_deployment!(ctx.deployment.id)
 
-    case orchestrator().publish(network) do
-      :ok -> {:ok, %{"network" => network, "published" => true}}
-      {:error, reason} -> {:error, {:publish_failed, network, reason}}
+    case Deployments.publish_deployment(deployment) do
+      :ok ->
+        {:ok, %{"published" => true, "external_id" => deployment.external_id}}
+
+      {:error, reason} ->
+        {:error, {:publish_failed, deployment.id, reason}}
     end
   end
 
   @impl true
   def compensate(step, ctx) do
-    network = step.resource_handle["network"] || network_for(step, ctx)
-    _ = orchestrator().unpublish(network)
-    :ok
-  end
-
-  defp network_for(step, ctx) do
-    case step.resource_handle["network"] do
-      net when is_binary(net) ->
-        net
+    # Prefer the id this step actually published, so a compensation still severs the
+    # right container even if the row has since been reset. Falls back to the current
+    # row, and does nothing at all when neither yields one — a release that never got a
+    # container has nothing to detach.
+    case Deployments.get_deployment(ctx.deployment.id) do
+      {:ok, deployment} ->
+        _ = Deployments.unpublish_deployment(published_container(step, deployment))
+        :ok
 
       _ ->
-        deployment = Deployments.get_deployment!(ctx.deployment.id)
-        SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
+        :ok
     end
   end
 
-  defp orchestrator, do: Homelab.Config.orchestrator()
+  # Through `Deployments.unpublish_deployment/1` rather than the driver directly, so the
+  # "can this workload be attached at all?" rule lives in exactly one place. A container
+  # in another container's namespace was never on the ingress network and the daemon
+  # refuses to detach it.
+  defp published_container(step, deployment) do
+    case step.resource_handle["external_id"] do
+      id when is_binary(id) -> %{deployment | external_id: id}
+      _ -> deployment
+    end
+  end
 end
