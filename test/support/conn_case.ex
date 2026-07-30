@@ -43,4 +43,18 @@ defmodule HomelabWeb.ConnCase do
     |> Phoenix.ConnTest.init_test_session(%{})
     |> put_session(:user_id, user.id)
   end
+
+  @doc """
+  A conn with NO session — nobody is logged in.
+
+  The `conn` this case template hands every test is already authenticated, which is
+  convenient and was also how a completely unauthenticated `/api/v1` surface passed nine
+  test files: every one of them was logged in by accident, so none could observe that
+  the routes were not protected. Reach for this whenever the thing under test is
+  *whether* something is protected.
+  """
+  def unauthenticated_conn do
+    Phoenix.ConnTest.build_conn()
+    |> Phoenix.ConnTest.init_test_session(%{})
+  end
 end
