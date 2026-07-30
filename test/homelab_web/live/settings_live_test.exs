@@ -814,6 +814,10 @@ defmodule HomelabWeb.SettingsLiveTest do
       end)
 
       stub(Homelab.Mocks.DockerClient, :get, fn
+        # The Import section also asks whether anything is stranded on a Swarm service.
+        "/services", _opts ->
+          {:ok, []}
+
         "/containers/json?all=true", _opts ->
           {:ok, [%{"Id" => "abc123"}]}
 
@@ -868,6 +872,10 @@ defmodule HomelabWeb.SettingsLiveTest do
       end)
 
       stub(Homelab.Mocks.DockerClient, :get, fn
+        # The Import section also asks whether anything is stranded on a Swarm service.
+        "/services", _opts ->
+          {:ok, []}
+
         "/containers/json?all=true", _opts ->
           {:ok, [%{"Id" => "abc123"}]}
 
