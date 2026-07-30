@@ -161,4 +161,113 @@ defmodule HomelabWeb.SharedTemplateRewriteTest do
       assert String.starts_with?(minted.slug, "redis-")
     end
   end
+
+  # The rule this file exists for was applied to the wizard and missed on the Catalog
+  # page, which wrote the operator's edited ports, volumes AND exposure straight back to
+  # the shared row. Deploying an app into one space changed what every other space's
+  # deployment of it inherits.
+  #
+  # This file only ever asserted `image`, so it passed the whole time.
+  describe "catalog quick-deploy" do
+    setup %{tenant: tenant} do
+      shared =
+        insert(:app_template,
+          slug: "nginx",
+          name: "Nginx",
+          image: "nginx:1.25",
+          exposure_mode: :sso_protected,
+          ports: [%{"internal" => 80, "external" => 80, "role" => "web", "protocol" => "tcp"}],
+          volumes: [
+            %{
+              "container_path" => "/usr/share/nginx/html",
+              "type" => "bind",
+              "source" => "/srv/www",
+              "description" => "",
+              "optional" => false,
+              "read_only" => false
+            }
+          ]
+        )
+
+      other_space = insert(:tenant)
+      %{shared: shared, tenant: tenant, other_space: other_space}
+    end
+
+    defp deploy_from_catalog(conn, template, tenant, params) do
+      {:ok, view, _html} = live(conn, ~p"/catalog?template=#{template.id}")
+
+      render_click(
+        view,
+        "deploy",
+        Map.merge(%{"tenant_id" => to_string(tenant.id), "exposure_mode" => "public"}, params)
+      )
+
+      view
+    end
+
+    test "edited ports go to the DEPLOYMENT, leaving the shared template alone", ctx do
+      deploy_from_catalog(build_conn_authenticated(), ctx.shared, ctx.tenant, %{
+        "ports" => %{
+          "0" => %{"internal" => "80", "external" => "8888", "role" => "web", "protocol" => "tcp"}
+        }
+      })
+
+      assert Repo.reload!(ctx.shared).ports == [
+               %{"internal" => 80, "external" => 80, "role" => "web", "protocol" => "tcp"}
+             ]
+
+      deployment = Repo.get_by!(Deployment, app_template_id: ctx.shared.id)
+      assert [%{"external" => "8888"}] = deployment.ports_override
+    end
+
+    test "a bind mount survives the round-trip instead of becoming an empty volume", ctx do
+      # There were no `type`/`source` inputs, so a folder mount came back as a bare
+      # container path, VolumeSpec inferred a managed volume, and the app mounted an
+      # empty one where the operator's data was.
+      deploy_from_catalog(build_conn_authenticated(), ctx.shared, ctx.tenant, %{
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/usr/share/nginx/html",
+            "type" => "bind",
+            "source" => "/srv/www"
+          }
+        }
+      })
+
+      deployment = Repo.get_by!(Deployment, app_template_id: ctx.shared.id)
+
+      assert [%{"type" => "bind", "source" => "/srv/www"}] = deployment.volumes_override
+      assert [%{"type" => "bind", "source" => "/srv/www"}] = Repo.reload!(ctx.shared).volumes
+    end
+
+    test "a UDP port is not downgraded to TCP", ctx do
+      deploy_from_catalog(build_conn_authenticated(), ctx.shared, ctx.tenant, %{
+        "ports" => %{
+          "0" => %{"internal" => "53", "external" => "53", "role" => "other", "protocol" => "udp"}
+        }
+      })
+
+      deployment = Repo.get_by!(Deployment, app_template_id: ctx.shared.id)
+      assert [%{"protocol" => "udp"}] = deployment.ports_override
+    end
+
+    test "choosing an exposure does not move every other space's default", ctx do
+      deploy_from_catalog(build_conn_authenticated(), ctx.shared, ctx.tenant, %{
+        "exposure_mode" => "host"
+      })
+
+      assert Repo.reload!(ctx.shared).exposure_mode == :sso_protected
+
+      deployment = Repo.get_by!(Deployment, app_template_id: ctx.shared.id)
+      assert deployment.exposure_mode_override == "host"
+    end
+  end
+
+  defp build_conn_authenticated do
+    user = insert(:user)
+
+    Phoenix.ConnTest.build_conn()
+    |> Phoenix.ConnTest.init_test_session(%{})
+    |> Plug.Conn.put_session(:user_id, user.id)
+  end
 end
