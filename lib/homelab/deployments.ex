@@ -9,6 +9,7 @@ defmodule Homelab.Deployments do
   import Ecto.Query
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.Netns
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
@@ -48,6 +49,17 @@ defmodule Homelab.Deployments do
 
   def get_deployment!(id) do
     Repo.get!(Deployment, id) |> Repo.preload([:tenant, :app_template])
+  end
+
+  @doc """
+  Re-reads which deployments live in this one's network namespace, with their templates.
+
+  A fresh read rather than a cached association: the set changes when a SIBLING is
+  edited, so a page holding a stale copy would show — and derive a donor's firewall env
+  from — a group that no longer matches reality.
+  """
+  def reload_network_children(%Deployment{} = deployment) do
+    Repo.preload(deployment, [network_children: [:app_template, :tenant]], force: true)
   end
 
   def get_deployment_for_tenant(tenant_id, id) do
@@ -173,31 +185,64 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
-  Makes a proxy-mode deployment publicly reachable by connecting Traefik to its
-  per-deployment network. No-op unless it's a proxy mode with a domain. This is
-  the *only* action that grants external reachability.
+  Makes a proxy-mode deployment publicly reachable by attaching its workload to the
+  shared ingress network. No-op unless it's a proxy mode with a domain, or the
+  workload has no container yet.
+
+  This used to connect TRAEFIK to `homelab_<tenant>_<app>_net`, a per-deployment
+  network nothing is ever attached to — so it changed nothing and reported success.
   """
+  def publish_deployment(%Deployment{external_id: nil}), do: :ok
+
   def publish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
 
-    if ingress_published?(deployment) do
-      network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
-      Homelab.Config.orchestrator().publish(network)
+    if ingress_published?(deployment) and attachable?(deployment) do
+      Homelab.Config.orchestrator().publish(deployment.external_id, ingress_network())
     else
       :ok
     end
   end
 
+  # Whether this workload has a network endpoint that CAN be attached to another network.
+  #
+  # A container living in another container's namespace does not: the daemon refuses
+  # `/networks/<n>/connect` on it with a 403 ("container sharing network namespace with
+  # another container or host cannot be connected to any other network"). It is still
+  # proxy-mode with a domain — a tunneled *arr app behind gluetun is exactly that — so
+  # every other measure says it should be published, and attempting it would fail the
+  # release's publish step and roll the whole deploy back.
+  #
+  # Its route is real, it is just served by its DONOR, which SpecBuilder multi-homes onto
+  # ingress at create time via `bridge_networks`. There is nothing for this to do.
+  defp attachable?(%Deployment{} = deployment) do
+    not Netns.child?(deployment) and not Access.host_network_mode?(deployment)
+  end
+
+  # The network Traefik resolves backends on — the same one `SpecBuilder` writes into the
+  # workload's `traefik.docker.network` label. Passed to the driver rather than assumed
+  # by it, so a workload reached over a different network stays expressible.
+  defp ingress_network, do: Homelab.Infrastructure.internal_network()
+
   @doc """
-  Severs a deployment's public path by disconnecting Traefik from its
-  per-deployment network. Always safe to call (disconnecting a network Traefik
-  isn't on is a no-op), so it also cleans up a stale route after an access-mode
-  change. Never touches the workload container's own networks.
+  Severs a deployment's public path by detaching its workload from the shared ingress
+  network — Traefik loses the backend address and stops routing to it.
+
+  Always safe to call: detaching something already detached is a no-op, so this also
+  cleans up a stale route after an access-mode change.
   """
+  def unpublish_deployment(%Deployment{external_id: nil}), do: :ok
+
   def unpublish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
-    network = SpecBuilder.deployment_network(deployment.tenant, deployment.app_template)
-    Homelab.Config.orchestrator().unpublish(network)
+
+    # Same asymmetry as publishing: a workload with no endpoint of its own was never on
+    # the ingress network, so there is nothing to detach and the daemon would refuse.
+    if attachable?(deployment) do
+      Homelab.Config.orchestrator().unpublish(deployment.external_id, ingress_network())
+    else
+      :ok
+    end
   end
 
   @doc "Lists all ingress-published deployments (any status), preloaded."
@@ -252,8 +297,25 @@ defmodule Homelab.Deployments do
     |> Repo.update_all(set: [status: :failed])
   end
 
+  @doc """
+  Deletes a deployment row.
+
+  Refused while anything is living in its network namespace. A child cannot survive
+  losing its donor — its `NetworkMode` names a container id that would no longer exist,
+  so the daemon refuses to start it — and the alternative to refusing is worse than a
+  broken child: silently reattaching a tunneled app to the tenant network puts its
+  traffic OUTSIDE the VPN, which for the apps people put behind gluetun is the one
+  outcome the whole arrangement exists to prevent. The database enforces this too
+  (`on_delete: :restrict`); this is the version that can explain itself.
+  """
   def delete_deployment(%Deployment{} = deployment) do
-    Repo.delete(deployment)
+    case Netns.children(Repo.preload(deployment, :network_children)) do
+      [] ->
+        Repo.delete(deployment)
+
+      children ->
+        {:error, {:netns_donor_in_use, Enum.map(children, & &1.id)}}
+    end
   end
 
   def stop_deployment(%Deployment{} = deployment) do
@@ -270,7 +332,7 @@ defmodule Homelab.Deployments do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
     orchestrator = Homelab.Config.orchestrator()
 
-    case Homelab.Deployments.SpecBuilder.build(deployment) do
+    case SpecBuilder.build(deployment) do
       {:ok, spec} ->
         case orchestrator.deploy(spec) do
           {:ok, external_id} ->
@@ -323,10 +385,23 @@ defmodule Homelab.Deployments do
   labeled container with no deployment record (which the orphan sweep would then
   reap). On failure the row is kept and marked `:failed` with the error, so the
   user sees it and can retry the delete once Docker is reachable.
+
+  Refused outright while anything lives in this deployment's network namespace — see
+  `delete_deployment/1` for why detaching the children silently is the worse option.
   """
   def destroy_deployment(%Deployment{} = deployment) do
-    deployment = Repo.preload(deployment, [:tenant, :app_template])
+    deployment = Repo.preload(deployment, [:tenant, :app_template, :network_children])
 
+    case Netns.children(deployment) do
+      [] ->
+        do_destroy(deployment)
+
+      children ->
+        {:error, {:netns_donor_in_use, Enum.map(children, & &1.id)}}
+    end
+  end
+
+  defp do_destroy(deployment) do
     case undeploy_container(deployment) do
       :ok ->
         Repo.delete(deployment)
@@ -395,11 +470,11 @@ defmodule Homelab.Deployments do
   def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
       when is_list(companions) do
     steps =
-      Enum.flat_map(companions, fn companion ->
+      Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
         [
           %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
           %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
-        ]
+        ] ++ datastore_grant_steps(app, companion)
       end) ++
         [
           %{type: :app_container, resource_handle: %{}},
@@ -416,6 +491,112 @@ defmodule Homelab.Deployments do
     do: [%{type: :publish_ingress, resource_handle: %{}}]
 
   defp ingress_steps(_app), do: []
+
+  @doc false
+  # Reconciles the app's credentials against a datastore companion, AFTER that companion
+  # is healthy and BEFORE the app starts.
+  #
+  # `EnsureDatastoreGrants` was registered, implemented and tested at the SQL level, and
+  # no planner ever emitted it — so `Grants.reconcile/1` had exactly one caller and that
+  # caller was unreachable. The bug it exists for is real and quiet: a datastore whose
+  # volume already holds data ignores MARIADB_USER/PASSWORD (the image's init runs once,
+  # on an empty data dir), so the app is handed a password the database never took. The
+  # release still reaches `:running`, because `AwaitHealth` only checks that the
+  # container is healthy — and the failure surfaces later as `Access denied` from inside
+  # the app.
+  #
+  # Only for engines `Grants` can actually drive; anything else is left alone rather
+  # than planned as a step that would fail.
+  #
+  # Note `ProvisionCredentials` is deliberately still unplanned. It is the other half of
+  # this seam, but the deploy wizard already generates and shares the credential pair by
+  # writing it into both deployments' `env_overrides` (`wire_db_secrets`). Planning
+  # `ProvisionCredentials` as well would generate a SECOND, different password and hand
+  # the two sides mismatched values — worse than the gap it would close.
+  defp datastore_grant_steps(%Deployment{} = app, %Deployment{} = companion) do
+    companion = Repo.preload(companion, :app_template)
+
+    case Homelab.Deployments.Datastore.Grants.engine_for_image(companion.app_template.image) do
+      {:ok, _engine} ->
+        [
+          %{
+            type: :ensure_datastore_grants,
+            resource_handle: %{
+              "deployment_id" => companion.id,
+              "app_deployment_id" => app.id
+            }
+          }
+        ]
+
+      {:error, _unsupported} ->
+        []
+    end
+  end
+
+  # A netns child's donor is a dependency in the strictest sense: the child's create
+  # payload contains the donor's CONTAINER ID, so the donor must exist and be running
+  # first. The saga already expresses exactly this — companions are deployed and awaited
+  # healthy before the app — so the donor is prepended to the companion list rather than
+  # needing an ordering mechanism of its own.
+  #
+  # De-duplicated: the donor may also be a companion for another reason (a compose
+  # bundle where gluetun is both), and planning it twice would deploy it twice.
+  defp netns_donor_companions(%Deployment{network_parent_id: nil}), do: []
+
+  defp netns_donor_companions(%Deployment{} = app) do
+    case Netns.donor(app) do
+      nil -> []
+      donor -> [donor]
+    end
+  end
+
+  @doc """
+  Re-drives a whole network-namespace stack: the donor first, then every container
+  living in its namespace.
+
+  This is the cascade sharing a namespace costs. Re-creating the donor mints a NEW
+  container id, and each child's `NetworkMode` still names the old one — Docker will not
+  start such a container at all ("cannot join network of a non running container"), so
+  the children are not merely stale, they are dead until re-created against the new id.
+
+  So: any change that re-creates the donor — including a change to a CHILD's route,
+  since a child's Traefik labels live on the donor — has to re-create the children too.
+  Callers pass any member of the stack; the donor is resolved from it.
+
+  A plain config change on a child (env, volumes) does not go through here: it does not
+  touch the donor, so `recreate_deployment/1` is both sufficient and much cheaper.
+  """
+  def redeploy_netns_stack(%Deployment{} = deployment) do
+    donor =
+      case Netns.donor(deployment) do
+        nil -> deployment
+        parent -> parent
+      end
+
+    donor = Repo.preload(donor, [:tenant, :app_template, :network_children])
+    children = Netns.children(donor)
+
+    child_steps =
+      Enum.flat_map(children, fn child ->
+        [
+          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => child.id}}
+        ]
+      end)
+
+    steps =
+      [
+        %{type: :app_container, resource_handle: %{}},
+        %{type: :await_health, resource_handle: %{}}
+      ] ++ ingress_steps(donor) ++ child_steps
+
+    with {:ok, donor} <- reset_to_pending(donor),
+         {:ok, _children} <- reset_all_to_pending(children),
+         {:ok, release} <- Releases.plan_release(donor, steps) do
+      {:ok, _job} = ReleaseRunner.enqueue(release)
+      {:ok, release}
+    end
+  end
 
   @doc """
   Re-drives the stack that governs `deployment` by planning a FRESH release and
@@ -482,7 +663,7 @@ defmodule Homelab.Deployments do
   defp do_deploy(deployment) do
     ensure_traefik_if_needed(deployment)
 
-    case Homelab.Deployments.SpecBuilder.build(deployment) do
+    case SpecBuilder.build(deployment) do
       {:ok, spec} ->
         case Homelab.Config.orchestrator().deploy(spec) do
           {:ok, external_id} ->
