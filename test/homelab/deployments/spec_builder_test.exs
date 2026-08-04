@@ -187,6 +187,23 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       refute Map.has_key?(spec.labels, "homelab.adopted")
     end
 
+    test "the sso_protected forwardAuth address comes from configuration, not a literal" do
+      tenant = build_tenant(%{slug: "friends"})
+      template = build_template(%{slug: "nextcloud", exposure_mode: :sso_protected})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      # Found by suffix rather than by router name so this does not also assert the
+      # domain-sanitizing scheme, which is a separate concern with its own tests.
+      assert {_key, address} =
+               Enum.find(spec.labels, fn {k, _v} ->
+                 String.ends_with?(k, ".forwardauth.address")
+               end)
+
+      assert address == Homelab.Config.forward_auth_address()
+    end
+
     test "adopted templates carry the homelab.adopted label" do
       tenant = build_tenant(%{slug: "friends"})
       template = build_template(%{slug: "adopted-pg", source: "adopted"})
