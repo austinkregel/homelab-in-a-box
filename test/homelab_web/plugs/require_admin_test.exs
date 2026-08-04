@@ -35,8 +35,12 @@ defmodule HomelabWeb.Plugs.RequireAdminTest do
     end
 
     test "a member cannot open it", %{conn: conn} do
-      {conn, _member} = member_conn(conn)
+      {conn, member} = member_conn(conn)
 
+      # Pinned, because the whole suite's blind spot is that it never has one:
+      # `test/support/factory.ex` defaults `role: :admin`, so every `insert(:user)`
+      # anywhere else is an administrator and could not observe this refusal.
+      assert member.role == :member
       assert {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/settings")
     end
 
@@ -67,44 +71,45 @@ defmodule HomelabWeb.Plugs.RequireAdminTest do
     end
   end
 
-  describe "the bootstrap exemption" do
-    test "with no admin on the instance, a member is let through", %{conn: conn, user: user} do
-      # Mirrors the exemption `RequireAuth` already makes for incomplete setup. `role`
-      # defaults to :member and, before this change, nothing ever set :admin except a
-      # break-glass login — so an existing instance can genuinely have zero admins, and
-      # a strict gate would brick the only page that can create one.
-      # Written straight to the row, not through `update_user/2` — that now refuses to
-      # demote the last admin, so this state is unreachable through the app. Which is
-      # the point: it is a LEGACY state, what an instance that predates enforcement
-      # looks like, and the exemption exists only to get such an instance back on its
-      # feet.
+  describe "an instance with no administrator at all" do
+    test "does not become an instance where everyone is one", %{conn: conn, user: user} do
+      # An earlier draft exempted this state, reasoning that a strict gate would lock an
+      # upgrading instance out of the only page that can appoint an admin. That premise
+      # is false: `get_or_create_breakglass_admin/1` inserts with role: :admin, so
+      # break-glass IS the promotion path. And the exemption was reachable rather than
+      # hypothetical — demote your way to zero and everyone signed in is an
+      # administrator, which is the very thing the last-admin guard exists to prevent,
+      # entered through the other door.
+      #
+      # Written straight to the row because `update_user/2` now refuses to get here.
       user |> Ecto.Changeset.change(%{role: :member}) |> Homelab.Repo.update!()
       {conn, _member} = member_conn(conn)
 
       assert Accounts.list_admins() == []
-      assert {:ok, _view, _html} = live(conn, ~p"/settings")
-    end
-
-    test "the exemption closes the moment one admin exists", %{conn: conn} do
-      {conn, _member} = member_conn(conn)
-
-      assert Accounts.list_admins() != []
       assert {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/settings")
     end
+  end
 
-    test "and cannot be re-opened by demoting the only administrator", %{
-      conn: conn,
-      user: only_admin
-    } do
-      # The exemption is only safe if it is a one-way door. Nothing stopped the admin
-      # count going 1 -> 0, which would hand every signed-in user the run of Settings
-      # again — silently, with the role selector still on screen implying otherwise.
-      {member_conn, _member} = member_conn(conn)
+  describe "the LiveView hook, on its own" do
+    test "refuses a member and admits an administrator" do
+      # The plug and the hook are separate layers and only one of them is observable
+      # through the router: the plug halts the HTTP request first, so `live(conn, ...)`
+      # never reaches the mount. Delete the hook and every routed test above still
+      # passes. So ask the hook directly.
+      assert {:halt, _socket} = mount_as(insert(:user, role: :member))
+      assert {:cont, _socket} = mount_as(insert(:user, role: :admin))
+    end
 
-      assert {:error, _} = Accounts.update_user(only_admin, %{role: :member})
+    test "refuses when nobody is signed in, rather than crashing on a missing assign" do
+      assert {:halt, _socket} = mount_as(nil)
+    end
 
-      assert Accounts.any_admin?()
-      assert {:error, {:redirect, %{to: "/"}}} = live(member_conn, ~p"/settings")
+    defp mount_as(user) do
+      socket = %Phoenix.LiveView.Socket{
+        assigns: %{__changed__: %{}, flash: %{}, current_user: user}
+      }
+
+      HomelabWeb.Live.Hooks.on_mount(:require_admin, %{}, %{}, socket)
     end
   end
 
