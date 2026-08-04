@@ -35,7 +35,8 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
     end
 
     test "reading backups is refused" do
-      assert json_response(get(anonymous(), ~p"/api/v1/backups"), 401)
+      tenant = insert(:tenant)
+      assert json_response(get(anonymous(), ~p"/api/v1/tenants/#{tenant.id}/backups"), 401)
     end
 
     test "creating a deployment is refused" do
@@ -73,7 +74,11 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
     test "triggering a restore is refused" do
       job = insert(:backup_job)
 
-      conn = post(anonymous(), ~p"/api/v1/backups/#{job.id}/restore")
+      conn =
+        post(
+          anonymous(),
+          ~p"/api/v1/tenants/#{job.deployment.tenant_id}/backups/#{job.id}/restore"
+        )
 
       assert json_response(conn, 401)
     end
