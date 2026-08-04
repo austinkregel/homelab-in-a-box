@@ -5,9 +5,24 @@ services:
   # still works (e.g. CI) — this just unlocks chunked storage locally.
   # `shared_preload_libraries` is set explicitly so `CREATE EXTENSION timescaledb`
   # succeeds even on a pgdata volume first initialized by stock Postgres.
+  #
+  # `max_connections` is raised from the stock 100 because DBConnection opens the
+  # WHOLE pool when the Repo starts, not lazily per test. With
+  # `pool_size: System.schedulers_online() * 2` (config/test.exs) a 28-core machine
+  # spends 56 connections here plus 6 on the Oban repo for a SINGLE `mix test`
+  # process — so two concurrent test runs already exceed 100 and fail with
+  # `DBConnection` queue timeouts that look like application bugs. `--max-cases`
+  # does not help: it throttles test concurrency, not pool checkouts.
   postgres:
     image: timescale/timescaledb:2.17.2-pg17
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
+    command:
+      [
+        "postgres",
+        "-c",
+        "shared_preload_libraries=timescaledb",
+        "-c",
+        "max_connections=500"
+      ]
     environment:
       POSTGRES_USER: homelab
       POSTGRES_PASSWORD: homelab
@@ -21,6 +36,9 @@ services:
   # table can't degrade app query latency. Maps to Homelab.ObanRepo (port 5434).
   oban-postgres:
     image: postgres:17-alpine
+    # Raised for the same reason as the app DB above — every ConnCase test checks
+    # out a sandbox owner here, so concurrent test runs multiply this pool too.
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: homelab
       POSTGRES_PASSWORD: homelab
