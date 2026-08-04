@@ -488,14 +488,19 @@ defmodule HomelabWeb.SettingsLiveTest do
       member = insert(:user, role: :member)
       conn = log_in_user(build_conn(), member)
 
-      {:ok, view, _html} = live(conn, ~p"/settings")
-      render_click(view, "switch_section", %{"section" => "danger_zone"})
-      render_click(view, "rerun_setup", %{})
+      # `/settings` moved into `live_session :admin`, so `Plugs.RequireAdmin` refuses
+      # before the LiveView mounts and a member cannot reach this handler at all. The
+      # handler keeps its own `admin?/1` check as defence-in-depth for a future mount
+      # outside that live_session — unreachable through the router, which is precisely
+      # what defence-in-depth means, so the outer layer is what this asserts.
+      assert {:error, {:redirect, %{to: "/", flash: %{"error" => reason}}}} =
+               live(conn, ~p"/settings")
+
+      assert reason =~ "administrators",
+             "a refused member should be told why, not bounced silently"
 
       assert Homelab.Settings.setup_completed?(),
              "a member turned authentication off for the whole instance"
-
-      assert has_element?(view, "#flash-error")
     end
 
     test "the button says what it actually does before it does it", %{conn: conn} do
