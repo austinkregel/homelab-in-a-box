@@ -410,11 +410,65 @@ defmodule HomelabWeb.SettingsLiveTest do
   end
 
   describe "rerun_setup" do
-    test "clears setup and redirects to setup page", %{conn: conn} do
+    # Clearing `setup_completed` is an authentication kill switch: RequireAuth lets every
+    # request through while it is false, so the button turns login off for the whole
+    # instance until the wizard is finished again.
+    setup do
+      Homelab.Settings.set("oidc_issuer", "https://auth.example.com")
+      Homelab.Settings.set("oidc_client_id", "homelab")
+
+      on_exit(fn ->
+        Homelab.Settings.delete("oidc_issuer")
+        Homelab.Settings.delete("oidc_client_id")
+      end)
+
+      :ok
+    end
+
+    test "an admin with OIDC configured clears setup and redirects to setup page",
+         %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/settings")
       render_click(view, "switch_section", %{"section" => "danger_zone"})
       render_click(view, "rerun_setup", %{})
+
       assert_redirect(view, ~p"/setup")
+      refute Homelab.Settings.setup_completed?()
+    end
+
+    test "refuses when no OIDC provider is configured, leaving auth enforced",
+         %{conn: conn} do
+      Homelab.Settings.delete("oidc_issuer")
+      Homelab.Settings.delete("oidc_client_id")
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+      render_click(view, "rerun_setup", %{})
+
+      assert Homelab.Settings.setup_completed?(),
+             "rerun_setup disabled authentication on an instance with no way to turn it back on"
+
+      assert has_element?(view, "#flash-error")
+    end
+
+    test "refuses a non-admin", %{conn: _conn} do
+      member = insert(:user, role: :member)
+      conn = log_in_user(build_conn(), member)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+      render_click(view, "rerun_setup", %{})
+
+      assert Homelab.Settings.setup_completed?(),
+             "a member turned authentication off for the whole instance"
+
+      assert has_element?(view, "#flash-error")
+    end
+
+    test "the button says what it actually does before it does it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "danger_zone"})
+
+      assert has_element?(view, "#rerun-setup-button[data-confirm]")
     end
   end
 
