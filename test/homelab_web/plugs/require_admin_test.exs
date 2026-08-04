@@ -86,6 +86,21 @@ defmodule HomelabWeb.Plugs.RequireAdminTest do
       assert Accounts.list_admins() != []
       assert {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/settings")
     end
+
+    test "and cannot be re-opened by demoting the only administrator", %{
+      conn: conn,
+      user: only_admin
+    } do
+      # The exemption is only safe if it is a one-way door. Nothing stopped the admin
+      # count going 1 -> 0, which would hand every signed-in user the run of Settings
+      # again — silently, with the role selector still on screen implying otherwise.
+      {member_conn, _member} = member_conn(conn)
+
+      assert {:error, _} = Accounts.update_user(only_admin, %{role: :member})
+
+      assert Accounts.any_admin?()
+      assert {:error, {:redirect, %{to: "/"}}} = live(member_conn, ~p"/settings")
+    end
   end
 
   describe "Accounts.admin?/1" do
