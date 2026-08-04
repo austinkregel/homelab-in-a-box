@@ -98,6 +98,32 @@ defmodule Homelab.Accounts do
   end
 
   @doc """
+  Whether this user is an administrator.
+
+  Public, and takes the user rather than a conn or a socket, so the plug, the LiveView
+  `on_mount` hook, and any view that needs to hide or refuse a privileged control all
+  answer the question the same way instead of growing separate, drifting definitions.
+  `nil` (nobody signed in) is not an administrator.
+  """
+  @spec admin?(User.t() | nil) :: boolean()
+  def admin?(%User{role: :admin}), do: true
+  def admin?(_), do: false
+
+  @doc """
+  Whether the instance has any administrator at all.
+
+  `role` defaults to `:member` and, until administrators were enforced, nothing ever
+  set `:admin` except a break-glass login — so a real instance can hold only members.
+  Enforcement uses this to make the same bargain `RequireAuth` already makes for
+  incomplete setup: refuse once there is someone who could say yes, and not before.
+  """
+  @spec any_admin? :: boolean()
+  def any_admin? do
+    import Ecto.Query
+    Repo.exists?(from u in User, where: u.role == :admin)
+  end
+
+  @doc """
   Updates a user.
   """
   def update_user(%User{} = user, attrs) do
