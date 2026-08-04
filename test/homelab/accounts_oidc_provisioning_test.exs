@@ -70,33 +70,23 @@ defmodule Homelab.AccountsOidcProvisioningTest do
   end
 
   describe "an instance with no administrator" do
-    # The first-user rule only helps NEW installs. An instance that predates enforcement
-    # can hold nothing but members: `role` defaults to :member and, until now, the only
-    # writer of :admin was a break-glass login. Left alone, upgrading such an instance
-    # means every admin-gated action is unreachable by everyone, recoverable only from a
-    # break-glass token placed in advance.
+    # Signing in does NOT repair it. An earlier draft promoted the oldest account here,
+    # to spare an instance that predates role enforcement from needing a break-glass
+    # token. That was declined: an instance must never silently grant admin on sign-in.
+    # Break-glass is the recovery path, and `get_or_create_breakglass_admin/1` inserts
+    # with role: :admin, so it is a real one.
     #
-    # So signing in repairs it. Deterministically the OLDEST account, never whoever
-    # happens to log in first — the person who set the box up is the owner, and a
-    # land-grab would be a worse answer than the lockout.
-    test "promotes its oldest account when someone signs in" do
+    # The first-user rule below is a different thing and stays — that is fresh-install
+    # bootstrap, not repair of an existing instance.
+    test "is left exactly as it is when someone signs in" do
       first = insert(:user, sub: "first", role: :member)
       second = insert(:user, sub: "second", role: :member)
 
       assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("second", second.email))
 
-      assert Accounts.get_user(first.id).role == :admin
+      assert Accounts.get_user(first.id).role == :member
       assert Accounts.get_user(second.id).role == :member
-    end
-
-    test "leaves an instance that already has one alone" do
-      admin = insert(:user, sub: "the-admin", role: :admin)
-      member = insert(:user, sub: "a-member", role: :member)
-
-      assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("a-member", member.email))
-
-      assert Accounts.get_user(admin.id).role == :admin
-      assert Accounts.get_user(member.id).role == :member
+      assert Accounts.list_admins() == []
     end
   end
 
