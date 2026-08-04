@@ -735,7 +735,7 @@ defmodule Homelab.Deployments.SpecBuilder do
     %{
       "traefik.http.routers.#{router}.middlewares" => "#{router}-auth",
       "traefik.http.middlewares.#{router}-auth.forwardauth.address" =>
-        "http://authentik-proxy:9000/outpost.goauthentik.io/auth/nginx",
+        Homelab.Config.forward_auth_address(),
       "traefik.http.middlewares.#{router}-auth.forwardauth.trustForwardHeader" => "true",
       "traefik.http.middlewares.#{router}-auth.forwardauth.authResponseHeaders" =>
         "X-authentik-username,X-authentik-groups,X-authentik-email"
