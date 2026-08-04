@@ -383,6 +383,11 @@ defmodule HomelabWeb.SettingsLiveTest do
 
   describe "update_user_role" do
     test "updates user role to member", %{conn: conn, user: user} do
+      # `user` is the only admin, and demoting the last one is now refused
+      # (Accounts.update_user/2). Give the instance a second admin so this test
+      # exercises role-changing rather than the last-admin guard.
+      insert(:user, role: :admin)
+
       {:ok, view, _html} = live(conn, ~p"/settings")
       render_click(view, "switch_section", %{"section" => "users"})
 
@@ -393,6 +398,35 @@ defmodule HomelabWeb.SettingsLiveTest do
         })
 
       assert html =~ "User role updated"
+    end
+
+    # The handler answered every `{:error, changeset}` with "Failed to update role",
+    # which is the failure mode `HomelabWeb.ChangesetErrors` exists to fix: a refusal
+    # nobody can read is indistinguishable from a broken feature.
+    #
+    # This matters most for the last-admin guard in `Accounts.update_user/2` — an
+    # operator told only "Failed to update role" has no way to learn that the reason
+    # is "this is the only administrator left". That guard lands on another branch, so
+    # this drives the same path with the refusal the schema already produces: `:role`
+    # is an `Ecto.Enum` of [:admin, :member], so any other value is rejected by cast
+    # with an error on `:role`, exactly where the last-admin error will sit.
+    test "a refused role change tells the operator why", %{conn: conn, user: user} do
+      # Pre-creates the atom so the handler's String.to_existing_atom/1 resolves it and
+      # the request reaches the changeset, which is the thing under test.
+      _ = :moderator
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "users"})
+
+      render_click(view, "update_user_role", %{
+        "user_id" => to_string(user.id),
+        "role" => "moderator"
+      })
+
+      assert has_element?(view, "#flash-error", "Role is invalid")
+
+      refute has_element?(view, "#flash-error", "Failed to update role"),
+             "the operator got a generic message instead of the changeset's reason"
     end
 
     test "handles non-existent user", %{conn: conn} do
