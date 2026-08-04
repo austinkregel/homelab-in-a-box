@@ -144,17 +144,16 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
   end
 
   describe "the unscoped routes" do
-    test "are gone", %{my_job: my_job} do
-      # Left in place they would be a bypass of everything above. Plain strings, not
-      # ~p: these paths must not resolve, and a sigil would fail to compile once
-      # they don't.
-      assert_raise Phoenix.Router.NoRouteError, fn ->
-        get(build_conn(), "/api/v1/backups")
-      end
+    test "are gone" do
+      # Left in place they would be a bypass of everything above. Asked of the router
+      # rather than by dispatching: `Phoenix.Endpoint.RenderErrors` turns a missing
+      # route into a rendered 404, which is indistinguishable from a route that exists
+      # and legitimately found nothing.
+      assert :error = Phoenix.Router.route_info(HomelabWeb.Router, "GET", "/api/v1/backups", "")
+      assert :error = Phoenix.Router.route_info(HomelabWeb.Router, "GET", "/api/v1/backups/1", "")
 
-      assert_raise Phoenix.Router.NoRouteError, fn ->
-        post(build_conn(), "/api/v1/backups/#{my_job.id}/restore")
-      end
+      assert :error =
+               Phoenix.Router.route_info(HomelabWeb.Router, "POST", "/api/v1/backups/1/restore", "")
     end
   end
 end
