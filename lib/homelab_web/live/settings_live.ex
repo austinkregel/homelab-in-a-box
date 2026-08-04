@@ -155,6 +155,19 @@ defmodule HomelabWeb.SettingsLive do
     end
   end
 
+  # Deliberately NOT part of `save_oidc`: that handler refuses to persist anything when
+  # discovery fails, and the forward-auth endpoint is a different component from the
+  # issuer. Bundling them would make an unreachable OIDC provider block a change to the
+  # proxy address — including the change that fixes it.
+  def handle_event("save_forward_auth", %{"forward_auth" => params}, socket) do
+    put_setting(params, "forward_auth_address")
+
+    {:noreply,
+     socket
+     |> load_section_data("authentication")
+     |> put_flash(:info, "Forward-auth endpoint saved.")}
+  end
+
   def handle_event("test_oidc", _params, socket) do
     check =
       case verify_issuer(socket.assigns.oidc_issuer) do
@@ -542,6 +555,10 @@ defmodule HomelabWeb.SettingsLive do
       if(Settings.get("oidc_client_secret"), do: "••••••••", else: "")
     )
     |> assign(:oidc_redirect_uri, oidc_redirect_uri())
+    # The RESOLVED address, not the raw setting: with the key unset this shows the
+    # default that is actually in effect, so the field never implies "nothing is
+    # configured" when a hardcoded default is doing the work.
+    |> assign(:forward_auth_address, Homelab.Config.forward_auth_address())
     |> assign_new(:oidc_check, fn -> nil end)
   end
 
@@ -945,6 +962,44 @@ defmodule HomelabWeb.SettingsLive do
           </button>
         </div>
       </.form>
+
+      <div class="mt-8 pt-6 border-t border-base-content/5">
+        <h3 class="text-sm font-semibold text-base-content mb-1.5">Forward authentication</h3>
+        <p class="text-xs text-base-content/50 mb-4 max-w-md leading-snug">
+          The endpoint Traefik asks about each request on a route set to <strong>Reverse proxy — SSO</strong>. This is a separate component from the
+          OIDC provider above: it answers a subrequest with 200 or 401 from a session
+          cookie, which an OIDC authorization server does not do on its own.
+        </p>
+
+        <.form
+          for={%{}}
+          as={:forward_auth}
+          id="forward-auth-form"
+          phx-submit="save_forward_auth"
+          class="space-y-3 max-w-md"
+        >
+          <div>
+            <input
+              type="text"
+              name="forward_auth[forward_auth_address]"
+              value={@forward_auth_address}
+              placeholder={Homelab.Config.default_forward_auth_address()}
+              class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2.5 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
+            />
+            <p class="text-[10px] text-base-content/40 mt-1">
+              Blank restores the default shown above. Traefik fails closed on an
+              unreachable endpoint, so a route set to SSO returns 502/500 rather than
+              serving unauthenticated traffic.
+            </p>
+          </div>
+
+          <.button
+            type="submit"
+            label="Save"
+            class="px-4 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-medium"
+          />
+        </.form>
+      </div>
     </div>
     """
   end
