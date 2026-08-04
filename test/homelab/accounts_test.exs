@@ -101,6 +101,61 @@ defmodule Homelab.AccountsTest do
     end
   end
 
+  describe "the last administrator" do
+    # Enforcement now depends on an admin existing: RequireAdmin lets everyone through
+    # while the instance has none, so that an install which never had one is not locked
+    # out of the only page that can appoint one. Demoting the last admin would drive the
+    # count back to zero and silently re-open that exemption to every signed-in user —
+    # while the UI still shows a role selector implying enforcement.
+    #
+    # The guard lives here rather than at the LiveView that happens to call it today:
+    # it is an invariant of the account model, and it has to hold for the API and for
+    # anything written later too.
+    test "cannot be demoted" do
+      admin = insert(:user, role: :admin)
+
+      assert {:error, changeset} = Accounts.update_user(admin, %{role: :member})
+      assert errors_on(changeset)[:role] != nil
+      assert Accounts.get_user(admin.id).role == :admin
+    end
+
+    test "is still an admin afterwards, so the exemption stays shut" do
+      admin = insert(:user, role: :admin)
+      insert(:user, role: :member)
+
+      assert {:error, _} = Accounts.update_user(admin, %{role: :member})
+      assert Accounts.list_admins() != []
+    end
+
+    test "is only the LAST one — one of two can be demoted" do
+      insert(:user, role: :admin)
+      other = insert(:user, role: :admin)
+
+      assert {:ok, updated} = Accounts.update_user(other, %{role: :member})
+      assert updated.role == :member
+      assert Accounts.list_admins() != []
+    end
+
+    test "can still be edited, as long as the role is not what changes" do
+      admin = insert(:user, role: :admin)
+
+      assert {:ok, updated} = Accounts.update_user(admin, %{name: "Still The Admin"})
+      assert updated.name == "Still The Admin"
+      assert updated.role == :admin
+    end
+
+    test "last_admin?/1 is public so a caller can refuse before it tries" do
+      admin = insert(:user, role: :admin)
+      member = insert(:user, role: :member)
+
+      assert Accounts.last_admin?(admin)
+      refute Accounts.last_admin?(member)
+
+      insert(:user, role: :admin)
+      refute Accounts.last_admin?(admin)
+    end
+  end
+
   describe "update_last_login/1" do
     test "sets last_login_at to current time" do
       user = insert(:user, last_login_at: nil)
