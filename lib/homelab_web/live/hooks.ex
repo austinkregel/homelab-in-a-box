@@ -9,7 +9,6 @@ defmodule HomelabWeb.Live.Hooks do
   alias Homelab.Settings
   alias Homelab.Accounts
   alias Homelab.Notifications
-  alias HomelabWeb.Plugs.RequireAdmin
 
   def on_mount(:require_setup, _params, _session, socket) do
     if Settings.setup_completed?() do
@@ -47,7 +46,7 @@ defmodule HomelabWeb.Live.Hooks do
   # (A comment rather than @doc: `on_mount/4` already carries one on the :notifications
   # clause below, and Elixir warns when a second is attached to the same function.)
   def on_mount(:require_admin, _params, _session, socket) do
-    if RequireAdmin.authorized?(socket.assigns[:current_user]) do
+    if Accounts.admin?(socket.assigns[:current_user]) do
       {:cont, socket}
     else
       {:halt,
