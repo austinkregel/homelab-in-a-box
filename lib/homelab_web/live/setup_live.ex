@@ -117,9 +117,33 @@ defmodule HomelabWeb.SetupLive do
     end
   end
 
+  # Mirrors the guard in `Homelab.Bootstrap.maybe_seed_from_env/0`: only mark setup
+  # complete if OIDC actually got configured.
+  #
+  # `step` comes straight off the query string, so `GET /setup?step=5` used to write
+  # `setup_completed` on an instance with no issuer, no client id and no space. That is
+  # not a cosmetic skip: `RequireAuth` deliberately lets every request through while
+  # setup is incomplete, so writing the key flips authentication ON against a provider
+  # that does not exist -- `/auth/oidc` cannot complete, and the only way back in is a
+  # pre-placed break-glass token. Refuse, and put the operator on the step that is
+  # actually missing rather than on a page that claims success.
   defp mark_setup_completed(socket) do
-    Settings.mark_setup_completed()
-    socket
+    if oidc_configured?() do
+      Settings.mark_setup_completed()
+      socket
+    else
+      socket
+      |> put_flash(
+        :error,
+        "Setup can't be finished yet: an OIDC Issuer URL and Client ID are required. Completing setup without them would enforce login against a provider that doesn't exist and lock everyone out."
+      )
+      |> push_patch(to: ~p"/setup?step=2")
+    end
+  end
+
+  defp oidc_configured? do
+    present? = fn key -> Settings.get(key) not in [nil, ""] end
+    present?.("oidc_issuer") and present?.("oidc_client_id")
   end
 
   @impl true
@@ -875,7 +899,7 @@ defmodule HomelabWeb.SetupLive do
 
   defp render_step5(assigns) do
     ~H"""
-    <div class="space-y-4 text-center">
+    <div id="setup-complete" class="space-y-4 text-center">
       <div class="flex justify-center">
         <div class="w-16 h-16 rounded-lg bg-success/20 flex items-center justify-center">
           <.icon name="hero-check-circle" class="size-8 text-success" />
