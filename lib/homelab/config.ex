@@ -204,6 +204,49 @@ defmodule Homelab.Config do
       "homelab.local"
   end
 
+  # The address Traefik's forwardAuth middleware calls to authorize a request on a
+  # `:sso_protected` route. Authentik's outpost shape, because that is what this
+  # default has always been.
+  @default_forward_auth_address "http://authentik-proxy:9000/outpost.goauthentik.io/auth/nginx"
+
+  @doc """
+  The forward-auth endpoint for `:sso_protected` routes.
+
+  This was hardcoded in TWO places — `SpecBuilder.exposure_middleware_labels/2` (the
+  Docker-label path that production actually uses) and `Gateways.Traefik.build_middlewares/2`
+  (the file-provider path) — naming a host, `authentik-proxy`, that this application
+  never provisions and gave the operator no way to change. Deployed workloads are named
+  `homelab_<tenant>_<app>`, so nothing deployed here could ever answer to it.
+
+  Making it a Setting does not make SSO work; it makes it *possible* to point at
+  something that does. Traefik fails closed on an unreachable forwardAuth backend
+  (500, not open), so a wrong or unset value is an availability problem, not an
+  exposure one.
+
+  The default is the historical hardcoded value, so behaviour is unchanged until an
+  operator sets the `forward_auth_address` Setting.
+
+  Reads through `get_cached/2`, not `get/2`: `SpecBuilder.build/1` runs on every deploy
+  and is exercised by no-DB unit tests, so a Repo call here turns a pure label-building
+  function into one that needs a sandbox connection. `Settings.set/3` and `delete/1`
+  both maintain the ETS entry, so the cached read is authoritative.
+  """
+  def forward_auth_address do
+    case Homelab.Settings.get_cached("forward_auth_address") do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> @default_forward_auth_address
+          trimmed -> trimmed
+        end
+
+      _ ->
+        @default_forward_auth_address
+    end
+  end
+
+  @doc "The default forward-auth endpoint, shown as the placeholder in Settings."
+  def default_forward_auth_address, do: @default_forward_auth_address
+
   # -- Self-hosted registry --
 
   @doc """
