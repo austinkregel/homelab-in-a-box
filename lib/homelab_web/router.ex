@@ -17,6 +17,11 @@ defmodule HomelabWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
+    # The only API credential this app has is the browser session cookie, and
+    # `Plug.Session` in the endpoint merely REGISTERS a lazy fetcher — it does not
+    # fetch. Without this, `RequireAuthApi` raises "session not fetched" and every
+    # authenticated request 500s.
+    plug :fetch_session
   end
 
   pipeline :api_authenticated do
