@@ -153,7 +153,12 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
       assert :error = Phoenix.Router.route_info(HomelabWeb.Router, "GET", "/api/v1/backups/1", "")
 
       assert :error =
-               Phoenix.Router.route_info(HomelabWeb.Router, "POST", "/api/v1/backups/1/restore", "")
+               Phoenix.Router.route_info(
+                 HomelabWeb.Router,
+                 "POST",
+                 "/api/v1/backups/1/restore",
+                 ""
+               )
     end
   end
 end
