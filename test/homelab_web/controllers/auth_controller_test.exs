@@ -166,6 +166,10 @@ defmodule HomelabWeb.AuthControllerTest do
       oidc_url: url
     } do
       state = "test-state-value"
+      # ConnCase has already seeded a user, so this is no longer the first-user case and
+      # unknown subjects are refused by default. Allow the domain so this test keeps
+      # asserting what it is about — the happy path — rather than the new gate.
+      Homelab.Settings.set("oidc_allowed_emails", "@test.com")
       stub_discovery(bypass, url)
 
       Bypass.expect_once(bypass, "POST", "/token", fn conn ->
@@ -202,6 +206,52 @@ defmodule HomelabWeb.AuthControllerTest do
       assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "Signed in"
       assert get_session(conn, :user_id) != nil
       assert get_session(conn, :oidc_state) == nil
+    end
+
+    test "refuses a subject the instance will not provision, without looping", %{
+      conn: conn,
+      bypass: bypass,
+      oidc_url: url
+    } do
+      # The refusal must NOT be a redirect to "/". That path is RequireAuth-protected, so
+      # "/" bounces to /auth/oidc, which bounces to the provider, which comes back here
+      # and is refused again — an infinite loop the user cannot escape. Answer plainly
+      # instead, the way `oidc_unavailable/2` already does for an unreachable provider.
+      state = "test-state"
+      stub_discovery(bypass, url)
+      before = Homelab.Repo.aggregate(Homelab.Accounts.User, :count)
+
+      Bypass.expect_once(bypass, "POST", "/token", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"access_token" => "t", "token_type" => "Bearer"}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/userinfo", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "sub" => "stranger-sub",
+            "email" => "stranger@elsewhere.example",
+            "name" => "Stranger"
+          })
+        )
+      end)
+
+      {conn, _log} =
+        with_log(fn ->
+          conn
+          |> delete_session(:user_id)
+          |> put_session(:oidc_state, state)
+          |> get("/auth/oidc/callback", %{"code" => "auth-code", "state" => state})
+        end)
+
+      assert conn.status == 403
+      assert conn.resp_body =~ "not permitted"
+      assert Homelab.Repo.aggregate(Homelab.Accounts.User, :count) == before
+      assert get_session(conn, :user_id) == nil
     end
 
     test "redirects with error when discovery fails during callback", %{
