@@ -2,8 +2,11 @@ defmodule Homelab.Accounts do
   @moduledoc """
   Context for user accounts.
   """
+  require Logger
+
   alias Homelab.Repo
   alias Homelab.Accounts.User
+  alias Homelab.Settings
 
   @doc """
   Gets a single user by id.
@@ -28,6 +31,27 @@ defmodule Homelab.Accounts do
 
   Expects a map with "sub", "email", "name", and optionally "picture" keys.
   Upserts based on the sub claim.
+
+  A `sub` this instance has seen before always signs in — the gate below is about
+  PROVISIONING, not authentication, and an existing user's role is never changed by
+  signing in again.
+
+  An unknown `sub` is only provisioned when one of these says yes:
+
+    * **it is the first user.** Somebody has to be able to get in, and they become the
+      `:admin` — otherwise a fresh install is born with no administrator and no way to
+      appoint one.
+    * **`oidc_allowed_emails` matches.** Comma- or newline-separated; an entry is either
+      a full address or a domain written `@example.com`. Case-insensitive. A domain entry
+      matches the address's domain exactly, never as a suffix, so `@example.com` does not
+      admit `evil@example.com.attacker.net`.
+    * **`oidc_auto_provision` is `"true"`.** The old behaviour, kept as an explicit
+      opt-in for anyone whose issuer is already the access boundary (a private IdP that
+      only holds the accounts it should).
+
+  Otherwise `{:error, :not_allowed}`. This matters because the issuer is frequently NOT
+  an access boundary: a public Google or GitHub OIDC app will mint a token for anyone
+  alive, and every such account used to land here with full control of the Docker host.
   """
   def get_or_create_from_oidc(attrs) when is_map(attrs) do
     sub = Map.get(attrs, "sub") || Map.get(attrs, :sub)
@@ -44,9 +68,7 @@ defmodule Homelab.Accounts do
 
     case get_user_by_sub(sub) do
       nil ->
-        %User{}
-        |> User.changeset(oidc_attrs)
-        |> Repo.insert()
+        provision_from_oidc(oidc_attrs)
 
       user ->
         user
@@ -54,6 +76,51 @@ defmodule Homelab.Accounts do
         |> Repo.update()
     end
   end
+
+  defp provision_from_oidc(oidc_attrs) do
+    cond do
+      not Repo.exists?(User) ->
+        %User{}
+        |> User.changeset(Map.put(oidc_attrs, :role, :admin))
+        |> Repo.insert()
+
+      provisioning_allowed?(oidc_attrs.email) ->
+        %User{}
+        |> User.changeset(Map.put(oidc_attrs, :role, :member))
+        |> Repo.insert()
+
+      true ->
+        Logger.warning(
+          "OIDC provisioning refused for sub=#{inspect(oidc_attrs.sub)} " <>
+            "email=#{inspect(oidc_attrs.email)}: not on oidc_allowed_emails and " <>
+            "oidc_auto_provision is not enabled."
+        )
+
+        {:error, :not_allowed}
+    end
+  end
+
+  defp provisioning_allowed?(email) do
+    Settings.get("oidc_auto_provision") == "true" or email_allowed?(email)
+  end
+
+  defp email_allowed?(email) when is_binary(email) do
+    email = String.downcase(String.trim(email))
+    domain = email |> String.split("@") |> List.last()
+
+    "oidc_allowed_emails"
+    |> Settings.get("")
+    |> to_string()
+    |> String.split([",", "\n"], trim: true)
+    |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.any?(fn
+      "@" <> allowed_domain -> allowed_domain == domain
+      allowed_email -> allowed_email == email
+    end)
+  end
+
+  defp email_allowed?(_), do: false
 
   @doc """
   Gets or creates the local break-glass admin user.
