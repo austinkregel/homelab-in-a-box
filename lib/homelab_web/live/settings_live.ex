@@ -561,6 +561,16 @@ defmodule HomelabWeb.SettingsLive do
              |> load_section_data("users")
              |> put_flash(:info, "User role updated!")}
 
+          # `update_user/2` refuses for reasons the operator has to be told — most
+          # importantly that this is the last administrator, which is a deliberate
+          # guard rather than a fault. "Failed to update role" made every one of them
+          # look like the same broken button, which is the bug class
+          # `ChangesetErrors` exists for. Rendering the changeset rather than matching
+          # on a particular reason keeps this correct as new validations are added.
+          {:error, %Ecto.Changeset{} = changeset} ->
+            {:noreply,
+             put_flash(socket, :error, HomelabWeb.ChangesetErrors.to_sentence(changeset))}
+
           {:error, _} ->
             {:noreply, put_flash(socket, :error, "Failed to update role")}
         end
