@@ -124,7 +124,7 @@ defmodule Homelab.AccountsTest do
       insert(:user, role: :member)
 
       assert {:error, _} = Accounts.update_user(admin, %{role: :member})
-      assert Accounts.any_admin?()
+      assert Accounts.list_admins() != []
     end
 
     test "is only the LAST one — one of two can be demoted" do
@@ -133,7 +133,7 @@ defmodule Homelab.AccountsTest do
 
       assert {:ok, updated} = Accounts.update_user(other, %{role: :member})
       assert updated.role == :member
-      assert Accounts.any_admin?()
+      assert Accounts.list_admins() != []
     end
 
     test "can still be edited, as long as the role is not what changes" do
