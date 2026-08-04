@@ -66,14 +66,27 @@ defmodule Homelab.Accounts do
       avatar_url: picture
     }
 
-    case get_user_by_sub(sub) do
-      nil ->
-        provision_from_oidc(oidc_attrs)
+    result =
+      case get_user_by_sub(sub) do
+        nil ->
+          provision_from_oidc(oidc_attrs)
 
-      user ->
-        user
-        |> User.changeset(oidc_attrs)
-        |> Repo.update()
+        user ->
+          user
+          |> User.changeset(oidc_attrs)
+          |> Repo.update()
+      end
+
+    case result do
+      {:ok, user} ->
+        # Sign-in is the moment an instance with no administrator can be repaired: it is
+        # the only point where we know somebody is present to be one. Re-read afterwards
+        # so the caller is not handed a struct that disagrees with the row.
+        ensure_admin()
+        {:ok, Repo.get(User, user.id)}
+
+      error ->
+        error
     end
   end
 
@@ -191,12 +204,94 @@ defmodule Homelab.Accounts do
   end
 
   @doc """
+  Whether this user is the only administrator left.
+
+  Public so a caller can refuse before it tries, and say why — `update_user/2` returns
+  an ordinary changeset error, which reads as "invalid" rather than "not allowed".
+  """
+  @spec last_admin?(User.t() | nil) :: boolean()
+  def last_admin?(%User{role: :admin, id: id}) do
+    import Ecto.Query
+
+    Repo.one(from u in User, where: u.role == :admin, select: count()) == 1 and
+      Repo.exists?(from u in User, where: u.role == :admin and u.id == ^id)
+  end
+
+  def last_admin?(_), do: false
+
+  @doc """
+  Promotes the instance's oldest account to `:admin` if it has no administrator at all.
+
+  The first-user rule in `get_or_create_from_oidc/1` only helps NEW installs. An
+  instance predating role enforcement can hold nothing but members — `role` defaults to
+  `:member` and the only writer of `:admin` was a break-glass login — so upgrading it
+  would leave every administrator-only route unreachable by everyone, recoverable only
+  from a break-glass token placed in advance.
+
+  It picks the OLDEST account, not whoever happens to sign in: the person who set the
+  box up is its owner, and a land-grab would be a worse answer than the lockout. Called
+  on sign-in, idempotent, and a no-op the moment any administrator exists.
+  """
+  @spec ensure_admin :: {:ok, User.t()} | :none
+  def ensure_admin do
+    import Ecto.Query
+
+    if any_admin?() do
+      :none
+    else
+      case Repo.one(from u in User, order_by: [asc: u.id], limit: 1) do
+        nil ->
+          :none
+
+        user ->
+          Logger.warning(
+            "No administrator on this instance; promoting the oldest account " <>
+              "(user_id=#{user.id}, #{user.email}). Change it in Settings if that is wrong."
+          )
+
+          user
+          |> Ecto.Changeset.change(%{role: :admin})
+          |> Repo.update()
+          |> case do
+            {:ok, promoted} -> {:ok, promoted}
+            {:error, _} -> :none
+          end
+      end
+    end
+  end
+
+  @doc """
   Updates a user.
+
+  Refuses to demote the last administrator, with an error on `:role`.
+
+  That refusal lives here rather than at the one LiveView that calls it today because it
+  is an invariant of the account model: `HomelabWeb.Plugs.RequireAdmin` lets everyone
+  through while the instance has no administrator, so driving the count to zero would
+  silently hand every signed-in user the run of Settings — while the role selector stays
+  on screen implying enforcement. The API and anything written later need the same
+  answer, and there is no delete or deactivate to route around it.
   """
   def update_user(%User{} = user, attrs) do
     user
     |> User.changeset(attrs)
+    |> refuse_last_admin_demotion(user)
     |> Repo.update()
+  end
+
+  defp refuse_last_admin_demotion(changeset, user) do
+    demoting? =
+      user.role == :admin and Ecto.Changeset.get_field(changeset, :role) != :admin
+
+    if demoting? and last_admin?(user) do
+      Ecto.Changeset.add_error(
+        changeset,
+        :role,
+        "cannot be changed: this is the only administrator left"
+      )
+    else
+      changeset
+    end
   end
 
   @doc """
