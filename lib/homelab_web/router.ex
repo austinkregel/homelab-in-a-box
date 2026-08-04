@@ -15,6 +15,10 @@ defmodule HomelabWeb.Router do
     plug HomelabWeb.Plugs.RequireAuth
   end
 
+  pipeline :admin do
+    plug HomelabWeb.Plugs.RequireAdmin
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
     # The only API credential this app has is the browser session cookie, and
@@ -72,6 +76,32 @@ defmodule HomelabWeb.Router do
       live "/backups", BackupsLive, :index
       live "/activity", ActivityLive, :index
       live "/telemetry", TelemetryLive, :index
+    end
+  end
+
+  # Administrator-only routes.
+  #
+  # Settings is the whole of it, deliberately. There is no user<->tenant relationship in
+  # the schema, so "member" means "full access to everything" and gating a route is a
+  # blunt instrument — gate too much and non-admins can no longer use the box at all.
+  # Settings is different in kind from the rest: it is where privilege is GRANTED (the
+  # role dropdown) and where authentication itself can be switched back OFF (`rerun_setup`
+  # deletes `setup_completed`, and RequireAuth deliberately fails open while setup is
+  # incomplete, so any member could disable auth for the entire app). Closing the
+  # escalation path is the part that matters while there is no membership model; gating
+  # ordinary deployment work would only cost usability without drawing a real boundary.
+  #
+  # The export endpoint travels with it: it dumps the instance's configuration as JSON.
+  scope "/", HomelabWeb do
+    pipe_through [:browser, :authenticated, :admin]
+
+    live_session :admin,
+      on_mount: [
+        {HomelabWeb.Live.Hooks, :require_setup},
+        {HomelabWeb.Live.Hooks, :require_auth},
+        {HomelabWeb.Live.Hooks, :require_admin},
+        {HomelabWeb.Live.Hooks, :notifications}
+      ] do
       live "/settings", SettingsLive, :index
     end
 
