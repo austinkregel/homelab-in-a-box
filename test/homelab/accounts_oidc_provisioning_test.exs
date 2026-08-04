@@ -77,7 +77,9 @@ defmodule Homelab.AccountsOidcProvisioningTest do
       Settings.set("oidc_allowed_emails", "alice@example.com, bob@example.com")
 
       assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("bob", "bob@example.com"))
-      assert {:error, :not_allowed} = Accounts.get_or_create_from_oidc(oidc("eve", "eve@evil.com"))
+
+      assert {:error, :not_allowed} =
+               Accounts.get_or_create_from_oidc(oidc("eve", "eve@evil.com"))
     end
 
     test "admits a whole domain written with a leading @" do
