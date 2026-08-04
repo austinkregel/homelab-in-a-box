@@ -73,7 +73,12 @@ defmodule HomelabWeb.Plugs.RequireAdminTest do
       # defaults to :member and, before this change, nothing ever set :admin except a
       # break-glass login — so an existing instance can genuinely have zero admins, and
       # a strict gate would brick the only page that can create one.
-      {:ok, _} = Accounts.update_user(user, %{role: :member})
+      # Written straight to the row, not through `update_user/2` — that now refuses to
+      # demote the last admin, so this state is unreachable through the app. Which is
+      # the point: it is a LEGACY state, what an instance that predates enforcement
+      # looks like, and the exemption exists only to get such an instance back on its
+      # feet.
+      user |> Ecto.Changeset.change(%{role: :member}) |> Homelab.Repo.update!()
       {conn, _member} = member_conn(conn)
 
       assert Accounts.list_admins() == []
