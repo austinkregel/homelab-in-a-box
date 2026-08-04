@@ -9,6 +9,7 @@ defmodule HomelabWeb.Live.Hooks do
   alias Homelab.Settings
   alias Homelab.Accounts
   alias Homelab.Notifications
+  alias HomelabWeb.Plugs.RequireAdmin
 
   def on_mount(:require_setup, _params, _session, socket) do
     if Settings.setup_completed?() do
@@ -32,6 +33,27 @@ defmodule HomelabWeb.Live.Hooks do
       end
     else
       {:halt, redirect(socket, to: "/setup")}
+    end
+  end
+
+  # Restricts a `live_session` to administrators. The LiveView half of
+  # `HomelabWeb.Plugs.RequireAdmin` — the plug guards the HTTP request, this guards the
+  # socket that request opens afterwards, and both defer to the same predicate.
+  #
+  # Must be listed AFTER `:require_auth`, which is what assigns `:current_user`. Ordered
+  # the other way, an anonymous visitor would be told they are not an administrator
+  # instead of being sent to log in.
+  #
+  # (A comment rather than @doc: `on_mount/4` already carries one on the :notifications
+  # clause below, and Elixir warns when a second is attached to the same function.)
+  def on_mount(:require_admin, _params, _session, socket) do
+    if RequireAdmin.authorized?(socket.assigns[:current_user]) do
+      {:cont, socket}
+    else
+      {:halt,
+       socket
+       |> put_flash(:error, "That area is restricted to administrators.")
+       |> redirect(to: "/")}
     end
   end
 
