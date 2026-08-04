@@ -107,7 +107,14 @@ defmodule HomelabWeb.RouterAuthTest do
     paths = Enum.map(routes(), & &1.path)
 
     assert Enum.any?(paths, &String.starts_with?(&1, "/api/v1/tenants"))
-    assert Enum.any?(paths, &String.starts_with?(&1, "/api/v1/backups"))
+    assert Enum.any?(paths, &(&1 =~ ~r{^/api/v1/tenants/[^/]+/backups}))
+
+    # F10: backups were top-level and unscoped, so any logged-in user could restore any
+    # tenant's snapshot. Re-adding a top-level route would reinstate that bypass whether
+    # or not the nested one still exists, so pin its absence rather than only asserting
+    # the nested route is present.
+    refute Enum.any?(paths, &String.starts_with?(&1, "/api/v1/backups"))
+
     assert "/api/v1/health" not in paths
     assert length(paths) > 10
   end
