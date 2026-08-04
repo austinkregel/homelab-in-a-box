@@ -126,13 +126,18 @@ defmodule HomelabWeb.Router do
   scope "/api/v1", HomelabWeb.Api.V1 do
     pipe_through [:api, :api_authenticated]
 
+    # Backups nest under the tenant like everything else. Top-level `/backups` meant
+    # `index` listed every tenant's jobs and `show`/`restore` took a bare id, so any
+    # signed-in user could read all backup history and restore any tenant's snapshot
+    # over `/data/restore`. The old paths are removed rather than kept as aliases —
+    # left in place they would simply be a bypass of the scoping.
     resources "/tenants", TenantController, except: [:new, :edit] do
       resources "/deployments", DeploymentController, except: [:new, :edit]
+      resources "/backups", BackupController, only: [:index, :show, :create]
+      post "/backups/:id/restore", BackupController, :restore
     end
 
     resources "/app-templates", AppTemplateController, only: [:index, :show]
-    resources "/backups", BackupController, only: [:index, :show, :create]
-    post "/backups/:id/restore", BackupController, :restore
   end
 
   if Application.compile_env(:homelab, :dev_routes) do
