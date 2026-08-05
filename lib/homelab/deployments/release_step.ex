@@ -14,6 +14,10 @@ defmodule Homelab.Deployments.ReleaseStep do
     # Greenfield deploy steps.
     :network,
     :provision_credentials,
+    # The shared ingress proxy (Traefik). Planned FIRST for a routed release, before
+    # any container exists — the proxy is a precondition of the route, not a product
+    # of it. Deliberately has no compensation; see `ReleaseSteps.EnsureIngressProxy`.
+    :ensure_ingress_proxy,
     :dependency_container,
     :await_health,
     # Applies the credentials the app was configured with to the datastore that has to
@@ -28,6 +32,13 @@ defmodule Homelab.Deployments.ReleaseStep do
     # (re)created AFTER the container that owns it — the donor's id is part of the
     # child's create payload. Same handler as the others; the ORDER is the point.
     :netns_child_container,
+    # The two halves of "this deployment answers to a name": the local `Domain` row
+    # (ownership, exposure, TLS state) and the externally-visible A records. Both run
+    # AFTER the app is healthy, because neither should advertise a name that nothing
+    # is serving yet. `:publish_dns` compensates; `:sync_domain` compensates only a
+    # row it actually created — see the respective handlers.
+    :sync_domain,
+    :publish_dns,
     :publish_ingress,
     # Adoption steps (taking over an existing stack in place). `:backup_verify`
     # is the fail-closed gate; `:adopt_credentials` imports existing secrets
