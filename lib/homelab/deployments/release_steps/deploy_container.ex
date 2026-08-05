@@ -13,6 +13,12 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
   `compensate/2` undeploys the container and clears the row's `external_id`, so a
   rolled-back release leaves no orphan. Idempotent: undeploy of a missing
   container is a no-op.
+
+  Both failure branches mark the deployment `:failed`. That is not cosmetic: a row
+  left `:pending` with no `external_id` is a row the reconciler skips forever
+  (`converge_one/2` returns on `external_id: nil`), so a saga deploy that failed to
+  build a spec or failed at the orchestrator would sit "pending" with no convergence
+  path and no error on the page.
   """
 
   @behaviour Homelab.Deployments.ReleaseStep.Handler
@@ -50,9 +56,27 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
            }}
 
         {:error, reason} ->
+          mark_failed(deployment, reason)
           {:error, {:deploy_failed, deployment.id, reason}}
       end
+    else
+      # `SpecBuilder.build/1` failed. This `with` had no `else`, so the error fell
+      # straight through to the runner and the deployment row was left `:pending` —
+      # and `Reconciler.converge_one/2` returns immediately for a row with no
+      # `external_id`, so nothing ever moved it again. `do_deploy/1` set `:failed`
+      # here; losing that on the saga path is how a deployment becomes permanently
+      # invisible instead of visibly broken.
+      {:error, reason} ->
+        mark_failed(load_target(step, ctx), reason)
+        {:error, {:spec_build_failed, reason}}
     end
+  end
+
+  # Same shape `do_deploy/1` wrote: a terminal status plus the reason, so the failure
+  # is legible on the deployment page and not only in the release's step row.
+  defp mark_failed(deployment, reason) do
+    _ = Deployments.update_status(deployment, :failed, error: inspect(reason))
+    :ok
   end
 
   @impl true
