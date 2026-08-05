@@ -707,12 +707,20 @@ defmodule Homelab.Deployments do
         ]
       end)
 
+    # Ingress LAST, after the children exist.
+    #
+    # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason
+    # a child's route change re-creates the donor. Publishing before the children were
+    # (re)created advertised every one of those routes to a namespace holding nothing
+    # yet, so the window between "donor healthy" and "last child healthy" served 502s on
+    # names that had been working a moment earlier. The proxy still goes first: it is a
+    # precondition, not an advertisement.
     steps =
       ingress_proxy_steps(donor) ++
         [
           %{type: :app_container, resource_handle: %{}},
           %{type: :await_health, resource_handle: %{}}
-        ] ++ ingress_steps(donor) ++ child_steps
+        ] ++ child_steps ++ ingress_steps(donor)
 
     with {:ok, donor} <- reset_to_pending(donor),
          {:ok, _children} <- reset_all_to_pending(children),
