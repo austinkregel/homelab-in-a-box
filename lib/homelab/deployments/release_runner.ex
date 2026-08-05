@@ -36,6 +36,18 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
   alias Homelab.Repo
   alias Homelab.Deployments.{Release, Releases, ReleaseSteps}
+  alias Homelab.Services.ActivityLog
+
+  # Step types that bring a workload into existence. Their completion is the saga's
+  # equivalent of `do_deploy/1`'s one "<app> deployed" entry, and the only per-step
+  # success worth an Activity row — logging every step would bury the transitions that
+  # matter under health polls and grant reconciliations.
+  @workload_steps [
+    :dependency_container,
+    :app_container,
+    :netns_child_container,
+    :adopt_container
+  ]
 
   @lease_ttl_seconds 120
   @snooze_seconds 15
@@ -88,7 +100,19 @@ defmodule Homelab.Deployments.ReleaseRunner do
   defp drive(release, owner) do
     reclaim_running_steps(release)
     # planning -> provisioning; no-ops cleanly on resume (already provisioning).
-    Releases.transition_release(release, :provisioning, [:planning])
+    case Releases.transition_release(release, :provisioning, [:planning]) do
+      {:ok, _} ->
+        activity(
+          :info,
+          "deploy",
+          "#{release_label(release)} release started",
+          release.deployment_id
+        )
+
+      {:noop, _} ->
+        :ok
+    end
+
     loop(release.id, owner)
   end
 
@@ -115,7 +139,14 @@ defmodule Homelab.Deployments.ReleaseRunner do
   end
 
   defp finalize(release) do
-    Releases.transition_release(release, :running, [:provisioning, :planning])
+    case Releases.transition_release(release, :running, [:provisioning, :planning]) do
+      {:ok, _} ->
+        activity(:info, "deploy", "#{release_label(release)} deployed", release.deployment_id)
+
+      {:noop, _} ->
+        :ok
+    end
+
     :ok
   end
 
@@ -131,16 +162,35 @@ defmodule Homelab.Deployments.ReleaseRunner do
         try do
           case with_lease_heartbeat(release_id, owner, fn -> handler.run(step, ctx) end) do
             {:ok, handle} when is_map(handle) ->
-              Releases.transition_step(step, :completed, [:running], handle: handle)
+              # Activity entries hang off the compare-and-set, never off the handler
+              # call. The CAS is already the idempotency guard the saga relies on, so a
+              # resumed or raced runner that re-runs an idempotent handler gets
+              # `{:noop, _}` here and writes no second entry. Logging next to the
+              # handler instead would double every line on every resume.
+              case Releases.transition_step(step, :completed, [:running], handle: handle) do
+                {:ok, completed} -> log_step_completed(completed, ctx)
+                {:noop, _} -> :ok
+              end
+
               :ok
 
             {:error, reason} ->
-              Releases.transition_step(step, :failed, [:running], error: format_error(reason))
+              case Releases.transition_step(step, :failed, [:running],
+                     error: format_error(reason)
+                   ) do
+                {:ok, failed} -> log_step_failed(failed, ctx, reason)
+                {:noop, _} -> :ok
+              end
+
               {:error, reason}
           end
         rescue
           e ->
-            Releases.transition_step(step, :failed, [:running], error: Exception.message(e))
+            case Releases.transition_step(step, :failed, [:running], error: Exception.message(e)) do
+              {:ok, failed} -> log_step_failed(failed, ctx, e)
+              {:noop, _} -> :ok
+            end
+
             {:error, e}
         end
     end
@@ -214,9 +264,20 @@ defmodule Homelab.Deployments.ReleaseRunner do
     release = Releases.get_release(release_id)
     _ = Releases.acquire_lease(release, owner, lease_ttl_seconds())
 
-    Releases.transition_release(release, :rolling_back, [:planning, :provisioning],
-      error: format_error(reason)
-    )
+    case Releases.transition_release(release, :rolling_back, [:planning, :provisioning],
+           error: format_error(reason)
+         ) do
+      {:ok, _} ->
+        activity(
+          :error,
+          "deploy",
+          "#{release_label(release)} release failed, rolling back: #{format_error(reason)}",
+          release.deployment_id
+        )
+
+      {:noop, _} ->
+        :ok
+    end
 
     release = Releases.get_release(release_id)
     ctx = build_ctx(release)
@@ -224,7 +285,19 @@ defmodule Homelab.Deployments.ReleaseRunner do
     case compensate_all(Releases.completed_steps_desc(release), ctx) do
       :ok ->
         release = Releases.get_release(release_id)
-        Releases.transition_release(release, :rolled_back, [:rolling_back])
+
+        case Releases.transition_release(release, :rolled_back, [:rolling_back]) do
+          {:ok, _} ->
+            activity(
+              :error,
+              "deploy",
+              "#{release_label(release)} release rolled back",
+              release.deployment_id
+            )
+
+          {:noop, _} ->
+            :ok
+        end
 
         notify_admins_rollback(
           ctx.deployment,
@@ -238,9 +311,20 @@ defmodule Homelab.Deployments.ReleaseRunner do
         Logger.error("[release] #{release_id} rollback FAILED: #{format_error(comp_reason)}")
         release = Releases.get_release(release_id)
 
-        Releases.transition_release(release, :rollback_failed, [:rolling_back],
-          error: format_error(comp_reason)
-        )
+        case Releases.transition_release(release, :rollback_failed, [:rolling_back],
+               error: format_error(comp_reason)
+             ) do
+          {:ok, _} ->
+            activity(
+              :error,
+              "deploy",
+              "#{release_label(release)} rollback FAILED: #{format_error(comp_reason)}",
+              release.deployment_id
+            )
+
+          {:noop, _} ->
+            :ok
+        end
 
         notify_admins_rollback(
           ctx.deployment,
@@ -275,6 +359,67 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
   defp deployment_label(%{app_template: %{name: name}}) when is_binary(name), do: name
   defp deployment_label(%{id: id}), do: "deployment ##{id}"
+
+  # --- Activity log ---------------------------------------------------------
+  #
+  # The saga wrote nothing to the Activity page. `do_deploy/1` logged an info on a
+  # successful deploy and an error on either failure, so every deployment made through
+  # the imperative path had a history and every deployment made through a release had
+  # none — greenfield, adoption, netns and redeploy alike.
+  #
+  # This lives in the runner rather than in the handlers for two reasons: the entries
+  # are release TRANSITIONS, not resources (nothing about a log line is compensatable,
+  # and a step per entry would double every plan), and the runner is the one place that
+  # sees every saga path, so nothing has to be remembered when a new planner is added.
+
+  # Which deployment an entry files under. A step names its own target in
+  # `resource_handle["deployment_id"]` — so a companion's failure files under the
+  # COMPANION, which is what the Activity page filters on; a release-level entry files
+  # under the release's app.
+  defp step_deployment_id(step, ctx) do
+    Map.get(step.resource_handle || %{}, "deployment_id") ||
+      (ctx.release && ctx.release.deployment_id) ||
+      (ctx.deployment && ctx.deployment.id)
+  end
+
+  defp log_step_completed(%{type: type} = step, ctx) when type in @workload_steps do
+    id = step_deployment_id(step, ctx)
+    activity(:info, "deploy", "#{label_for(id)} deployed", id)
+  end
+
+  defp log_step_completed(_step, _ctx), do: :ok
+
+  defp log_step_failed(step, ctx, reason) do
+    id = step_deployment_id(step, ctx)
+
+    activity(
+      :error,
+      "deploy",
+      "#{label_for(id)} #{step.type} failed: #{format_error(reason)}",
+      id
+    )
+  end
+
+  defp release_label(release), do: label_for(release && release.deployment_id)
+
+  defp label_for(nil), do: deployment_label(nil)
+
+  defp label_for(deployment_id) do
+    case Homelab.Deployments.get_deployment(deployment_id) do
+      {:ok, deployment} -> deployment_label(deployment)
+      _ -> deployment_label(%{id: deployment_id})
+    end
+  end
+
+  # Best-effort, always. An Activity write must never be the thing that fails a
+  # release or a rollback.
+  defp activity(level, source, message, deployment_id) do
+    metadata = if deployment_id, do: %{deployment_id: deployment_id}, else: %{}
+    apply(ActivityLog, level, [source, message, metadata])
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp compensate_all(steps, ctx) do
     Enum.reduce_while(steps, :ok, fn step, _acc ->
