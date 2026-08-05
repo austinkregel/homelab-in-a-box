@@ -464,7 +464,11 @@ defmodule Homelab.Deployments.NetnsTest do
       steps = Enum.sort_by(release.steps, & &1.position)
       types = Enum.map(steps, & &1.type)
 
-      assert Enum.at(types, 0) == :dependency_container
+      # The donor is the first CONTAINER. `:ensure_ingress_proxy` may precede it for a
+      # routed release — it creates nothing, and the ordering claim here is about which
+      # workload is built first.
+      assert Enum.find_index(types, &(&1 in [:dependency_container, :app_container])) ==
+               Enum.find_index(types, &(&1 == :dependency_container))
 
       assert Enum.find(steps, &(&1.type == :dependency_container)).resource_handle == %{
                "deployment_id" => ctx.donor.id
@@ -491,6 +495,34 @@ defmodule Homelab.Deployments.NetnsTest do
       child_step = Enum.find(steps, &(&1.type == :netns_child_container))
       assert child_step.resource_handle == %{"deployment_id" => child.id}
       assert child_step.position > Enum.find(steps, &(&1.type == :app_container)).position
+    end
+
+    # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason
+    # a child's route change re-creates the donor. Publishing before the children were
+    # (re)created advertised every one of those routes to a namespace holding nothing
+    # yet, so the window between "donor healthy" and "last child healthy" served 502s on
+    # names that had been working a moment earlier.
+    test "a routed stack publishes ingress only after every child exists", ctx do
+      {:ok, donor} = Deployments.update_deployment(ctx.donor, %{domain: "vpn.example.com"})
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(child.id))
+      release = Repo.preload(release, :steps)
+
+      steps = Enum.sort_by(release.steps, & &1.position)
+      types = Enum.map(steps, & &1.type)
+
+      last_child = Enum.find_index(Enum.reverse(types), &(&1 == :netns_child_container))
+      last_child = length(types) - 1 - last_child
+
+      for advertising <- [:sync_domain, :publish_dns, :publish_ingress] do
+        assert Enum.find_index(types, &(&1 == advertising)) > last_child,
+               "#{advertising} must come after the last child"
+      end
+
+      # The proxy is the exception, and is still first: it creates nothing and
+      # advertises nothing — it is a precondition of the route.
+      assert Enum.at(types, 0) == :ensure_ingress_proxy
     end
 
     test "driving the stack from the DONOR gives the same release", ctx do
