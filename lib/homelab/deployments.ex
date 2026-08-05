@@ -7,6 +7,7 @@ defmodule Homelab.Deployments do
   """
 
   import Ecto.Query
+  require Logger
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Netns
@@ -455,6 +456,74 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
+  Creates a deployment and provisions it through the durable release saga —
+  the replacement for `deploy_now/1`, which deploys imperatively inside the caller's
+  request with no release row, no health gate, no ingress-after-healthy and no
+  rollback.
+
+  Returns `{:ok, %{deployment: deployment, release: release}}`. Callers need both: the
+  deployment to redirect to, the release to show progress against.
+
+  ## The pre-flight is the point
+
+  `SpecBuilder.build/1` is run synchronously against the app and every companion
+  BEFORE anything is created or planned. Without it the saga swallows the single most
+  common deploy error: `deploy_now/1` returns `{:error, {:missing_required_env, [...]}}`
+  in-request and the wizard flashes it, whereas an unchecked saga would create the row,
+  enqueue the job, hand the operator a green "deployment started", and then roll the
+  whole thing back seconds later in the background. A silently-reverted success is
+  worse than a loud failure.
+
+  It costs nothing: `SpecBuilder.build/1` is a pure read over rows already loaded, and
+  `DeployContainer` rebuilds the spec anyway.
+
+  ## Why the enqueue is outside the transaction
+
+  Create-and-plan is one `Repo.transaction`, so a failed plan cannot leave a deployment
+  row with no release. The Oban insert cannot join it: Oban runs on `Homelab.ObanRepo`,
+  a physically separate Postgres, so there is no transaction spanning both.
+
+  That is a property, not a wart. Enqueuing inside would be a lie (the job would be
+  visible to a worker before the release row committed); enqueuing after means the only
+  failure window leaves a committed `:planning` release with no job — and
+  `Reconciler.resume_stuck_releases/0` re-enqueues exactly those on its next tick. The
+  system converges; it does not lose the deploy.
+  """
+  def create_and_deploy_release(attrs, companions \\ []) when is_list(companions) do
+    Repo.transaction(fn ->
+      with {:ok, deployment} <- create_deployment(attrs),
+           deployment = get_deployment!(deployment.id),
+           all_companions = netns_donor_companions(deployment) ++ companions,
+           :ok <- preflight_specs([deployment | all_companions]),
+           {:ok, release} <- plan_deploy_release(deployment, all_companions, []) do
+        %{deployment: deployment, release: release}
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, %{release: release} = result} ->
+        enqueue_release(release)
+        {:ok, result}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Fails on the FIRST unbuildable spec and returns that reason verbatim, so callers
+  # keep matching on `{:error, {:missing_required_env, keys}}` exactly as they do
+  # against `deploy_now/1`.
+  defp preflight_specs(deployments) do
+    Enum.reduce_while(deployments, :ok, fn deployment, :ok ->
+      case SpecBuilder.build(get_deployment!(deployment.id)) do
+        {:ok, _spec} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @doc """
   Provisions a deployment (and any companion deployments) durably via the release
   saga instead of the imperative in-request path: plans the ordered steps and
   enqueues `ReleaseRunner`. Companions are deployed and awaited healthy before the
@@ -467,30 +536,84 @@ defmodule Homelab.Deployments do
   `:running` once its `:app_container` step has run, and a failure rolls back the
   companions so nothing is orphaned.
   """
-  def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
+  def deploy_release(%Deployment{} = app, companions \\ [], opts \\ [])
       when is_list(companions) do
+    with {:ok, release} <- plan_deploy_release(app, companions, opts) do
+      enqueue_release(release)
+      {:ok, release}
+    end
+  end
+
+  # The plan, without the enqueue. Split out so `create_and_deploy_release/2` can put
+  # the whole create-and-plan inside one transaction and enqueue only after it commits
+  # (Oban lives on a different repo — see that function).
+  defp plan_deploy_release(%Deployment{} = app, companions, _opts) do
     steps =
-      Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
-        [
-          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
-          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
-        ] ++ datastore_grant_steps(app, companion)
-      end) ++
+      ingress_proxy_steps(app) ++
+        Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
+          [
+            %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+            %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
+          ] ++ datastore_grant_steps(app, companion)
+        end) ++
         [
           %{type: :app_container, resource_handle: %{}},
           %{type: :await_health, resource_handle: %{}}
         ] ++ ingress_steps(app)
 
-    with {:ok, release} <- Releases.plan_release(app, steps) do
-      {:ok, _job} = ReleaseRunner.enqueue(release)
-      {:ok, release}
+    Releases.plan_release(app, steps)
+  end
+
+  # A failed enqueue is not fatal and must not be raised as one. The release row is
+  # already committed in `:planning`, and `Reconciler.resume_stuck_releases/0` re-enqueues
+  # every release with no live lease on the next tick — so the worst case is a delay,
+  # not a lost deploy. Crashing here would instead leave a committed release nobody ever
+  # looks at because the caller thinks the whole thing failed.
+  defp enqueue_release(release) do
+    case ReleaseRunner.enqueue(release) do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[deployments] release #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
+            "the reconciler will resume it"
+        )
+
+        :ok
     end
   end
 
-  defp ingress_steps(%Deployment{domain: domain}) when is_binary(domain) and domain != "",
-    do: [%{type: :publish_ingress, resource_handle: %{}}]
+  # Is this deployment served at a name? The ONE definition of "routed", because three
+  # separate step lists key off it (`ingress_proxy_steps/1`, `ingress_steps/1`, and
+  # `redeploy_netns_stack/1` through them) and a fourth copy of `is_binary(domain) and
+  # domain != ""` is exactly how a plan ends up ensuring a proxy for a release that
+  # never publishes a route, or vice versa.
+  defp routed?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
 
-  defp ingress_steps(_app), do: []
+  # The proxy has to exist before anything that routes through it. Planned at position
+  # 1, ahead of every container: it is a precondition of the route, not a product of
+  # it, and failing there means no container has been created yet. See
+  # `ReleaseSteps.EnsureIngressProxy` for why it has no compensation.
+  defp ingress_proxy_steps(app) do
+    if routed?(app), do: [%{type: :ensure_ingress_proxy, resource_handle: %{}}], else: []
+  end
+
+  # The tail of a routed release, all of it after the app is healthy: claim the name
+  # locally, publish it to DNS, then actually grant reachability. Ordered so nothing
+  # advertises a name before something answers to it, and so compensation (which walks
+  # descending) severs reachability first, then DNS, then the row.
+  defp ingress_steps(app) do
+    if routed?(app) do
+      [
+        %{type: :sync_domain, resource_handle: %{}},
+        %{type: :publish_dns, resource_handle: %{}},
+        %{type: :publish_ingress, resource_handle: %{}}
+      ]
+    else
+      []
+    end
+  end
 
   @doc false
   # Reconciles the app's credentials against a datastore companion, AFTER that companion
@@ -585,10 +708,11 @@ defmodule Homelab.Deployments do
       end)
 
     steps =
-      [
-        %{type: :app_container, resource_handle: %{}},
-        %{type: :await_health, resource_handle: %{}}
-      ] ++ ingress_steps(donor) ++ child_steps
+      ingress_proxy_steps(donor) ++
+        [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}}
+        ] ++ ingress_steps(donor) ++ child_steps
 
     with {:ok, donor} <- reset_to_pending(donor),
          {:ok, _children} <- reset_all_to_pending(children),
@@ -837,7 +961,16 @@ defmodule Homelab.Deployments do
 
   defp create_dns_records(_deployment), do: :ok
 
-  defp detect_ip_config do
+  @doc """
+  The address deployment DNS records point at: this host's first non-loopback IPv4,
+  used for both the internal and public scope.
+
+  Public only so `ReleaseSteps.PublishDns` can use the SAME guess the imperative
+  `create_dns_records/1` uses. Two copies of "which IP does this host answer on"
+  drifting apart would publish one address through `deploy_now/1` and a different one
+  through the saga for the same deployment.
+  """
+  def detect_ip_config do
     internal_ip = get_host_lan_ip()
     %{internal_ip: internal_ip, public_ip: internal_ip}
   end
