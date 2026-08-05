@@ -285,11 +285,18 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
       assert ReleaseStep.types() == [
                :network,
                :provision_credentials,
+               # Ecto.Enum rejects a row whose type is absent from this list, so a
+               # planner emitting an unlisted step fails at insert. That is exactly how
+               # :ensure_datastore_grants stayed unreachable while being registered and
+               # implemented — which is why the routed steps are asserted here too.
+               :ensure_ingress_proxy,
                :dependency_container,
                :await_health,
                :ensure_datastore_grants,
                :app_container,
                :netns_child_container,
+               :sync_domain,
+               :publish_dns,
                :publish_ingress,
                :backup_verify,
                :adopt_credentials,
