@@ -86,20 +86,60 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   @type tier :: :preserve | :rebuildable | :external | :out_of_scope
   @type classification :: %{tier: tier(), reset_on_update: boolean()}
 
-  @doc """
-  The host root that delimits in-scope data. Resolution order: a UI override
-  (Settings `adoption_root`, read cache-only), then the `HOMELAB_ADOPTION_ROOT`
-  env var (via app config), then the built-in default.
+  @unconfigured_message """
+  The adoption root is not configured, and this instance is running in a container.
+
+  There is no safe default here. `~/homelab` resolves to `/root/homelab` INSIDE this
+  container, while the paths it is matched against are the HOST paths Docker reports for
+  bind mounts — so discovery would silently match nothing and every scan would read as
+  "you have nothing to import" rather than "you are looking in the wrong place".
+
+  Set it in Settings -> Import ("Adoption root"), or with the HOMELAB_ADOPTION_ROOT
+  environment variable. It must be an absolute HOST path.
   """
-  def adoption_root do
-    Homelab.Settings.get_cached("adoption_root") ||
-      Application.get_env(:homelab, :adoption_root) ||
-      default_root("homelab")
+
+  @doc """
+  The host root that delimits in-scope data, or
+  `{:error, :adoption_root_unconfigured}` when it is unset on a containerized
+  install. Non-raising counterpart of `adoption_root/0`.
+
+  Resolution order: a UI override (Settings `adoption_root`, read cache-only),
+  then the `HOMELAB_ADOPTION_ROOT` env var (via app config), then — only when the
+  plane is NOT containerized — a runtime default of `~/homelab`.
+  """
+  def fetch_adoption_root do
+    configured =
+      Homelab.Settings.get_cached("adoption_root") ||
+        Application.get_env(:homelab, :adoption_root)
+
+    cond do
+      is_binary(configured) and configured != "" -> {:ok, configured}
+      Homelab.Infrastructure.containerized?() -> {:error, :adoption_root_unconfigured}
+      true -> {:ok, default_root("homelab")}
+    end
   end
 
+  @doc """
+  The host root that delimits in-scope data.
+
+  Raises when unconfigured on a containerized install. Same argument as
+  `PermanentHome.managed_root/0`: a `System.user_home()` default is a path inside
+  the container, and it is then compared against (or handed to the daemon as) a
+  path on the host. The two are unrelated directories that share a name.
+  """
+  def adoption_root do
+    case fetch_adoption_root() do
+      {:ok, root} -> root
+      {:error, :adoption_root_unconfigured} -> raise ArgumentError, @unconfigured_message
+    end
+  end
+
+  @doc "The operator-facing explanation of an unconfigured adoption root."
+  def unconfigured_message, do: @unconfigured_message
+
   # A person-agnostic default derived at runtime: the current user's home +
-  # `homelab` (i.e. `~/homelab`). In a container this is `/root/homelab`, so set
-  # HOMELAB_ADOPTION_ROOT to the real host path there.
+  # `homelab` (i.e. `~/homelab`). Only reachable when NOT containerized — see
+  # `fetch_adoption_root/0`.
   defp default_root(suffix), do: Path.join(System.user_home() || "/root", suffix)
 
   @doc """
