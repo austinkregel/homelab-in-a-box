@@ -96,6 +96,62 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
     end
   end
 
+  # An external mount is still MOUNTED — the app needs its media library — it is simply
+  # not this plane's data to copy, checksum, or give a permanent home to. Dropping it
+  # would be the opposite failure to the one this fixes: a silently crippled app instead
+  # of a stalled import.
+  describe "external mounts are passed through, never managed" do
+    defp external_mount do
+      %{source: "/media/Music", target: "/music", type: "bind", tier: :external, rw: true}
+    end
+
+    test "the adopted template mounts it at its original host path" do
+      plan =
+        AdoptionPlanner.build_plan([
+          review_fixture(%{name: "navidrome", external: [external_mount()]})
+        ])
+
+      volumes = hd(plan.services).template_attrs.volumes
+      music = Enum.find(volumes, &(&1["container_path"] == "/music"))
+
+      assert music["source"] == "/media/Music"
+      assert music["type"] == "bind"
+    end
+
+    # The whole point: no backup gate, no copy, no managed volume for a NAS share.
+    test "it is not a migration target, so it is neither backed up nor copied" do
+      plan =
+        AdoptionPlanner.build_plan([
+          review_fixture(%{name: "navidrome", external: [external_mount()]})
+        ])
+
+      service = hd(plan.services)
+
+      refute Enum.any?(service.targets, &(&1["container_path"] == "/music"))
+
+      refute Enum.any?(
+               service.phase1 ++ service.phase2,
+               &(&1.type in [:backup_verify, :migrate_volume] and
+                   inspect(&1.resource_handle) =~ "/media/Music")
+             )
+    end
+
+    # Under :migrate the preserved mounts still get plane-owned volumes; external ones
+    # must not be swept along with them.
+    test "a preserved mount beside it is still migrated" do
+      plan =
+        AdoptionPlanner.build_plan([
+          review_fixture(%{name: "navidrome", external: [external_mount()]})
+        ])
+
+      volumes = hd(plan.services).template_attrs.volumes
+      preserved = Enum.find(volumes, &(&1["container_path"] == "/var/lib/postgresql/data"))
+
+      assert preserved["type"] == "volume"
+      refute preserved["source"] == "/media/Music"
+    end
+  end
+
   describe "build_plan/1" do
     test "emits the ordered Phase-1 steps with filesystem-path targets" do
       plan = AdoptionPlanner.build_plan([review_fixture()])

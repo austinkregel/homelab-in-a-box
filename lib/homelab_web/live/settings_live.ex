@@ -2349,6 +2349,12 @@ defmodule HomelabWeb.SettingsLive do
                   {length(svc.rebuildable)} rebuildable
                 </span>
                 <span
+                  :if={Map.get(svc, :external, []) != []}
+                  class="text-[11px] font-semibold text-warning bg-warning/15 rounded px-2 py-0.5"
+                >
+                  {length(Map.get(svc, :external, []))} mounted as-is
+                </span>
+                <span
                   :if={svc.out_of_scope != []}
                   class="text-[11px] font-semibold text-base-content/50 bg-base-content/10 rounded px-2 py-0.5"
                 >
@@ -2358,6 +2364,18 @@ defmodule HomelabWeb.SettingsLive do
               <ul :if={svc.preserve != []} class="mt-1.5 space-y-0.5">
                 <li :for={m <- svc.preserve} class="text-[11px] text-base-content/45 font-mono">
                   {m.target} ← {m.source}
+                </li>
+              </ul>
+              <%!-- Listed, not just counted. These are the mounts the import will NOT
+              back up or copy, and the operator is the only one who can tell whether that
+              is right — a NAS share should be passed through, a data dir that merely sits
+              outside the adoption root probably means the root is set wrong. --%>
+              <ul :if={Map.get(svc, :external, []) != []} class="mt-1.5 space-y-0.5">
+                <li
+                  :for={m <- Map.get(svc, :external, [])}
+                  class="text-[11px] text-warning/70 font-mono"
+                >
+                  {m.target} ← {m.source} <span class="not-italic">· mounted as-is, not copied</span>
                 </li>
               </ul>
             </div>

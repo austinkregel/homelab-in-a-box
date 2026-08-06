@@ -83,7 +83,7 @@ defmodule Homelab.Deployments.AdoptionPolicy do
     homelab_hf-cache homelab_piper-data homelab_openwakeword-data homelab_whisper-data
   )
 
-  @type tier :: :preserve | :rebuildable | :out_of_scope
+  @type tier :: :preserve | :rebuildable | :external | :out_of_scope
   @type classification :: %{tier: tier(), reset_on_update: boolean()}
 
   @doc """
@@ -189,6 +189,14 @@ defmodule Homelab.Deployments.AdoptionPolicy do
       rebuildable_volume?(mount) ->
         %{tier: :rebuildable, reset_on_update: false}
 
+      # AFTER the rebuildable checks, deliberately. A known scratch path is a statement
+      # about the NATURE of the data — regenerable, do not carry it over — and that is
+      # both more specific and more useful than "it is not under my root". Plex's
+      # transcode dir is `/tmp`: outside the root, and still something to recreate rather
+      # than bind the host's `/tmp` into the replacement.
+      external_bind?(mount) ->
+        %{tier: :external, reset_on_update: false}
+
       true ->
         %{tier: :preserve, reset_on_update: false}
     end
@@ -212,4 +220,24 @@ defmodule Homelab.Deployments.AdoptionPolicy do
     do: source in @rebuildable_volume_names
 
   defp rebuildable_volume?(_), do: false
+
+  # A bind whose host source is NOT under the adoption root: a media library on a second
+  # disk, a NAS export, a share the operator mounts for several stacks.
+  #
+  # Scope is a SERVICE-level verdict — one bind under the root pulls the whole container
+  # in — and every mount was then classified against that single answer. So a container
+  # with `appdata/navidrome` AND `/media/Music` had both marked `:preserve`, which is the
+  # tier that feeds `BackupVerify` and `MigrateCopy`. An import stalled trying to back up
+  # a Samba share; under `:migrate` the step after that would have copied the whole
+  # library into the managed home.
+  #
+  # These mounts are still MOUNTED — the app needs them — but they are not this plane's
+  # data to copy, checksum, or take a permanent home for. `AdoptionPlanner` binds them
+  # through in place at their original path regardless of strategy.
+  #
+  # Only binds. A named volume has no host path that could be on another drive; the
+  # daemon decides where it lives, and calling those external would strip every ordinary
+  # docker volume out of adoption.
+  defp external_bind?(%{type: "bind"} = mount), do: not bind_under_root?(mount)
+  defp external_bind?(_mount), do: false
 end
