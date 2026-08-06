@@ -20,6 +20,7 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
 
   alias Homelab.Docker.Client
   alias Homelab.Deployments.AdoptionPolicy
+  alias Homelab.Deployments.RuntimeSpec
 
   @anonymous_volume_re ~r/^[0-9a-f]{64}$/
 
@@ -49,7 +50,11 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           aliases: [String.t()],
           host_network: boolean(),
           in_scope: boolean(),
-          mounts: [mount()]
+          mounts: [mount()],
+          capabilities_add: [String.t()],
+          capabilities_drop: [String.t()],
+          devices: [map()],
+          sysctls: map()
         }
 
   @doc """
@@ -168,6 +173,23 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       # carrying this through as a network alias the stack loses its own DNS.
       compose_project: blank_to_nil(Map.get(labels, "com.docker.compose.project")),
       compose_service: blank_to_nil(Map.get(labels, "com.docker.compose.service")),
+      # WHAT THE KERNEL LET IT DO. Read from the same `HostConfig` the restart policy and
+      # network mode come from, and dropped for exactly as long as nobody asked it for.
+      #
+      # A tunnel container needs NET_ADMIN and `/dev/net/tun` to bring its interface up;
+      # a Zigbee bridge needs its USB device; gluetun needs `src_valid_mark` or policy
+      # routing breaks. Without these the replacement comes up stripped, and gluetun fails
+      # CLOSED — so an adopted VPN takes every app in its namespace offline with it, while
+      # the import reports success and nothing says why.
+      #
+      # `ComposeParser` captured all four from the compose file. Importing the same stack
+      # from its RUNNING containers dropped them: the capability existed, on one producer.
+      capabilities_add: RuntimeSpec.parse_capabilities(Map.get(host_config, "CapAdd")),
+      capabilities_drop: RuntimeSpec.parse_capabilities(Map.get(host_config, "CapDrop")),
+      devices: capture_devices(host_config),
+      # `Sysctls` is already `%{"name" => "value"}` on an inspect; normalize for the blank
+      # and nil cases rather than trusting the daemon's shape.
+      sysctls: RuntimeSpec.parse_sysctls(Map.get(host_config, "Sysctls")),
       aliases: network_aliases(inspect, labels, name),
       # What the container actually RUNS. `Config.Cmd` on an inspect is the EFFECTIVE
       # command — the image's default unless the compose file overrode it — so capturing
@@ -264,6 +286,24 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
   defp empty_to_nil([]), do: nil
   defp empty_to_nil(list) when is_list(list), do: list
   defp empty_to_nil(_value), do: nil
+
+  # Docker's inspect names a device's three parts differently from every other producer
+  # (`PathOnHost`/`PathInContainer`/`CgroupPermissions` rather than host/container/perms),
+  # so translate to the canonical row shape and let `RuntimeSpec` own the normalizing —
+  # the same function the compose importer and the deployment form already go through.
+  defp capture_devices(host_config) do
+    host_config
+    |> Map.get("Devices")
+    |> List.wrap()
+    |> Enum.map(fn device ->
+      %{
+        "host_path" => Map.get(device, "PathOnHost"),
+        "container_path" => Map.get(device, "PathInContainer"),
+        "permissions" => Map.get(device, "CgroupPermissions")
+      }
+    end)
+    |> RuntimeSpec.parse_devices()
+  end
 
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(nil), do: nil
