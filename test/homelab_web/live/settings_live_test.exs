@@ -93,6 +93,67 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "managed root" do
+    alias Homelab.Deployments.PermanentHome
+
+    setup do
+      on_exit(fn ->
+        Homelab.Settings.evict("managed_root")
+        Application.delete_env(:homelab, :containerized)
+      end)
+
+      :ok
+    end
+
+    # The managed root decides where adopted BYTES land. It had a form only under
+    # Infrastructure, two sections away from the import it governs, so a containerized
+    # install with nothing set had the daemon writing the operator's data to the HOST's
+    # /root/homelab-managed — a directory nobody chose.
+    test "the root can be set from the Import section, beside the adoption root",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      view
+      |> form("#managed-root-form", managed: %{"root" => "/mnt/tank/homelab-managed"})
+      |> render_submit()
+
+      assert PermanentHome.fetch_managed_root() == {:ok, "/mnt/tank/homelab-managed"}
+    end
+
+    test "a relative root is refused, with the same rule as the adoption root",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html =
+        view
+        |> form("#managed-root-form", managed: %{"root" => "~/homelab-managed"})
+        |> render_submit()
+
+      assert html =~ "absolute host path"
+      assert Homelab.Settings.get_cached("managed_root") == nil
+    end
+
+    test "an unset root on a containerized install is called out, not pre-filled with a guess",
+         %{conn: conn} do
+      prev = Application.get_env(:homelab, :managed_root)
+      Application.delete_env(:homelab, :managed_root)
+      Homelab.Settings.evict("managed_root")
+      Application.put_env(:homelab, :containerized, true)
+
+      on_exit(fn ->
+        if prev, do: Application.put_env(:homelab, :managed_root, prev)
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "import"})
+
+      assert html =~ "imports that copy data are blocked"
+      refute html =~ ~s(value="/root/homelab-managed")
+    end
+  end
+
   describe "OIDC configuration" do
     @discovery %{
       "issuer" => "https://aut.hair",
