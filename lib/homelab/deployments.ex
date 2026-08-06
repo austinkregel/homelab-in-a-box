@@ -585,7 +585,7 @@ defmodule Homelab.Deployments do
   defp plan_deploy_release(%Deployment{} = app, companions, _opts) do
     steps =
       ingress_proxy_steps(app) ++
-        Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
+        Enum.flat_map(companion_set(app, companions), fn companion ->
           [
             %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
             %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
@@ -597,6 +597,25 @@ defmodule Homelab.Deployments do
         ] ++ ingress_steps(app)
 
     Releases.plan_release(app, steps)
+  end
+
+  # Every deployment that must be up before the app: its netns donor, plus whatever the
+  # caller named. De-duplicated BY ID, and this is the only place that can be — the donor
+  # and the caller's list are only visible together here.
+  #
+  # The dedup is load-bearing, not defensive. A compose bundle where gluetun is both the
+  # namespace donor and an explicit companion (`deploy_release/2` from the wizard's
+  # compose path) otherwise yields two `:dependency_container` steps for one deployment.
+  # Both write `external_id`, so only the second is compensatable and the first container
+  # is orphaned — or the second collides on `service_name/2` and fails a release that
+  # should have succeeded.
+  #
+  # This lived as a comment on `netns_donor_companions/1` claiming the set WAS
+  # de-duplicated while nothing on the path did it. Enforcing it here means every caller
+  # gets it, rather than each one having to remember not to pass the donor through.
+  defp companion_set(%Deployment{} = app, companions) do
+    (netns_donor_companions(app) ++ companions)
+    |> Enum.uniq_by(& &1.id)
   end
 
   # Does this deployment answer to a name of its OWN? Distinct from `routed?/1`, and
@@ -656,8 +675,23 @@ defmodule Homelab.Deployments do
   # Granting REACHABILITY: attaching the workload Traefik resolves to the ingress
   # network. Always the release's own deployment — a netns child has no network endpoint
   # to attach, so a stack has exactly one of these and it is the donor's.
+  # Attaching the workload to the shared ingress network, so Traefik can resolve it.
+  #
+  # Keyed off `own_domain?/1`, NOT `routed?/1`, even though a domainless donor with routed
+  # children is genuinely routed. `publish_deployment/1` gates on `ingress_published?/1`,
+  # which requires the deployment's OWN domain — so for such a donor this step falls
+  # through to `:ok` having done nothing while recording `"published" => true`. A step
+  # that cannot act should not be planned, and one that reports success for work it did
+  # not do is the exact defect class this tier exists to remove.
+  #
+  # That donor still reaches ingress: `SpecBuilder` puts it there via `bridge_networks`
+  # at container-create time, because its children's routes resolve to its address. That
+  # is the mechanism that actually works; this step never contributed to it.
+  #
+  # `ensure_ingress_proxy` above stays on `routed?/1` — the proxy must exist for the
+  # children's routes whether or not the donor holds a name itself.
   defp reachability_steps(deployment) do
-    if routed?(deployment), do: [%{type: :publish_ingress, resource_handle: %{}}], else: []
+    if own_domain?(deployment), do: [%{type: :publish_ingress, resource_handle: %{}}], else: []
   end
 
   # The tail of a routed release, all of it after the app is healthy: claim the name
@@ -715,8 +749,8 @@ defmodule Homelab.Deployments do
   # healthy before the app — so the donor is prepended to the companion list rather than
   # needing an ordering mechanism of its own.
   #
-  # De-duplicated: the donor may also be a companion for another reason (a compose
-  # bundle where gluetun is both), and planning it twice would deploy it twice.
+  # NOT de-duplicated on its own — `companion_set/2` owns that, because dedup can only
+  # happen where the donor and the caller's companions are combined.
   defp netns_donor_companions(%Deployment{network_parent_id: nil}), do: []
 
   defp netns_donor_companions(%Deployment{} = app) do
