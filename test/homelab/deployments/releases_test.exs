@@ -197,14 +197,11 @@ defmodule Homelab.Deployments.ReleasesTest do
       release = plan(deployment)
       [step | _] = Enum.sort_by(release.steps, & &1.position)
 
-      {:ok, _} =
-        Releases.transition_step(step, :running, [:pending])
+      {:ok, running} = Releases.transition_step(step, :running, [:pending])
+      handle = %{"external_id" => "container-abc"}
 
       {:ok, completed} =
-        Releases.transition_step(Repo.get!(Homelab.Deployments.ReleaseStep, step.id), :completed,
-          [:running],
-          handle: %{"external_id" => "container-abc"}
-        )
+        Releases.transition_step(running, :completed, [:running], handle: handle)
 
       assert {:ok, _} = Releases.abandon_release(Releases.get_release!(release.id))
 
