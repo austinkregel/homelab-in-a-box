@@ -211,7 +211,11 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     # RECORDED, so a rollback leaves a legible account of what it could not undo. It was
     # in neither branch of the handle.
     test "records the rows it retires, and does not resurrect them on compensate" do
-      app = routed_deployment("first.example.test")
+      # A deployment whose name has moved on but whose `Domain` row has not: the state
+      # this step exists to converge, and the one where its retirement destroys the
+      # most. (Built directly rather than through `update_deployment/2`, which runs
+      # `sync_domain_records/1` itself and would have already retired the row.)
+      app = routed_deployment("second.example.test")
 
       {:ok, _} =
         Networking.create_domain(%{
@@ -221,7 +225,6 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
           tls_status: :active
         })
 
-      {:ok, _} = Deployments.update_deployment(app, %{domain: "second.example.test"})
       moved = Deployments.get_deployment!(app.id)
 
       assert {:ok, handle} = SyncDomain.run(step(%{}), ctx(moved))
