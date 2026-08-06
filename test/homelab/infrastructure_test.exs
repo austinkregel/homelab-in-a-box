@@ -28,6 +28,47 @@ defmodule Homelab.InfrastructureTest do
     end
   end
 
+  # async: false would be needed to mutate app env; these two only read the override
+  # they set and restore, and no other test in this file touches :containerized.
+  describe "containerized?/0" do
+    test "an explicit override wins over any inference" do
+      Application.put_env(:homelab, :containerized, true)
+      on_exit(fn -> Application.delete_env(:homelab, :containerized) end)
+      assert Infrastructure.containerized?()
+
+      Application.put_env(:homelab, :containerized, false)
+      refute Infrastructure.containerized?()
+    end
+
+    # The signal that matters in prod: the daemon writes /.dockerenv into every container
+    # it starts. On the machine running this suite there is none, so the inference must
+    # come back false rather than defaulting to "assume containerized" — which would make
+    # every unconfigured dev box refuse to resolve a storage root.
+    test "infers false on a host with no /.dockerenv and a human hostname" do
+      Application.delete_env(:homelab, :containerized)
+      previous = System.get_env("HOSTNAME")
+      System.put_env("HOSTNAME", "workstation.local")
+
+      on_exit(fn ->
+        if previous, do: System.put_env("HOSTNAME", previous), else: System.delete_env("HOSTNAME")
+      end)
+
+      assert Infrastructure.containerized?() == File.exists?("/.dockerenv")
+    end
+
+    test "a container-id-shaped hostname reads as containerized" do
+      Application.delete_env(:homelab, :containerized)
+      previous = System.get_env("HOSTNAME")
+      System.put_env("HOSTNAME", "a1b2c3d4e5f6")
+
+      on_exit(fn ->
+        if previous, do: System.put_env("HOSTNAME", previous), else: System.delete_env("HOSTNAME")
+      end)
+
+      assert Infrastructure.containerized?()
+    end
+  end
+
   describe "available_services/0" do
     test "returns a list of system service templates" do
       services = Infrastructure.available_services()
