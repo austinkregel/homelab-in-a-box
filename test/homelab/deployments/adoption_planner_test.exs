@@ -51,6 +51,51 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
     )
   end
 
+  # The capture reads the kernel privileges off the live container; this is the half that
+  # puts them on the replacement. Adopting gluetun without NET_ADMIN and /dev/net/tun
+  # produces a VPN that cannot bring its interface up — and because it fails CLOSED,
+  # every app in its namespace goes offline with it while the import reports success.
+  describe "runtime privileges survive adoption" do
+    test "the adopted template carries capabilities, devices and sysctls" do
+      review =
+        review_fixture(%{
+          name: "gluetun",
+          image: "qmcgaw/gluetun:latest",
+          capabilities_add: ["NET_ADMIN"],
+          capabilities_drop: ["ALL"],
+          devices: [
+            %{
+              "host_path" => "/dev/net/tun",
+              "container_path" => "/dev/net/tun",
+              "permissions" => "rwm"
+            }
+          ],
+          sysctls: %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+        })
+
+      plan = AdoptionPlanner.build_plan([review])
+      attrs = hd(plan.services).template_attrs
+
+      assert attrs.capabilities_add == ["NET_ADMIN"]
+      assert attrs.capabilities_drop == ["ALL"]
+      assert attrs.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+      assert [%{"host_path" => "/dev/net/tun"}] = attrs.devices
+    end
+
+    # A container granted nothing must not come back with a template asserting it was
+    # granted nothing on purpose — but the columns are arrays, and the whole point is
+    # that the replacement matches the original, which had none.
+    test "a container with no privileges adopts to empty, not to something invented" do
+      plan = AdoptionPlanner.build_plan([review_fixture()])
+      attrs = hd(plan.services).template_attrs
+
+      assert attrs.capabilities_add == []
+      assert attrs.capabilities_drop == []
+      assert attrs.devices == []
+      assert attrs.sysctls == %{}
+    end
+  end
+
   describe "build_plan/1" do
     test "emits the ordered Phase-1 steps with filesystem-path targets" do
       plan = AdoptionPlanner.build_plan([review_fixture()])
@@ -276,6 +321,63 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
       # ...and it survives into the plan, where `Adoption` resolves it to a donor.
       plan = AdoptionPlanner.build_plan([service])
       assert [%{netns_parent_container_id: "gluetun-abc"}] = plan.services
+    end
+
+    # Same trap, same explicit key list, different field — and this one was live in
+    # production: an adopted gluetun came up with no NET_ADMIN and no /dev/net/tun, so it
+    # could not initialise iptables, failed CLOSED, and took every app in its namespace
+    # offline while the import reported success.
+    #
+    # Driven through `review/0` rather than a review fixture on purpose. Unit tests either
+    # side of `to_review/1` both pass while the field is dropped in the middle, which is
+    # exactly how it survived: the capture had it, the planner would have used it, and
+    # nothing carried it between them.
+    test "carries the container's kernel privileges through to the review and the plan" do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "glue1"}]}
+
+        "/containers/glue1/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "glue1",
+             "Name" => "/gluetun",
+             "Config" => %{"Image" => "qmcgaw/gluetun:latest", "User" => ""},
+             "HostConfig" => %{
+               "RestartPolicy" => %{"Name" => "always"},
+               "CapAdd" => ["NET_ADMIN"],
+               "Devices" => [
+                 %{
+                   "PathOnHost" => "/dev/net/tun",
+                   "PathInContainer" => "/dev/net/tun",
+                   "CgroupPermissions" => "rwm"
+                 }
+               ],
+               "Sysctls" => %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+             },
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/homelab/appdata/gluetun",
+                 "Destination" => "/gluetun",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      assert {:ok, [service]} = AdoptionPlanner.review()
+      assert service.capabilities_add == ["NET_ADMIN"]
+      assert service.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+      assert [%{"host_path" => "/dev/net/tun"}] = service.devices
+
+      plan = AdoptionPlanner.build_plan([service])
+      attrs = hd(plan.services).template_attrs
+
+      assert attrs.capabilities_add == ["NET_ADMIN"]
+      assert attrs.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+      assert [%{"host_path" => "/dev/net/tun"}] = attrs.devices
     end
 
     test "a donor is listed above the containers in its namespace" do
