@@ -493,13 +493,12 @@ defmodule Homelab.Deployments do
     Repo.transaction(fn ->
       with {:ok, deployment} <- create_deployment(attrs),
            deployment = get_deployment!(deployment.id),
-           # Resolved here for the PRE-FLIGHT only. `plan_deploy_release/3` resolves the
-           # donor itself, so passing this list on would have it appended to a set that
-           # already contains the donor — and neither `netns_donor_companions/1` nor
-           # `plan_release/3` de-duplicates, so the donor was planned twice. Two
-           # `:dependency_container` steps for one deployment both write `external_id`:
-           # only the second is compensatable, and the first container is orphaned.
-           all_companions = netns_donor_companions(deployment) ++ companions,
+           # The same set `plan_deploy_release/3` will plan, built by the same function, so
+           # the pre-flight cannot check a different set from the one that gets deployed.
+           # It is passed twice over: once as the things to BUILD (with the app), and once
+           # as the donors this release will bring up, which is what lets the netns
+           # liveness check be skipped for exactly those.
+           all_companions = companion_set(deployment, companions),
            :ok <- preflight_specs([deployment | all_companions], all_companions),
            {:ok, release} <- plan_deploy_release(deployment, companions, []) do
         %{deployment: deployment, release: release}
@@ -672,26 +671,37 @@ defmodule Homelab.Deployments do
     end
   end
 
-  # Granting REACHABILITY: attaching the workload Traefik resolves to the ingress
-  # network. Always the release's own deployment — a netns child has no network endpoint
-  # to attach, so a stack has exactly one of these and it is the donor's.
-  # Attaching the workload to the shared ingress network, so Traefik can resolve it.
+  # Granting REACHABILITY: attaching the workload to the shared ingress network so
+  # Traefik can resolve it.
   #
-  # Keyed off `own_domain?/1`, NOT `routed?/1`, even though a domainless donor with routed
-  # children is genuinely routed. `publish_deployment/1` gates on `ingress_published?/1`,
-  # which requires the deployment's OWN domain — so for such a donor this step falls
-  # through to `:ok` having done nothing while recording `"published" => true`. A step
-  # that cannot act should not be planned, and one that reports success for work it did
-  # not do is the exact defect class this tier exists to remove.
+  # The condition is `publish_deployment/1`'s OWN runtime gate, reused verbatim rather
+  # than approximated, so that planned implies acted. Three shapes are proxy-routed by
+  # every other measure and still cannot be attached, and each was previously planned a
+  # step that fell through to `:ok` while recording `"published" => true`:
   #
-  # That donor still reaches ingress: `SpecBuilder` puts it there via `bridge_networks`
-  # at container-create time, because its children's routes resolve to its address. That
-  # is the mechanism that actually works; this step never contributed to it.
+  #   * a netns CHILD holding its own domain — the Sonarr-behind-gluetun shape. Its route
+  #     is real and is served by its DONOR, which `SpecBuilder` multi-homes onto ingress
+  #     via `bridge_networks` at create time. (`attachable?/1`)
+  #   * a `:host_network` deployment — a container in the host namespace has no endpoint
+  #     on any user-defined network. (`attachable?/1`)
+  #   * a `:service`/`:host` deployment carrying a stray domain — not proxy-routed at all.
+  #     (`ingress_published?/1`, via `Access.proxy_mode?/1`)
   #
-  # `ensure_ingress_proxy` above stays on `routed?/1` — the proxy must exist for the
-  # children's routes whether or not the donor holds a name itself.
+  # A domainless donor with routed children is the fourth: genuinely routed, but it holds
+  # no name of its own, so `ingress_published?/1` is false and its ingress membership
+  # comes from `bridge_networks` too.
+  #
+  # Any predicate narrower than the runtime gate re-opens this, because the question
+  # "will this step do anything" has exactly one correct answer and it already lives in
+  # `publish_deployment/1`. A step that reports success for work it did not do is the
+  # defect class this tier exists to remove.
+  #
+  # `ensure_ingress_proxy` deliberately does NOT share this gate: the proxy must exist
+  # for a child's route whether or not the donor is itself attachable.
   defp reachability_steps(deployment) do
-    if own_domain?(deployment), do: [%{type: :publish_ingress, resource_handle: %{}}], else: []
+    if ingress_published?(deployment) and attachable?(deployment),
+      do: [%{type: :publish_ingress, resource_handle: %{}}],
+      else: []
   end
 
   # The tail of a routed release, all of it after the app is healthy: claim the name
