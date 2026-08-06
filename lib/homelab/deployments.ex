@@ -698,7 +698,18 @@ defmodule Homelab.Deployments do
   #
   # `ensure_ingress_proxy` deliberately does NOT share this gate: the proxy must exist
   # for a child's route whether or not the donor is itself attachable.
+  #
+  # Reusing the gate means reusing its PRELOAD too. `publish_deployment/1` opens with
+  # `Repo.preload(deployment, [:tenant, :app_template])` before it evaluates either
+  # predicate, because `Access.effective_exposure/1` reads the template. Restating the
+  # predicates without it gave `deploy_release/2` a precondition its pre-image (a plain
+  # `domain` field match) never had, and failed it by RAISING `KeyError :exposure_mode`
+  # on the caller's struct — for a struct `publish_deployment/1` itself accepts.
+  # `Repo.preload/2` on an already-loaded association is a no-op, so this costs nothing
+  # on the common path.
   defp reachability_steps(deployment) do
+    deployment = with_associations(deployment)
+
     if ingress_published?(deployment) and attachable?(deployment),
       do: [%{type: :publish_ingress, resource_handle: %{}}],
       else: []
