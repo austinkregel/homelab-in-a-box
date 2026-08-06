@@ -58,6 +58,56 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
     assert AdoptionDiscovery.capture(inspect_json(%{})).user == nil
   end
 
+  # WHAT THE KERNEL LET IT DO. A tunnel container needs NET_ADMIN and /dev/net/tun to
+  # bring its interface up; a Zigbee bridge needs its USB device; gluetun needs
+  # `src_valid_mark` for policy routing to survive. Adoption read HostConfig for the
+  # restart policy and the network mode and stopped there, so the replacement came up
+  # stripped of all three — and gluetun fails closed, so an adopted VPN takes every app
+  # in its namespace offline with it while the import reports success.
+  #
+  # ComposeParser captured all four from the compose file. Importing the same stack from
+  # its RUNNING containers dropped them: the capability existed, on one producer.
+  test "captures the kernel privileges the original was granted" do
+    cap =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "HostConfig" => %{
+            "RestartPolicy" => %{"Name" => "always"},
+            "CapAdd" => ["NET_ADMIN"],
+            "CapDrop" => ["ALL"],
+            "Devices" => [
+              %{
+                "PathOnHost" => "/dev/net/tun",
+                "PathInContainer" => "/dev/net/tun",
+                "CgroupPermissions" => "rwm"
+              }
+            ],
+            "Sysctls" => %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+          }
+        })
+      )
+
+    assert cap.capabilities_add == ["NET_ADMIN"]
+    assert cap.capabilities_drop == ["ALL"]
+    assert cap.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+
+    assert [%{"host_path" => "/dev/net/tun", "container_path" => "/dev/net/tun"} = dev] =
+             cap.devices
+
+    assert dev["permissions"] == "rwm"
+  end
+
+  # A container granted nothing must not come back carrying empty keys that later read
+  # as "explicitly none" — nil means inherit, [] means the operator chose none.
+  test "a container with no privileges captures empty, not nil-shaped garbage" do
+    cap = AdoptionDiscovery.capture(inspect_json(%{}))
+
+    assert cap.capabilities_add == []
+    assert cap.capabilities_drop == []
+    assert cap.devices == []
+    assert cap.sysctls == %{}
+  end
+
   # HOW the container was reached, not just what it ran. A host-network original has no
   # port bindings for the cutover's port import to read, so this is the only signal that
   # it was reachable at all — and the only way the replacement keeps the broadcast /

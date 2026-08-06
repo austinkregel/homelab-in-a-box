@@ -995,7 +995,16 @@ defmodule HomelabWeb.SettingsLiveTest do
       render_click(view, "switch_section", %{"section" => "import"})
       render_click(view, "run_discovery", %{})
       render_click(view, "preview_plan", %{})
-      render_click(view, "select_import_tenant", %{"tenant_id" => to_string(tenant.id)})
+      # Driven through the rendered form, NOT by pushing the event with hand-built
+      # params. The select had no ancestor form, so LiveView threw
+      # "form events require the input to be inside a form" in the browser and the
+      # event never reached the server — every import landed in whichever space was
+      # first, regardless of what the operator chose. Pushing the event directly
+      # bypasses exactly the part that was broken, which is why this test passed
+      # throughout.
+      view
+      |> element("#import-tenant-form")
+      |> render_change(%{"tenant_id" => to_string(tenant.id)})
 
       html = render_click(view, "apply_import", %{})
       assert html =~ "Import started"
