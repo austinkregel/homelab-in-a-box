@@ -389,6 +389,31 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert Networking.list_dns_records_for_deployment(other.id) != []
     end
 
+    # A reclaimed step re-runs from scratch, and it may write a DIFFERENT set of rows
+    # than its first attempt did — the operator moved the domain in between, and
+    # `ensure_deployment_dns_records/2` publishes the CURRENT name without retiring the
+    # previous one. Both sets are this step's, so both are its to undo. Overwriting
+    # `record_ids` on the re-run would drop the first set and leave exactly the
+    # externally-cached orphan the rollback reported as removed.
+    test "compensation covers records written by an earlier attempt of the same step" do
+      stub_dns_provider()
+      app = routed_deployment("attempt-one.example.test")
+      {_release, s} = persisted_step(app, :publish_dns)
+
+      assert {:ok, _} = PublishDns.run(s, ctx(app))
+      first_ids = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert first_ids != []
+
+      {:ok, _} = Deployments.update_deployment(app, %{domain: "attempt-two.example.test"})
+      moved = Deployments.get_deployment!(app.id)
+
+      assert {:ok, handle} = PublishDns.run(reread(s), ctx(moved))
+      assert Enum.all?(first_ids, &(&1 in handle["record_ids"]))
+
+      assert :ok = PublishDns.compensate(step(handle), ctx(moved))
+      assert Networking.list_dns_records_for_deployment(app.id) == []
+    end
+
     # A compensation that could not reach the provider has undone nothing externally.
     # Reporting `:ok` there is exactly the "orphan nothing can ever clean up" this
     # module's own moduledoc claims the design prevents: the release settles
