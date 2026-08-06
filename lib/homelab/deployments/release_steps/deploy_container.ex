@@ -40,9 +40,31 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
       # which used to drop them because this merge lived here rather than at the seam.
       case orchestrator().deploy(spec) do
         {:ok, external_id} ->
-          Deployments.transition_status(deployment, :deploying, @deployable_from,
-            external_id: external_id
-          )
+          case Deployments.transition_status(deployment, :deploying, @deployable_from,
+                 external_id: external_id
+               ) do
+            {:ok, _} ->
+              :ok
+
+            # The guard did not match, so the id went nowhere. A RUNNING target is the
+            # ordinary case — redeploying a stack whose companion never stopped, which
+            # is every netns donor and every shared datastore — and `:running` is not in
+            # `@deployable_from` because a live workload's status should not be dragged
+            # back to `:deploying`.
+            #
+            # The ID still has to land. On DockerEngine `deploy/1` resolves the name
+            # conflict by stop + force-rm + create, so the id already on the row names a
+            # container that no longer exists: `AwaitHealth` polls the corpse, times
+            # out, and the rollback undeploys the container this step DID create,
+            # leaving `{:stopped, nil}` — which `Reconciler.converge_one/2` skips
+            # forever. Same fallback `start_deployment/1` and the reconciler's converge
+            # already carry.
+            #
+            # `record_external_id/2`, not `ensure_external_id/2`: the id from `deploy/1`
+            # is the workload we just created and is authoritative over the stale one.
+            {:noop, _} ->
+              Deployments.record_external_id(deployment, external_id)
+          end
 
           record_netns_parent(deployment, spec)
 
