@@ -70,6 +70,34 @@ defmodule Homelab.Deployments.ReleaseSteps.GreenfieldTest do
       assert reloaded.status == :deploying
     end
 
+    # `@deployable_from` is `[:pending, :deploying, :failed, :stopped]`, so a RUNNING
+    # companion matches zero rows and the compare-and-set silently discards the id
+    # `deploy/1` just returned. That is not a cosmetic loss: on DockerEngine the create
+    # resolves the name conflict by stop + force-rm + create, so the id still on the row
+    # names a container that no longer exists. `AwaitHealth` polls the corpse, times
+    # out, and the rollback undeploys the container this step actually created — leaving
+    # `{:stopped, nil}`, which `Reconciler.converge_one/2` skips forever.
+    #
+    # The fallback is already written twice in `Deployments` (`start_deployment/1` and
+    # the reconciler's converge). `record_external_id/2` rather than
+    # `ensure_external_id/2`: the id from `deploy/1` is the workload we just made, and
+    # the stale one must be overwritten, not preserved.
+    test "records the new container id when a running target no-ops the transition" do
+      app = clean_deployment()
+      {:ok, _} = Deployments.update_deployment(app, %{external_id: "old-id", status: :running})
+      app = Deployments.get_deployment!(app.id)
+
+      expect(Homelab.Mocks.Orchestrator, :deploy, fn _spec -> {:ok, "new-id"} end)
+
+      assert {:ok, handle} = DeployContainer.run(step(%{}), ctx(app))
+      assert handle["external_id"] == "new-id"
+
+      reloaded = Deployments.get_deployment!(app.id)
+      assert reloaded.external_id == "new-id"
+      # Status untouched: the workload never stopped, so `:running` is still the truth.
+      assert reloaded.status == :running
+    end
+
     test "compensate undeploys and clears the external_id (no orphan)" do
       app = clean_deployment()
       {:ok, _} = Deployments.update_deployment(app, %{external_id: "ext-9", status: :deploying})
