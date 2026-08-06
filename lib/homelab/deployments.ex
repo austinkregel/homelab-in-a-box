@@ -682,7 +682,12 @@ defmodule Homelab.Deployments do
   # 1, ahead of every container: it is a precondition of the route, not a product of
   # it, and failing there means no container has been created yet. See
   # `ReleaseSteps.EnsureIngressProxy` for why it has no compensation.
-  defp ingress_proxy_steps(app) do
+  #
+  # Public (but undocumented) because `Adoption` is the third planner and lives in
+  # another module. It gets the SAME predicate rather than a fourth inlined copy — the
+  # one thing this whole seam exists to prevent.
+  @doc false
+  def ingress_proxy_steps(app) do
     if routed?(app), do: [%{type: :ensure_ingress_proxy, resource_handle: %{}}], else: []
   end
 
@@ -749,7 +754,10 @@ defmodule Homelab.Deployments do
   # locally, publish it to DNS, then actually grant reachability. Ordered so nothing
   # advertises a name before something answers to it, and so compensation (which walks
   # descending) severs reachability first, then DNS, then the row.
-  defp ingress_steps(app) do
+  #
+  # Public (but undocumented) for `Adoption`, for the reason on `ingress_proxy_steps/1`.
+  @doc false
+  def ingress_steps(app) do
     name_steps(app) ++ reachability_steps(app)
   end
 
