@@ -23,7 +23,7 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
   ## `compensate/2`: deletes only a row this step CREATED
 
   The narrow rule matters. `"created" => true` means no `Domain` row existed for this
-  fqdn before this release ran, so deleting it restores exactly the prior world.
+  fqdn before this release ran, so deleting it takes the row back out.
   `"reclaimed" => true` means a row was already there — pointed at some other
   deployment, or left by an earlier release — and deleting it would destroy state this
   release never owned, including its TLS status and zone link.
@@ -38,6 +38,33 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
 
   Reachability is a separate concern and is not undone here; `PublishIngress.compensate/2`
   owns that.
+
+  ## What compensation does NOT undo — the retirement
+
+  `sync_domain_records/1`'s FIRST act is `retire_stale_domains/2`, which deletes this
+  deployment's `Domain` rows for every *other* name, exposure mode, TLS status and zone
+  link included. Compensation does not bring them back, so it does not restore the
+  prior world and this moduledoc no longer says it does. That is a decision, not an
+  omission:
+
+    * Re-inserting a retired row re-claims a globally **UNIQUE** `fqdn` on behalf of a
+      deployment that no longer answers to it. That is precisely the stranded-claim
+      failure the paragraph above gives as the reason compensation exists at all —
+      restoring here would reintroduce it from the other direction, and could block a
+      deployment that legitimately took the name in the meantime.
+    * The rows are DERIVED from `deployments.domain`, and a rollback does not change
+      that field — the operator's edit committed before the release was planned. A
+      restored row would contradict the deployment's own domain, and the next
+      convergence (any redeploy, any config save) would retire it again immediately. It
+      would be a momentary restoration of an inconsistency, not of the prior world.
+    * What is genuinely lost is TLS state for a name the deployment is not served at.
+      The certificate itself lives in the proxy's ACME store, not in this row.
+
+  So the retirement is **recorded** instead: `"retired" => [%{"fqdn", "exposure_mode",
+  "tls_status"}]` on the handle, in both branches, persisted before the mutation like
+  the provenance below (the re-run cannot re-derive it — the first attempt already
+  deleted the rows). A rollback leaves a legible account of what it could not undo,
+  which is the part that was missing.
 
   ## Provenance has to be durable, not merely returned
 
@@ -78,6 +105,7 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
         # claim this step exists to protect.
         existed? = match?({:ok, _}, Networking.get_domain_by_fqdn(domain))
         created? = handle(step)["created"] == true or not existed?
+        retired = retiring(step, deployment, domain)
 
         # Persisted BEFORE the mutation, and this is the load-bearing half. Returning
         # the provenance in the handle is not enough: the returned handle is exactly
@@ -87,6 +115,7 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
           Releases.record_step_handle(step, %{
             "created" => created?,
             "reclaimed" => not created?,
+            "retired" => retired,
             "fqdn" => domain,
             "deployment_id" => deployment.id
           })
@@ -101,7 +130,8 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
                "domain_id" => row.id,
                "deployment_id" => deployment.id,
                "created" => created?,
-               "reclaimed" => not created?
+               "reclaimed" => not created?,
+               "retired" => retired
              }}
 
           {:error, :not_found} ->
@@ -109,9 +139,48 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
         end
 
       _ ->
-        # No name to answer to: still retire whatever this deployment used to hold.
+        # No name to answer to: EVERY row this deployment holds is stale, so this branch
+        # is pure retirement — the one that destroys most and used to record nothing.
+        retired = retiring(step, deployment, nil)
+
+        handle = %{
+          "fqdn" => nil,
+          "deployment_id" => deployment.id,
+          "created" => false,
+          "retired" => retired
+        }
+
+        _ = Releases.record_step_handle(step, handle)
+
         Deployments.sync_domain_records(deployment)
-        {:ok, %{"fqdn" => nil, "deployment_id" => deployment.id, "created" => false}}
+
+        {:ok, handle}
+    end
+  end
+
+  # The rows `retire_stale_domains/2` is about to delete, captured before it runs.
+  #
+  # Not restored on compensation — see the moduledoc for why — but recorded, so a
+  # rollback leaves an account of the exposure and TLS state it could not put back. A
+  # handle that already carries the list WINS over a fresh read, exactly as `"created"`
+  # does and for the same reason: after a reclaimed re-run the rows are already gone, so
+  # re-deriving would silently replace the account with an empty one.
+  defp retiring(step, deployment, current_fqdn) do
+    case handle(step)["retired"] do
+      recorded when is_list(recorded) and recorded != [] ->
+        recorded
+
+      _ ->
+        deployment.id
+        |> Networking.list_domains_for_deployment()
+        |> Enum.reject(&(&1.fqdn == current_fqdn))
+        |> Enum.map(
+          &%{
+            "fqdn" => &1.fqdn,
+            "exposure_mode" => to_string(&1.exposure_mode),
+            "tls_status" => to_string(&1.tls_status)
+          }
+        )
     end
   end
 
