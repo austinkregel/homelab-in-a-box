@@ -140,9 +140,7 @@ defmodule Homelab.Deployments.ReleaseRunner do
   defp drive(%Release{status: :rolling_back} = release, owner) do
     reclaim_running_steps(release)
 
-    Logger.warning(
-      "[release] #{release.id} resumed while rolling back; continuing compensation"
-    )
+    Logger.warning("[release] #{release.id} resumed while rolling back; continuing compensation")
 
     compensate_and_settle(release.id, owner, release.error_message || :interrupted_rollback)
   end
