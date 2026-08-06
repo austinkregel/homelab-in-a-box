@@ -81,20 +81,36 @@ defmodule Homelab.Deployments.ReleaseRunner do
   Nothing is lost by not raising: `Reconciler.resume_stuck_releases/0` re-enqueues
   every release with no live lease on its next tick, so the un-enqueued release is
   picked up automatically. The worst case is a delay.
+
+  ## Why the `rescue`, and why it is the load-bearing half
+
+  A `case` on `{:error, reason}` alone did not survive the failure named above.
+  `Oban.insert/1` returns `{:error, changeset}` for a CHANGESET failure — a shape this
+  function's callers can never actually produce, since the args are built right here.
+  A BACKEND failure — the queue's Postgres unreachable, its connection pool exhausted,
+  its jobs table missing — RAISES, out of `Engine.insert_job` -> `Repo.transaction`.
+
+  So the only branch that ever fired was the one that could not happen, and the
+  unreachable-queue case propagated a `Postgrex.Error` to a caller that had already
+  committed a `:planning` release. Both are downgraded now; the guarantee is "always
+  `:ok`", and a guarantee with an exception in it is not one.
   """
   def enqueue_or_log(%Release{} = release) do
     case enqueue(release) do
-      {:ok, _job} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "[release] #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
-            "the reconciler will resume it"
-        )
-
-        :ok
+      {:ok, _job} -> :ok
+      {:error, reason} -> log_not_enqueued(release, reason)
     end
+  rescue
+    e -> log_not_enqueued(release, e)
+  end
+
+  defp log_not_enqueued(release, reason) do
+    Logger.error(
+      "[release] #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
+        "the reconciler will resume it"
+    )
+
+    :ok
   end
 
   # --- Engine (directly callable, used by Oban and by tests) ----------------
