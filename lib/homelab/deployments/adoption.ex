@@ -16,10 +16,12 @@ defmodule Homelab.Deployments.Adoption do
       retry. An in-flight release does.
   """
 
+  import Ecto.Query
+
   alias Homelab.Repo
   alias Homelab.Catalog
   alias Homelab.Deployments
-  alias Homelab.Deployments.{Deployment, ReleaseRunner, Releases}
+  alias Homelab.Deployments.{AdoptionPlanner, Deployment, ReleaseRunner, Releases}
 
   @doc """
   Applies `plan` for `opts[:tenant_id]`. Returns `{:ok, results}` where each
@@ -219,16 +221,43 @@ defmodule Homelab.Deployments.Adoption do
     end
   end
 
+  # One physical container, at most one deployment — ACROSS spaces.
+  #
+  # This lookup was tenant-scoped and nothing else guarded it, so adopting the same
+  # container into a second space produced a second deployment that also claimed it: two
+  # rows whose cutover, reconciliation and teardown all target one container id. Not
+  # hypothetical — the import space selector was inert until recently, so early imports
+  # all landed in whichever space happened to be first, and retrying into the space the
+  # operator actually wanted is exactly the sequence that creates the duplicate.
+  #
+  # Keyed on `app_template_id` rather than on `source_id`, because the two cannot
+  # disagree: `upsert_template/1` looks the template up by the DETERMINISTIC slug
+  # `AdoptionPlanner.template_slug/1` produces from the container name, so one adopted
+  # container has exactly one template row, shared by every space. A deployment on that
+  # row in another space is by construction a second claim on the same container.
+  # `source_id` carries the same information and would need a join to read it; the
+  # template row IS the container's identity here, so it is the cheaper and equally exact
+  # key. The `source == "adopted"` filter keeps ordinary catalog templates — which
+  # legitimately have a deployment per space — out of the guard.
+  #
+  # Adopting into the SAME space still works: that branch is below, it is idempotent, and
+  # it is the legitimate retry.
   defp get_or_create_deployment(tenant_id, app_template_id, attrs) do
     case Repo.get_by(Deployment, tenant_id: tenant_id, app_template_id: app_template_id) do
       nil ->
-        Deployments.create_deployment(
-          Map.merge(attrs, %{
-            tenant_id: tenant_id,
-            app_template_id: app_template_id,
-            status: :pending
-          })
-        )
+        case adopted_elsewhere(tenant_id, app_template_id) do
+          nil ->
+            Deployments.create_deployment(
+              Map.merge(attrs, %{
+                tenant_id: tenant_id,
+                app_template_id: app_template_id,
+                status: :pending
+              })
+            )
+
+          %Deployment{} = other ->
+            {:error, {:adopted_elsewhere, describe_adoption(other)}}
+        end
 
       %Deployment{status: :running, external_id: ext} = _dep when is_binary(ext) ->
         {:error, :already_adopted}
@@ -239,6 +268,85 @@ defmodule Homelab.Deployments.Adoption do
       %Deployment{} = dep ->
         {:ok, dep}
     end
+  end
+
+  defp adopted_elsewhere(tenant_id, app_template_id) do
+    Deployment
+    |> join(:inner, [d], t in assoc(d, :app_template))
+    |> where([d, t], d.app_template_id == ^app_template_id and d.tenant_id != ^tenant_id)
+    |> where([d, t], t.source == "adopted")
+    |> order_by([d], asc: d.id)
+    |> limit(1)
+    |> preload([:tenant, :app_template])
+    |> Repo.one()
+  end
+
+  # The refusal has to be actionable: an operator who is told "no" and not told WHERE the
+  # other one is has no way to go and deal with it.
+  defp describe_adoption(%Deployment{} = deployment) do
+    %{
+      deployment_id: deployment.id,
+      tenant_id: deployment.tenant_id,
+      space: deployment.tenant && deployment.tenant.name,
+      service: deployment.app_template && deployment.app_template.name,
+      status: deployment.status
+    }
+  end
+
+  @doc """
+  Which of `container_names` already have an adopted deployment, as
+  `%{container_name => %{deployment_id:, space:, status:, active_release_id:}}`.
+
+  Lives here rather than in `AdoptionPlanner` on purpose: the planner is pure by
+  construction (no DB, no daemon) and the Import preview needs a DB read to tell
+  "a new candidate" from "a previous attempt that failed and left rows behind".
+  After a failed run the original container is untouched and carries no
+  `homelab.managed` label, so discovery offers it again as though nothing had
+  happened.
+
+  Keyed through `AdoptionPlanner.template_slug/1` — the same deterministic slug
+  `upsert_template/1` writes — so the answer matches what an apply would find.
+  """
+  def existing_adoptions(container_names) when is_list(container_names) do
+    slugs = Enum.map(container_names, &AdoptionPlanner.template_slug/1)
+    by_slug = Map.new(container_names, &{AdoptionPlanner.template_slug(&1), &1})
+
+    Deployment
+    |> join(:inner, [d], t in assoc(d, :app_template))
+    |> where([d, t], t.slug in ^slugs and t.source == "adopted")
+    |> order_by([d], asc: d.id)
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+    |> Enum.reduce(%{}, fn deployment, acc ->
+      name = Map.get(by_slug, deployment.app_template.slug)
+
+      entry =
+        deployment
+        |> describe_adoption()
+        |> Map.put(:external_id, deployment.external_id)
+        |> Map.put(:active_release, Releases.get_active_release(deployment.id))
+
+      if name, do: Map.put_new(acc, name, entry), else: acc
+    end)
+  end
+
+  @doc """
+  Adopted deployments that never finished: `:pending` with no `external_id`, on a
+  template whose `source` is `"adopted"`.
+
+  READ-ONLY, deliberately. These rows are the residue of a failed or abandoned
+  import — including the ones the inert space selector left in the wrong space —
+  and the platform cannot tell damage from a deliberate choice, so it shows them
+  and never touches them. Newest first: the most recent attempt is the one the
+  operator is thinking about.
+  """
+  def incomplete_imports do
+    Deployment
+    |> join(:inner, [d], t in assoc(d, :app_template))
+    |> where([d, t], d.status == :pending and is_nil(d.external_id) and t.source == "adopted")
+    |> order_by([d], desc: d.id)
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
   end
 
   defp ensure_no_active_release(deployment_id) do

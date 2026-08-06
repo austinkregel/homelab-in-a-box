@@ -151,6 +151,75 @@ defmodule Homelab.Deployments.ReleasesTest do
     end
   end
 
+  describe "abandon_release/2" do
+    # `ensure_no_active_release/1` refuses to plan while a release is active, and a
+    # release interrupted mid-compensation stays active forever — so that deployment
+    # could never be re-imported and there was no way out short of SQL.
+    test "unblocks the deployment: the wedged release goes terminal and a new one can plan" do
+      deployment = insert(:deployment)
+      wedged = plan(deployment)
+      {:ok, wedged} = Releases.transition_release(wedged, :rolling_back, [:planning])
+
+      assert Releases.get_active_release(deployment.id).id == wedged.id
+
+      assert {:ok, abandoned} = Releases.abandon_release(wedged)
+      assert abandoned.status == :failed
+      assert Release.terminal?(abandoned)
+      assert Releases.get_active_release(deployment.id) == nil
+
+      # The whole point: the next attempt can now be planned.
+      assert {:ok, _fresh} = Releases.plan_release(deployment, [%{type: :app_container}])
+    end
+
+    # It must not become a way to lose data quietly. The recorded note is what the UI's
+    # confirmation quotes, so it is pinned rather than left to drift.
+    test "records what was and was not touched, and clears the lease" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      {:ok, release} = Releases.acquire_lease(release, "node@a")
+
+      assert {:ok, abandoned} = Releases.abandon_release(release, by: "ops@example.com")
+
+      assert abandoned.error_message =~ "Nothing was stopped, removed or deleted"
+      assert abandoned.error_message =~ "no container, no volume, no directory, no secret"
+      assert abandoned.error_message =~ "ops@example.com"
+      assert Releases.abandon_note() =~ "Nothing was stopped, removed or deleted"
+
+      # Cleared, so the reconciler does not resume what an operator just abandoned.
+      assert abandoned.lease_owner == nil
+      assert abandoned.lease_expires_at == nil
+    end
+
+    # Steps are left exactly as they are — abandoning is NOT a rollback, and claiming
+    # steps were compensated when nothing ran would be the quiet data loss this guards.
+    test "compensates nothing — completed steps keep their status and their handles" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      [step | _] = Enum.sort_by(release.steps, & &1.position)
+
+      {:ok, running} = Releases.transition_step(step, :running, [:pending])
+      handle = %{"external_id" => "container-abc"}
+
+      {:ok, completed} =
+        Releases.transition_step(running, :completed, [:running], handle: handle)
+
+      assert {:ok, _} = Releases.abandon_release(Releases.get_release!(release.id))
+
+      still_there = Repo.get!(Homelab.Deployments.ReleaseStep, completed.id)
+      assert still_there.status == :completed
+      assert still_there.resource_handle == %{"external_id" => "container-abc"}
+    end
+
+    test "a terminal release is a no-op, so two operators cannot fight over it" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+
+      assert {:ok, _} = Releases.abandon_release(release)
+      assert {:noop, again} = Releases.abandon_release(Releases.get_release!(release.id))
+      assert again.status == :failed
+    end
+  end
+
   describe "acquire_lease/3" do
     test "a second owner cannot take a live lease, but can take an expired one" do
       deployment = insert(:deployment)

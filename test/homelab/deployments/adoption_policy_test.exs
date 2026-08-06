@@ -16,6 +16,52 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     :ok
   end
 
+  describe "an unconfigured adoption root on a containerized install" do
+    setup do
+      Application.delete_env(:homelab, :adoption_root)
+      Homelab.Settings.evict("adoption_root")
+      Application.put_env(:homelab, :containerized, true)
+      on_exit(fn -> Application.delete_env(:homelab, :containerized) end)
+      :ok
+    end
+
+    # Same shape as `PermanentHome.managed_root/0`: `~/homelab` is `/root/homelab` inside
+    # this container, and it is compared against the HOST paths Docker reports. It can
+    # never match, so every scan read as "you have nothing to import".
+    test "refuses rather than falling back to a container-local path" do
+      assert {:error, :adoption_root_unconfigured} = AdoptionPolicy.fetch_adoption_root()
+
+      assert_raise ArgumentError, ~r/adoption root is not configured/, fn ->
+        AdoptionPolicy.adoption_root()
+      end
+    end
+
+    test "the refusal names the setting and the env var an operator can fix it with" do
+      message = AdoptionPolicy.unconfigured_message()
+      assert message =~ "HOMELAB_ADOPTION_ROOT"
+      assert message =~ "Settings -> Import"
+      assert message =~ "/root/homelab"
+    end
+
+    # The planner is the ONE caller that must not blow up: it is what the Import screen
+    # calls, and the screen's job is to explain this exact problem.
+    test "AdoptionPlanner.review/0 reports it instead of raising out of scope checks" do
+      assert {:error, :adoption_root_unconfigured} =
+               Homelab.Deployments.AdoptionPlanner.review()
+    end
+
+    test "a configured root is still honoured" do
+      Application.put_env(:homelab, :adoption_root, "/srv/homelab")
+      on_exit(fn -> Application.delete_env(:homelab, :adoption_root) end)
+
+      assert {:ok, "/srv/homelab"} = AdoptionPolicy.fetch_adoption_root()
+
+      assert AdoptionPolicy.service_in_scope?("sonarr", [
+               %{source: "/srv/homelab/appdata/sonarr", target: "/config", type: "bind"}
+             ])
+    end
+  end
+
   # Mounts as the discovery handler hands them over: %{source:, target:, type:}.
   defp bind(source, target), do: %{source: source, target: target, type: "bind"}
   defp vol(name, target), do: %{source: name, target: target, type: "volume"}

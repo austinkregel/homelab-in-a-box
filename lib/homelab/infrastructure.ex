@@ -98,6 +98,39 @@ defmodule Homelab.Infrastructure do
     }
   }
 
+  @doc """
+  True when the PLANE ITSELF is running inside a container.
+
+  Not a fact about the daemon (`DaemonFacts` reads `/info`, which describes the
+  host either way) — a fact about us, and the difference decides whether a
+  `System.user_home()`-derived default is a path the operator chose or a path
+  inside a container that vanishes with it. Prod is exactly this shape: one
+  self-provisioning container on the host, `HOME=/root`.
+
+  Two signals, both of which this codebase already relies on elsewhere:
+
+    * `/.dockerenv` — the daemon creates it in every container it starts.
+    * `$HOSTNAME` shaped like a container id — the same probe
+      `Bootstrap.get_own_container_id/0` and `Infrastructure.self_service_url/0`
+      use to find our own container through the Engine API.
+
+  Overridable with `config :homelab, :containerized, true | false` so a test (or
+  an unusual install) can state the answer instead of inferring it.
+  """
+  def containerized? do
+    case Application.get_env(:homelab, :containerized) do
+      flag when is_boolean(flag) -> flag
+      _ -> File.exists?("/.dockerenv") or hostname_is_container_id?()
+    end
+  end
+
+  defp hostname_is_container_id? do
+    case System.get_env("HOSTNAME") do
+      host when is_binary(host) -> String.match?(host, ~r/^[a-f0-9]{12,64}$/)
+      _ -> false
+    end
+  end
+
   @doc "The shared internal Docker network all system services sit on."
   def internal_network, do: @network
 

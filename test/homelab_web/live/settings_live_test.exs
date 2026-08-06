@@ -93,6 +93,67 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "managed root" do
+    alias Homelab.Deployments.PermanentHome
+
+    setup do
+      on_exit(fn ->
+        Homelab.Settings.evict("managed_root")
+        Application.delete_env(:homelab, :containerized)
+      end)
+
+      :ok
+    end
+
+    # The managed root decides where adopted BYTES land. It had a form only under
+    # Infrastructure, two sections away from the import it governs, so a containerized
+    # install with nothing set had the daemon writing the operator's data to the HOST's
+    # /root/homelab-managed — a directory nobody chose.
+    test "the root can be set from the Import section, beside the adoption root",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      view
+      |> form("#managed-root-form", managed: %{"root" => "/mnt/tank/homelab-managed"})
+      |> render_submit()
+
+      assert PermanentHome.fetch_managed_root() == {:ok, "/mnt/tank/homelab-managed"}
+    end
+
+    test "a relative root is refused, with the same rule as the adoption root",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+
+      html =
+        view
+        |> form("#managed-root-form", managed: %{"root" => "~/homelab-managed"})
+        |> render_submit()
+
+      assert html =~ "absolute host path"
+      assert Homelab.Settings.get_cached("managed_root") == nil
+    end
+
+    test "an unset root on a containerized install is called out, not pre-filled with a guess",
+         %{conn: conn} do
+      prev = Application.get_env(:homelab, :managed_root)
+      Application.delete_env(:homelab, :managed_root)
+      Homelab.Settings.evict("managed_root")
+      Application.put_env(:homelab, :containerized, true)
+
+      on_exit(fn ->
+        if prev, do: Application.put_env(:homelab, :managed_root, prev)
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "import"})
+
+      assert html =~ "imports that copy data are blocked"
+      refute html =~ ~s(value="/root/homelab-managed")
+    end
+  end
+
   describe "OIDC configuration" do
     @discovery %{
       "issuer" => "https://aut.hair",
@@ -1013,6 +1074,147 @@ defmodule HomelabWeb.SettingsLiveTest do
       assert deployment
       assert deployment.status == :pending
       assert Homelab.Deployments.Releases.get_active_release(deployment.id)
+    end
+  end
+
+  describe "import preview: a failed run is not a fresh candidate" do
+    alias Homelab.Deployments.Deployment
+    alias Homelab.Deployments.Releases
+
+    setup do
+      prev = Application.get_env(:homelab, :docker_client)
+      prev_root = Application.get_env(:homelab, :adoption_root)
+      Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
+      Application.put_env(:homelab, :adoption_root, "/srv/appdata")
+      Homelab.Settings.evict("adoption_root")
+
+      on_exit(fn ->
+        restore_docker_client(prev)
+        Homelab.Settings.evict("adoption_root")
+
+        if prev_root,
+          do: Application.put_env(:homelab, :adoption_root, prev_root),
+          else: Application.delete_env(:homelab, :adoption_root)
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/services", _opts ->
+          {:ok, []}
+
+        "/containers/json?all=true", _opts ->
+          {:ok, [%{"Id" => "abc123"}]}
+
+        "/containers/abc123/json", _opts ->
+          {:ok,
+           %{
+             "Id" => "abc123",
+             "Name" => "/homelab-postgres",
+             "Config" => %{"Image" => "postgres:16.2", "User" => "999:999"},
+             "HostConfig" => %{"RestartPolicy" => %{"Name" => "always"}},
+             "State" => %{"Status" => "running"},
+             "Mounts" => [
+               %{
+                 "Type" => "bind",
+                 "Source" => "/srv/appdata/pg",
+                 "Destination" => "/var/lib/postgresql/data",
+                 "RW" => true
+               }
+             ]
+           }}
+      end)
+
+      :ok
+    end
+
+    # The residue a failed import leaves: an adopted template and a :pending deployment,
+    # while the ORIGINAL container is untouched and carries no `homelab.managed` label —
+    # so discovery offers it again exactly as if nothing had happened.
+    defp previous_attempt(space) do
+      template =
+        insert(:app_template,
+          slug: "adopted-homelab-postgres",
+          name: "homelab-postgres",
+          source: "adopted",
+          source_id: "homelab-postgres"
+        )
+
+      {:ok, deployment} =
+        Homelab.Deployments.create_deployment(%{
+          tenant_id: space.id,
+          app_template_id: template.id,
+          status: :pending
+        })
+
+      deployment
+    end
+
+    test "a service with a deployment reads as already imported, with retry framing",
+         %{conn: conn} do
+      space = insert(:tenant, name: "Home Lab")
+      deployment = previous_attempt(space)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+      html = render_click(view, "run_discovery", %{})
+
+      assert html =~ "Already imported into Home Lab"
+      assert html =~ "#{deployment.id}"
+      assert html =~ "retry"
+      # And it is NOT pre-selected: applying a retry must be a decision, not the default.
+      refute html =~ ~s(phx-value-name="homelab-postgres" class="mt-1 rounded" checked)
+    end
+
+    test "a service with no deployment stays an ordinary candidate", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+      html = render_click(view, "run_discovery", %{})
+
+      assert html =~ "homelab-postgres"
+      refute html =~ "Already imported into"
+    end
+
+    # `ensure_no_active_release/1` refuses to plan while a release is active. A release
+    # stuck mid-compensation stays active forever, so that service could never be
+    # re-imported and there was no UI to clear it.
+    test "a wedged release is surfaced with an abandon control that names what it spares",
+         %{conn: conn} do
+      space = insert(:tenant, name: "Home Lab")
+      deployment = previous_attempt(space)
+      {:ok, release} = Releases.plan_release(deployment, [%{type: :app_container}])
+      {:ok, release} = Releases.transition_release(release, :rolling_back, [:planning])
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "import"})
+      html = render_click(view, "run_discovery", %{})
+
+      assert html =~ "Abandon release ##{release.id}"
+      # The confirmation is part of the fix: it must say what survives.
+      assert html =~ "no container is stopped, started or removed"
+      assert html =~ "no volume,"
+
+      html = render_click(view, "abandon_release", %{"id" => to_string(release.id)})
+      assert html =~ "Nothing on the host was touched"
+
+      assert Releases.get_active_release(deployment.id) == nil
+      assert Homelab.Repo.get!(Homelab.Deployments.Release, release.id).status == :failed
+      # The deployment itself is untouched — abandoning a release is not a teardown.
+      assert Homelab.Repo.get!(Deployment, deployment.id).status == :pending
+    end
+
+    # PRODUCTION.md: a fix stops the bleeding and never rewrites existing rows.
+    test "stranded pending imports are listed read-only and never deleted", %{conn: conn} do
+      space = insert(:tenant, name: "Wrong Space")
+      deployment = previous_attempt(space)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "import"})
+
+      assert html =~ "import(s) that never finished"
+      assert html =~ "adopted-homelab-postgres"
+      assert html =~ "Wrong Space"
+
+      # Read-only: rendering the list changed nothing.
+      assert Homelab.Repo.get(Deployment, deployment.id)
     end
   end
 
