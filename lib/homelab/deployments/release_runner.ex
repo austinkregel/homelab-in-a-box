@@ -126,6 +126,27 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
   # --- Forward progress -----------------------------------------------------
 
+  # A release resumed while it was already ROLLING BACK. `:rolling_back` is active,
+  # not terminal, so the reconciler re-enqueues it and `run/1`'s guard lets it through
+  # — and every non-terminal release used to land in `loop/2`, which only asks for the
+  # next `:pending` step. So an interrupted rollback was driven FORWARD: it wrote the
+  # Domain row, published A records to an external, resolver-cached DNS provider, and
+  # attached ingress, all as part of undoing itself. It could not finish either, since
+  # `finalize/1`'s CAS excludes `:rolling_back` — the release stayed active forever and
+  # `releases_one_active_per_deployment` blocked the deployment's next release.
+  #
+  # The direction of travel is a property of the release, so it is decided here rather
+  # than inside the loop. The original failure reason is on the row.
+  defp drive(%Release{status: :rolling_back} = release, owner) do
+    reclaim_running_steps(release)
+
+    Logger.warning(
+      "[release] #{release.id} resumed while rolling back; continuing compensation"
+    )
+
+    compensate_and_settle(release.id, owner, release.error_message || :interrupted_rollback)
+  end
+
   defp drive(release, owner) do
     reclaim_running_steps(release)
     # planning -> provisioning; no-ops cleanly on resume (already provisioning).
@@ -308,7 +329,14 @@ defmodule Homelab.Deployments.ReleaseRunner do
         :ok
     end
 
+    compensate_and_settle(release_id, owner, reason)
+  end
+
+  # The compensation walk and the settle after it, shared by a fresh rollback and by one
+  # resumed mid-flight (`drive/2`). Assumes the release is already `:rolling_back`.
+  defp compensate_and_settle(release_id, owner, reason) do
     release = Releases.get_release(release_id)
+    _ = Releases.acquire_lease(release, owner, lease_ttl_seconds())
     ctx = build_ctx(release)
 
     case compensate_all(Releases.completed_steps_desc(release), ctx) do
@@ -498,13 +526,25 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
   # --- Helpers --------------------------------------------------------------
 
-  # A step left `:running` by a crashed node is reset to `:pending` so it re-runs
-  # under the new owner. Idempotent handlers make the re-run safe.
+  # A step left mid-flight by a crashed node is put back where the walk that owns it
+  # will pick it up again. Idempotent handlers — required of every handler — make both
+  # re-runs safe.
+  #
+  #   * `:running` -> `:pending`, so the forward loop re-runs it.
+  #   * `:compensating` -> `:completed`, so the compensation walk re-compensates it.
+  #     `completed_steps_desc/1` is what that walk selects on, so a step abandoned
+  #     mid-compensation was invisible to it and its side effect stayed live for good
+  #     — an attached ingress, a published A record — while the release still settled
+  #     `:rolled_back` and reported the world clean.
   defp reclaim_running_steps(release) do
     release = Repo.preload(release, :steps)
 
-    for step <- release.steps, step.status == :running do
-      Releases.transition_step(step, :pending, [:running])
+    for step <- release.steps do
+      case step.status do
+        :running -> Releases.transition_step(step, :pending, [:running])
+        :compensating -> Releases.transition_step(step, :completed, [:compensating])
+        _ -> :ok
+      end
     end
 
     :ok
