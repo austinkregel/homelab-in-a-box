@@ -55,6 +55,7 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
       on_exit(fn -> Application.delete_env(:homelab, :adoption_root) end)
 
       assert {:ok, "/srv/homelab"} = AdoptionPolicy.fetch_adoption_root()
+
       assert AdoptionPolicy.service_in_scope?("sonarr", [
                %{source: "/srv/homelab/appdata/sonarr", target: "/config", type: "bind"}
              ])
