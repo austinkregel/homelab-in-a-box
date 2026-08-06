@@ -2437,10 +2437,12 @@ defmodule HomelabWeb.SettingsLive do
         </p>
         <p :if={is_nil(@managed_root)} class="text-[11px] text-error leading-snug">
           <strong>Not set — imports that copy data are blocked.</strong>
-          This instance runs in a container, so there is no safe default: <code>~/homelab-managed</code>
+          This instance runs in a container, so there is no safe default:
+          <code>~/homelab-managed</code>
           means <code>/root/homelab-managed</code>
           in here, and the daemon would apply that to the <strong>host</strong>. Set an
-          absolute host path (or the <code>HOMELAB_MANAGED_ROOT</code> env var).
+          absolute host path (or the <code>HOMELAB_MANAGED_ROOT</code>
+          env var).
         </p>
       </.form>
 
