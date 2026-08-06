@@ -983,21 +983,70 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     end
   end
 
+  # Health comes from the service's TASKS, which is the only place Swarm reports it.
+  #
+  # `get_service/1` hardcoded `health: :none`, and `AwaitHealth.ready?/2` requires
+  # `:healthy` whenever the template declares a healthcheck — so under Swarm that gate
+  # could never pass. Every healthchecked deploy timed out after 120s and rolled back,
+  # on the orchestrator this instance actually runs.
+  #
+  # Swarm holds a task in `starting` until the container's own healthcheck passes and
+  # only then promotes it to `running`, so "a task is running" IS the healthcheck result.
+  defp task(state), do: %{"Status" => %{"State" => state}}
+
+  defp daemon(service, tasks) do
+    stub(Homelab.Mocks.DockerClient, :get, fn
+      "/services/" <> _, _opts -> {:ok, service}
+      "/tasks?" <> _, _opts -> {:ok, tasks}
+    end)
+  end
+
+  describe "get_service/1 health derived from tasks" do
+    test "a running task means healthy — Swarm only promotes past its healthcheck" do
+      daemon(%{"ID" => "svc1", "Spec" => %{"Name" => "app"}}, [task("running")])
+
+      assert {:ok, %{health: :healthy, state: :running}} = DockerSwarm.get_service("svc1")
+    end
+
+    test "still coming up is :starting, not :unhealthy — the gate must keep waiting" do
+      daemon(%{"ID" => "svc1", "Spec" => %{}}, [task("preparing"), task("starting")])
+
+      assert {:ok, %{health: :starting}} = DockerSwarm.get_service("svc1")
+    end
+
+    test "a crash-looping service is unhealthy and NOT running" do
+      daemon(%{"ID" => "svc1", "Spec" => %{}}, [task("failed"), task("rejected")])
+
+      assert {:ok, %{health: :unhealthy, state: :failed}} = DockerSwarm.get_service("svc1")
+    end
+
+    test "no tasks at all is :none — unknown, not a claim either way" do
+      daemon(%{"ID" => "svc1", "Spec" => %{}}, [])
+
+      assert {:ok, %{health: :none}} = DockerSwarm.get_service("svc1")
+    end
+
+    # A daemon that will not answer for tasks must not be reported as healthy.
+    test "an unreachable tasks endpoint degrades to :none rather than inventing health" do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/services/" <> _, _opts -> {:ok, %{"ID" => "svc1", "Spec" => %{}}}
+        "/tasks?" <> _, _opts -> {:error, :boom}
+      end)
+
+      assert {:ok, %{health: :none}} = DockerSwarm.get_service("svc1")
+    end
+  end
+
   describe "get_service/1 (mocked daemon)" do
     test "parses a running service" do
-      expect(Homelab.Mocks.DockerClient, :get, fn "/services/svc1", _opts ->
-        {:ok,
-         %{
-           "ID" => "svc1",
-           "Spec" => %{"Name" => "running-app"}
-         }}
-      end)
+      daemon(%{"ID" => "svc1", "Spec" => %{"Name" => "running-app"}}, [task("running")])
 
       assert {:ok, status} = DockerSwarm.get_service("svc1")
       assert status.id == "svc1"
       assert status.name == "running-app"
       assert status.state == :running
-      assert status.health == :none
+      # Was `:none`, hardcoded. Swarm does surface this; nothing was asking.
+      assert status.health == :healthy
     end
 
     test "infers :pending from UpdateStatus.State == \"updating\"" do

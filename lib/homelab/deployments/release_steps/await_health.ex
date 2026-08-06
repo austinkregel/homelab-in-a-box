@@ -60,10 +60,21 @@ defmodule Homelab.Deployments.ReleaseSteps.AwaitHealth do
   defp ready?(%{external_id: external_id}, declares_hc?) do
     case orchestrator().get_service(external_id) do
       {:ok, service} ->
-        if declares_hc? do
-          Map.get(service, :health) == :healthy
-        else
-          Map.get(service, :state) == :running
+        # `:none` means the driver could not tell us, NOT that the workload is unhealthy.
+        # Requiring `:healthy` outright made a declared healthcheck a foot-gun on any
+        # driver that cannot report one: the gate never passed, the step timed out after
+        # its deadline, and the release rolled back a workload that was up. That was live
+        # on Swarm, where health was hardcoded `:none`.
+        #
+        # Falling back to `:running` rather than failing keeps the healthcheck meaningful
+        # where it IS reported — `:starting` and `:unhealthy` still hold the gate — while
+        # an unknown answer degrades to the same signal a workload without a healthcheck
+        # gets, which is the strongest thing left that is actually true. The reconciler
+        # has made the same trade since before this step existed.
+        case {declares_hc?, Map.get(service, :health, :none)} do
+          {true, :none} -> Map.get(service, :state) == :running
+          {true, health} -> health == :healthy
+          {false, _} -> Map.get(service, :state) == :running
         end
 
       _ ->

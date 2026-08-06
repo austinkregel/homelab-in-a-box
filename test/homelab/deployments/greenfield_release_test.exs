@@ -149,6 +149,67 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     stub(Homelab.Mocks.DnsProvider, :delete_record, fn _zone, _id -> :ok end)
   end
 
+  # The fail-safe, independent of any one driver. A template that declares a healthcheck
+  # must not become un-deployable just because the orchestrator cannot report health:
+  # `AwaitHealth` required `:healthy` outright, so a driver answering `:none` held the
+  # gate until it timed out and the release rolled back a workload that was up.
+  #
+  # This was live on Swarm — health hardcoded `:none` — but the bug is in the gate, not
+  # the driver, and it would return with the next orchestrator that cannot answer.
+  # `:starting` and `:unhealthy` still hold the gate; only "cannot say" degrades.
+  test "a declared healthcheck still deploys when the driver cannot report health", %{
+    app: app,
+    companion: companion
+  } do
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :none}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    assert Releases.get_release(release.id).status == :running
+  end
+
+  # ...but an unreportable health does NOT mean "assume it is up". A driver that says
+  # nothing about health and reports the workload as not running must still hold the gate,
+  # or the degradation becomes a way to pass every check.
+  test "an unreportable health still fails when the workload is not running", %{
+    app: app,
+    companion: companion
+  } do
+    # The gate is SUPPOSED to hold here, so it will poll until its deadline. Shorten it,
+    # or this asserts nothing and reports an ExUnit timeout 60s later — which is how it
+    # failed the first time I wrote it.
+    Application.put_env(:homelab, :await_health_timeout_ms, 30)
+    Application.put_env(:homelab, :await_health_interval_ms, 5)
+
+    on_exit(fn ->
+      Application.delete_env(:homelab, :await_health_timeout_ms)
+      Application.delete_env(:homelab, :await_health_interval_ms)
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :failed, health: :none}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn _ -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    ReleaseRunner.run(release.id, owner: "t")
+
+    refute Releases.get_release(release.id).status == :running
+  end
+
   test "happy path deploys companion + app and lands the release :running", %{
     app: app,
     companion: companion

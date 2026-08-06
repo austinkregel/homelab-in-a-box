@@ -18,6 +18,18 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   # colliding with an existing stack's `homelab-internal`).
   @routing_network "homelab-iab-internal"
 
+  # Swarm's task lifecycle, split by what it means for readiness.
+  #
+  # `starting` is the load-bearing one: Swarm keeps a task there until the container's
+  # OWN healthcheck passes, promoting it to `running` only on success. So these states
+  # mean "not ready yet, keep waiting" — never "failed" — and conflating the two is what
+  # would turn a slow-starting app into a rolled-back deploy.
+  @starting_states ~w(new pending assigned accepted preparing ready starting)
+
+  # Terminal-unhappy. `complete` is absent deliberately: it is how a one-shot task ends
+  # successfully, and calling that unhealthy would fail every job-shaped workload.
+  @failed_states ~w(failed rejected shutdown orphaned remove)
+
   @impl true
   def driver_id, do: "docker_swarm"
 
@@ -307,17 +319,38 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     end
   end
 
+  # Fetches the service AND its tasks, because tasks are the only place Swarm reports
+  # health. Deliberately NOT done in `list_services/0`: that runs every reconciler tick
+  # over every service, and a per-service `/tasks` call there is an N+1 against the
+  # daemon. The reconciler already has a fallback for unknown health; a single deployment
+  # being awaited does not.
+  #
+  # A tasks call that fails leaves health `:none` rather than failing the lookup — the
+  # service record is still true and useful, and "we could not ask" must not read as
+  # "unhealthy" to a caller that would tear the deploy down over it.
   @impl true
   def get_service(service_id) do
     case Client.get("/services/#{service_id}") do
       {:ok, service} when is_map(service) ->
-        {:ok, parse_service_status(service)}
+        {:ok, parse_service_status(service, running_tasks(service_id))}
 
       {:error, {:not_found, _}} ->
         {:error, :not_found}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Tasks the daemon intends to be running. `desired-state` rather than the observed one:
+  # a task the operator scaled away is not evidence of ill health, and including it would
+  # report a healthy service as unhealthy for as long as Swarm took to reap it.
+  defp running_tasks(service_id) do
+    filter = Jason.encode!(%{"service" => [service_id], "desired-state" => ["running"]})
+
+    case Client.get("/tasks?filters=#{URI.encode(filter)}") do
+      {:ok, tasks} when is_list(tasks) -> tasks
+      _ -> []
     end
   end
 
@@ -721,7 +754,7 @@ defmodule Homelab.Orchestrators.DockerSwarm do
 
   # --- Response Parsers ---
 
-  defp parse_service_status(service) do
+  defp parse_service_status(service, tasks \\ []) do
     spec = service["Spec"] || %{}
     container_spec = get_in(spec, ["TaskTemplate", "ContainerSpec"]) || %{}
     mode = spec["Mode"] || %{}
@@ -735,20 +768,60 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     %{
       id: service["ID"],
       name: spec["Name"],
-      state: infer_service_state(service),
-      health: :none,
+      state: infer_service_state(service, tasks),
+      health: task_health(tasks),
       replicas: replicas,
       image: container_spec["Image"] || "",
       labels: spec["Labels"] || %{}
     }
   end
 
-  defp infer_service_state(service) do
+  # Swarm reports health in exactly one place: the state of a service's TASKS.
+  #
+  # This was hardcoded `:none`, and `AwaitHealth.ready?/2` requires `:healthy` whenever
+  # the template declares a healthcheck — so on Swarm that gate could never pass. Every
+  # healthchecked deploy timed out after 120s and rolled back. The reconciler carried a
+  # `:none -> stable?/1` fallback with the comment "Swarm doesn't surface it", which is
+  # the belief this corrects: it does, on `/tasks`.
+  #
+  # The mapping is sound because Swarm holds a task in `starting` until the container's
+  # own healthcheck passes and only promotes it to `running` after. So "a task is
+  # running" IS the healthcheck result, not a proxy for it.
+  #
+  # `:none` for no tasks is deliberate — unknown, not a claim. A service scaled to zero
+  # and one whose tasks the daemon would not report are both "we cannot say", and the
+  # consumers treat that as "fall back to another signal" rather than as failure.
+  defp task_health([]), do: :none
+
+  defp task_health(tasks) when is_list(tasks) do
+    states = Enum.map(tasks, &task_state/1)
+
+    cond do
+      Enum.any?(states, &(&1 == "running")) -> :healthy
+      Enum.any?(states, &(&1 in @starting_states)) -> :starting
+      Enum.any?(states, &(&1 in @failed_states)) -> :unhealthy
+      true -> :none
+    end
+  end
+
+  defp task_health(_), do: :none
+
+  defp task_state(%{"Status" => %{"State" => state}}) when is_binary(state), do: state
+  defp task_state(_), do: nil
+
+  # `UpdateStatus` describes the last DEPLOYMENT, not whether anything is serving, so on
+  # its own this returned `:running` for a service whose tasks were all crash-looping —
+  # `:stopped` and `:failed` were unreachable, and the reconciler's convergence saw a
+  # healthy workload where there was none. Tasks are consulted first for exactly the
+  # reason they are the health source: they describe what is actually up.
+  defp infer_service_state(service, tasks) do
     update_status = service["UpdateStatus"]
 
     cond do
       update_status && update_status["State"] == "rollback_completed" -> :failed
       update_status && update_status["State"] == "updating" -> :pending
+      task_health(tasks) == :unhealthy -> :failed
+      task_health(tasks) == :starting -> :pending
       true -> :running
     end
   end
