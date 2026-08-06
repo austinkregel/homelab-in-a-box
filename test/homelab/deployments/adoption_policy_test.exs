@@ -108,6 +108,61 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     end
   end
 
+  # Scope is decided per SERVICE — one bind under the adoption root pulls the whole
+  # container in — and every mount on it was then classified against that single verdict.
+  # So a media library, a NAS share, a second disk: anything the container also mounts got
+  # `:preserve`, which is the tier that feeds the backup gate and the migrate copy.
+  #
+  # Reported from production: an import stalled trying to back up `/media/Music`, a Samba
+  # share on a NAS. Under `:migrate` the next step would have been copying it into the
+  # managed home.
+  describe "mounts outside the adoption root" do
+    test "a NAS share on an otherwise in-scope service is external, not preserved" do
+      config = bind("/srv/homelab/appdata/navidrome", "/config")
+      music = bind("/media/Music", "/music")
+      mounts = [config, music]
+
+      assert %{tier: :preserve} = AdoptionPolicy.classify_mount("navidrome", config, mounts)
+      assert %{tier: :external} = AdoptionPolicy.classify_mount("navidrome", music, mounts)
+    end
+
+    test "a second disk is external even when the service is squarely in scope" do
+      config = bind("/srv/homelab/appdata/plex", "/config")
+      media = bind("/mnt/storage/movies", "/movies")
+
+      assert %{tier: :external} =
+               AdoptionPolicy.classify_mount("plex", media, [config, media])
+    end
+
+    # The root itself and anything under it stays managed — this must not become a blanket
+    # "anything unusual is external" rule, or adoption stops adopting.
+    test "a nested path under the root is still preserved" do
+      m = bind("/srv/homelab/appdata/deep/nested/data", "/data")
+      assert %{tier: :preserve} = AdoptionPolicy.classify_mount("app", m, [m])
+    end
+
+    # A named volume has no host path to be on another drive; the daemon owns where it
+    # lives. Classifying those as external would strip every ordinary docker volume out of
+    # adoption.
+    test "a named volume is never external" do
+      config = bind("/srv/homelab/appdata/app", "/config")
+      data = vol("app_data", "/data")
+
+      refute match?(
+               %{tier: :external},
+               AdoptionPolicy.classify_mount("app", data, [config, data])
+             )
+    end
+
+    # An out-of-scope SERVICE is still out of scope — external is about a mount on a
+    # service we are adopting, not a way in for one we are not.
+    test "a service with no in-scope bind at all stays out_of_scope" do
+      music = bind("/media/Music", "/music")
+
+      assert %{tier: :out_of_scope} = AdoptionPolicy.classify_mount("navidrome", music, [music])
+    end
+  end
+
   describe "default is preserve" do
     test "an unclassified in-scope data dir is preserved" do
       m = bind("/srv/homelab/appdata/homelab-postgres", "/var/lib/postgresql/data")
