@@ -69,10 +69,22 @@ defmodule Homelab.Deployments.ReleaseSteps.VerifyIntegrity do
         false
 
       external_id ->
+        # Same rule as `AwaitHealth.ready?/2`, for the same reason: `:none` means the
+        # driver could not report health, not that the workload is unhealthy. On Swarm,
+        # where health was hardcoded `:none`, this made every adoption of a healthchecked
+        # app fail its integrity check and roll the cutover back.
         case orchestrator().get_service(external_id) do
-          {:ok, service} when declares_hc? -> Map.get(service, :health) == :healthy
-          {:ok, service} -> Map.get(service, :state) == :running
-          _ -> false
+          {:ok, %{health: :none} = service} when declares_hc? ->
+            Map.get(service, :state) == :running
+
+          {:ok, service} when declares_hc? ->
+            Map.get(service, :health) == :healthy
+
+          {:ok, service} ->
+            Map.get(service, :state) == :running
+
+          _ ->
+            false
         end
     end
   end
