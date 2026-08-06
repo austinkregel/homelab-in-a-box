@@ -76,7 +76,14 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
           handle = %{
             "deployment_id" => deployment.id,
             "fqdn" => deployment.domain,
-            "record_ids" => Enum.map(written, fn {:ok, record} -> record.id end),
+            # UNION with whatever a previous attempt of this same step recorded, not a
+            # replacement. A reclaimed step re-runs from scratch and can publish a
+            # different name than it did the first time — the operator moved the domain
+            # in between, and `ensure_deployment_dns_records/2` writes the current name
+            # without retiring the previous one. Both sets are this step's to undo.
+            # (`record_count` stays this attempt's count: it describes what was just
+            # written, which is what the Activity line reports.)
+            "record_ids" => Enum.uniq(recorded_ids(step) ++ written_ids(written)),
             "record_count" => length(written)
           }
 
@@ -119,6 +126,15 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
             activity_delete_error(deployment_id, reason)
             {:error, {:publish_dns_compensation_failed, deployment_id, reason}}
         end
+    end
+  end
+
+  defp written_ids(written), do: Enum.map(written, fn {:ok, record} -> record.id end)
+
+  defp recorded_ids(step) do
+    case (step.resource_handle || %{})["record_ids"] do
+      ids when is_list(ids) -> ids
+      _ -> []
     end
   end
 
