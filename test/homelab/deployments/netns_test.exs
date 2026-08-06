@@ -551,10 +551,23 @@ defmodule Homelab.Deployments.NetnsTest do
       last_child = Enum.find_index(Enum.reverse(types), &(&1 == :netns_child_container))
       last_child = length(types) - 1 - last_child
 
-      for advertising <- [:sync_domain, :publish_dns, :publish_ingress] do
-        assert Enum.find_index(types, &(&1 == advertising)) > last_child,
-               "#{advertising} must come after the last child"
+      for advertising <- [:sync_domain, :publish_dns] do
+        index = Enum.find_index(types, &(&1 == advertising))
+
+        # `Enum.find_index/2` returns nil for a step that was never planned, and in
+        # Elixir's term order an atom sorts ABOVE every integer — so `nil > last_child`
+        # is `true` and the ordering assertion below silently asserts nothing. The
+        # third element of this list used to be `:publish_ingress`, which this donor
+        # (exposure `:service`) never gets, so that iteration measured nothing at all.
+        assert is_integer(index), "#{advertising} must be planned"
+
+        assert index > last_child, "#{advertising} must come after the last child"
       end
+
+      # And `:publish_ingress` is correctly absent rather than merely unordered: the
+      # donor is `:service`-exposed, so `ingress_published?/1` is false and the step
+      # would fall through having done nothing.
+      refute :publish_ingress in types
 
       # The proxy is the exception, and is still first: it creates nothing and
       # advertises nothing — it is a precondition of the route.
