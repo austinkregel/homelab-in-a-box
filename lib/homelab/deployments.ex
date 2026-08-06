@@ -493,12 +493,19 @@ defmodule Homelab.Deployments do
     Repo.transaction(fn ->
       with {:ok, deployment} <- create_deployment(attrs),
            deployment = get_deployment!(deployment.id),
+           # Resolved here for the PRE-FLIGHT only. `plan_deploy_release/3` resolves the
+           # donor itself, so passing this list on would have it appended to a set that
+           # already contains the donor — and neither `netns_donor_companions/1` nor
+           # `plan_release/3` de-duplicates, so the donor was planned twice. Two
+           # `:dependency_container` steps for one deployment both write `external_id`:
+           # only the second is compensatable, and the first container is orphaned.
            all_companions = netns_donor_companions(deployment) ++ companions,
-           :ok <- preflight_specs([deployment | all_companions]),
-           {:ok, release} <- plan_deploy_release(deployment, all_companions, []) do
+           :ok <- preflight_specs([deployment | all_companions], all_companions),
+           {:ok, release} <- plan_deploy_release(deployment, companions, []) do
         %{deployment: deployment, release: release}
       else
         {:error, reason} -> Repo.rollback(reason)
+        other -> Repo.rollback(other)
       end
     end)
     |> case do
@@ -514,14 +521,41 @@ defmodule Homelab.Deployments do
   # Fails on the FIRST unbuildable spec and returns that reason verbatim, so callers
   # keep matching on `{:error, {:missing_required_env, keys}}` exactly as they do
   # against `deploy_now/1`.
-  defp preflight_specs(deployments) do
+  # With ONE exception, and it is narrow on purpose. `SpecBuilder.resolve_netns_donor/1`
+  # fails closed on a donor that has no container yet — correctly, because a create
+  # naming an absent container produces one the daemon will never start. But a donor
+  # THIS release is about to deploy has exactly that shape at plan time, and the release
+  # is what establishes the precondition: the donor is planned first and awaited healthy
+  # before the child's container is created. SpecBuilder's own comment says as much.
+  # Asserting it here made `create_and_deploy_release/2` unable to create a netns child
+  # at all — the transaction rolled back and no deployment was written.
+  #
+  # Scoped to donors in this release's companion set, not to netns errors in general: a
+  # donor that is genuinely missing, or one nothing is going to deploy, still fails fast.
+  # And it costs no other coverage — `SpecBuilder.build/1` validates required env BEFORE
+  # it resolves the donor, so everything the pre-flight exists for has already run by
+  # the time this error can be returned.
+  defp preflight_specs(deployments, companions) do
+    deployable = MapSet.new(companions, & &1.id)
+
     Enum.reduce_while(deployments, :ok, fn deployment, :ok ->
-      case SpecBuilder.build(get_deployment!(deployment.id)) do
-        {:ok, _spec} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+      case SpecBuilder.build(with_associations(deployment)) do
+        {:ok, _spec} ->
+          {:cont, :ok}
+
+        {:error, {:netns_donor_not_running, donor_id}} = error ->
+          if MapSet.member?(deployable, donor_id), do: {:cont, :ok}, else: {:halt, error}
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
   end
+
+  # A no-op for rows the caller already loaded — which is all of them on the common
+  # path, where re-fetching by id would query the same deployment three times.
+  defp with_associations(%Deployment{} = deployment),
+    do: Repo.preload(deployment, [:tenant, :app_template])
 
   @doc """
   Provisions a deployment (and any companion deployments) durably via the release
