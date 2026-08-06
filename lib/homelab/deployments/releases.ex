@@ -112,6 +112,37 @@ defmodule Homelab.Deployments.Releases do
     |> preload_steps()
   end
 
+  @doc """
+  Any active release that DRIVES `deployment_id` — as its own app, or as a companion
+  named by a step's `resource_handle["deployment_id"]`. Nil if the deployment is free.
+
+  `get_active_release/1` answers only the first half, and so does the
+  `releases_one_active_per_deployment` unique index: both key on
+  `releases.deployment_id`, which a companion never occupies. Nothing therefore stopped
+  two sagas from provisioning one deployment — the everyday "deploy the VPN donor, then
+  deploy an app behind it before the donor's release has finished" shape. Both would
+  call `orchestrator.deploy` for it, both would write its `external_id`, and a rollback
+  of either would undeploy the container the other had just created.
+
+  `driving_release/1` asks a similar question for display and returns the LATEST release
+  whatever its status; this one is a guard and returns only an in-flight one.
+  """
+  def active_release_driving(deployment_id) do
+    id_str = to_string(deployment_id)
+
+    Release
+    |> join(:left, [r], s in assoc(r, :steps))
+    |> where([r], r.status in ^Release.active_statuses())
+    |> where(
+      [r, s],
+      r.deployment_id == ^deployment_id or
+        fragment("?->>'deployment_id' = ?", s.resource_handle, ^id_str)
+    )
+    |> order_by([r], desc: r.inserted_at, desc: r.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
   @doc "The lowest-position step still `:pending`, or nil."
   def next_pending_step(%Release{} = release) do
     release
