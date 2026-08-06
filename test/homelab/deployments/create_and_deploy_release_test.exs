@@ -291,6 +291,52 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
                })
     end
 
+    # `releases_one_active_per_deployment` covers `releases.deployment_id` and nothing
+    # else. A companion is named by a step's `resource_handle["deployment_id"]`, which
+    # the index cannot see, and no planner checked — so the ordinary "deploy gluetun,
+    # then deploy an app behind it before gluetun's release has finished" flow put TWO
+    # sagas on one deployment. Both call `orchestrator.deploy` for it, both write its
+    # `external_id`, and a rollback of either undeploys the container the other just
+    # created.
+    #
+    # The guard already exists in this codebase: `Adoption.adopt/2` calls
+    # `ensure_no_active_release/1` before it plans. This is the same rule applied to the
+    # set a deploy release actually drives.
+    test "refuses to plan while the donor already has a release in flight", %{
+      tenant: tenant,
+      donor_template: dt
+    } do
+      donor = donor(tenant, dt, nil)
+
+      # R1 drives the donor as its own app.
+      assert {:ok, _r1} = Deployments.deploy_release(donor)
+
+      # R2 would drive it as a companion.
+      assert {:error, {:release_in_flight, id}} =
+               Deployments.create_and_deploy_release(child_attrs(tenant, donor))
+
+      assert id == donor.id
+
+      # And nothing was left behind by the refusal.
+      assert Enum.map(Deployments.list_deployments(), & &1.id) == [donor.id]
+    end
+
+    # The mirror image, and the one the `deployment_id` index cannot catch from either
+    # side: the in-flight release names the deployment only as a COMPANION, and the new
+    # one wants it as its app.
+    test "refuses to plan a deployment another release already drives as a companion", %{
+      tenant: tenant,
+      donor_template: dt
+    } do
+      donor = donor(tenant, dt, nil)
+      app = insert(:deployment, tenant: tenant, app_template: clean_template(), external_id: nil)
+
+      assert {:ok, _r1} = Deployments.deploy_release(app, [donor])
+
+      assert {:error, {:release_in_flight, id}} = Deployments.deploy_release(donor)
+      assert id == donor.id
+    end
+
     # And a donor that is genuinely absent is still a hard failure — the relaxation is
     # scoped to donors THIS release will deploy, not to netns errors in general.
     #
