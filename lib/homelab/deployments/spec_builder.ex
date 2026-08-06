@@ -663,8 +663,18 @@ defmodule Homelab.Deployments.SpecBuilder do
   extends — so the specific route always outranks the catch-all, by construction. An
   explicit number would have to be kept above whatever the base rule's length happens to
   be, which is a trap waiting for a longer domain.
+
+  That priority is exactly why every extra router must ALSO carry the deployment's
+  exposure middleware. Traefik applies middleware per ROUTER, so a `/app` router without
+  `.middlewares` serves the same container with no forwardAuth and no IP allowlist —
+  and because it outranks the base router, adding a websocket path to an `:sso_protected`
+  app would not merely open a hole beside the front door, it would open one IN FRONT of
+  it. The exposure is read from the deployment here rather than passed in, so there is no
+  way to call this function and get an unguarded route.
   """
   def extra_route_labels(deployment, router, domain) do
+    exposure = to_string(Access.effective_exposure(deployment))
+
     deployment
     |> Map.get(:extra_routes)
     |> List.wrap()
@@ -682,7 +692,7 @@ defmodule Homelab.Deployments.SpecBuilder do
           {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
           {"traefik.http.routers.#{name}.service", name},
           {"traefik.http.services.#{name}.loadbalancer.server.port", to_string(port)}
-        ]
+        ] ++ Map.to_list(router_middleware_labels(name, router, exposure))
       else
         []
       end
@@ -731,28 +741,54 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
-  defp exposure_middleware_labels(router, "sso_protected") do
+  # The DEFINITIONS plus the base router's reference to them. Definitions are emitted
+  # once per workload and named after the base router; every other router the workload
+  # emits points at these same names (see `router_middleware_labels/3`). One definition
+  # rather than one per router because the forwardAuth address is configuration — N
+  # copies of it is N places to drift, and Traefik resolves a middleware name within the
+  # provider namespace, so a sibling router referencing it is not a dangling reference.
+  defp exposure_middleware_labels(router, exposure) do
+    router
+    |> exposure_middleware_definitions(exposure)
+    |> Map.merge(router_middleware_labels(router, router, exposure))
+  end
+
+  # `.middlewares` for ONE router, naming the definitions owned by `owner`. Traefik reads
+  # the value as a comma-joined LIST, so it is built by joining names: anything that later
+  # needs a second middleware on the same router must EXTEND this list. Assigning the key
+  # a bare string elsewhere would silently drop the exposure guard.
+  defp router_middleware_labels(router, owner, exposure) do
+    case exposure_middleware_names(owner, exposure) do
+      [] -> %{}
+      names -> %{"traefik.http.routers.#{router}.middlewares" => Enum.join(names, ",")}
+    end
+  end
+
+  defp exposure_middleware_names(owner, "sso_protected"), do: ["#{owner}-auth"]
+  defp exposure_middleware_names(owner, "private"), do: ["#{owner}-ipallow"]
+  defp exposure_middleware_names(_owner, "service"), do: []
+  defp exposure_middleware_names(_owner, _public), do: []
+
+  defp exposure_middleware_definitions(router, "sso_protected") do
     %{
-      "traefik.http.routers.#{router}.middlewares" => "#{router}-auth",
       "traefik.http.middlewares.#{router}-auth.forwardauth.address" =>
-        "http://authentik-proxy:9000/outpost.goauthentik.io/auth/nginx",
+        Homelab.Config.forward_auth_address(),
       "traefik.http.middlewares.#{router}-auth.forwardauth.trustForwardHeader" => "true",
       "traefik.http.middlewares.#{router}-auth.forwardauth.authResponseHeaders" =>
         "X-authentik-username,X-authentik-groups,X-authentik-email"
     }
   end
 
-  defp exposure_middleware_labels(router, "private") do
+  defp exposure_middleware_definitions(router, "private") do
     %{
-      "traefik.http.routers.#{router}.middlewares" => "#{router}-ipallow",
       "traefik.http.middlewares.#{router}-ipallow.ipallowlist.sourcerange" =>
         "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     }
   end
 
-  defp exposure_middleware_labels(_router, "service"), do: %{}
+  defp exposure_middleware_definitions(_router, "service"), do: %{}
 
-  defp exposure_middleware_labels(_router, _public), do: %{}
+  defp exposure_middleware_definitions(_router, _public), do: %{}
 
   @doc """
   The container port the proxy forwards to, and the port an HTTP healthcheck probes.

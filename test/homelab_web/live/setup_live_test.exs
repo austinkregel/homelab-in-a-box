@@ -457,7 +457,99 @@ defmodule HomelabWeb.SetupLiveTest do
   end
 
   describe "step 5 completion" do
-    test "setup redirects to / when already complete", %{conn: conn} do
+    # `step` is parsed straight off the query string, so step 5 was reachable without
+    # walking any of the steps before it. Marking setup complete is what switches
+    # `RequireAuth` from fail-open to enforcing, so doing it with no OIDC issuer
+    # configured enforces login against a provider that does not exist: /auth/oidc
+    # cannot complete and the only way back in is a pre-placed break-glass token.
+    test "a URL jump to step 5 on an unconfigured instance does not mark setup complete",
+         %{conn: conn} do
+      refute Homelab.Settings.setup_completed?()
+
+      result = live(conn, ~p"/setup?step=5")
+
+      refute Homelab.Settings.setup_completed?(),
+             "GET /setup?step=5 marked setup complete with no OIDC provider to log in against"
+
+      assert {:error, {:live_redirect, %{to: "/setup?step=2"}}} = result
+    end
+
+    test "the URL jump lands the operator on the authentication step", %{conn: conn} do
+      assert {:error, {:live_redirect, %{to: to}}} = live(conn, ~p"/setup?step=5")
+
+      {:ok, view, _html} = live(conn, to)
+      assert has_element?(view, "#step2-form")
+    end
+
+    # The guard must not be so strict that the wizard can never finish: walking the
+    # steps in order, with OIDC actually filled in, still completes setup.
+    test "walking the wizard with OIDC configured does mark setup complete", %{conn: conn} do
+      bypass = Bypass.open()
+      issuer = "http://localhost:#{bypass.port}"
+
+      Bypass.stub(bypass, "GET", "/.well-known/openid-configuration", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "issuer" => issuer,
+            "authorization_endpoint" => "#{issuer}/authorize",
+            "token_endpoint" => "#{issuer}/token",
+            "userinfo_endpoint" => "#{issuer}/userinfo",
+            "jwks_uri" => "#{issuer}/jwks",
+            "grant_types_supported" => ["authorization_code", "refresh_token"],
+            "scopes_supported" => ["openid", "email", "profile"],
+            "response_types_supported" => ["code"]
+          })
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/setup")
+
+      view
+      |> form("#step1-form", %{
+        "step1" => %{"instance_name" => "My Homelab", "base_domain" => "lab.example.com"}
+      })
+      |> render_submit()
+
+      # The Client ID field only appears once discovery has succeeded, so the legitimate
+      # path runs discovery before it can fill the credentials in.
+      view
+      |> form("#step2-form", %{"oidc" => %{"oidc_issuer" => issuer}})
+      |> render_change()
+
+      render_click(view, "discover_oidc", %{})
+
+      view
+      |> form("#step2-form", %{
+        "oidc" => %{
+          "oidc_issuer" => issuer,
+          "oidc_client_id" => "homelab",
+          "oidc_client_secret" => ""
+        }
+      })
+      |> render_submit()
+
+      render_click(view, "select_orchestrator", %{"driver" => "docker"})
+      render_click(view, "select_gateway", %{"driver" => "traefik"})
+      render_click(view, "save_step_3", %{})
+
+      refute Homelab.Settings.setup_completed?(),
+             "setup was marked complete before the wizard reached its last step"
+
+      view
+      |> form("#step4-form", %{"tenant" => %{"name" => "Test Space", "slug" => "test-space"}})
+      |> render_submit()
+
+      assert has_element?(view, "#setup-complete")
+      assert Homelab.Settings.setup_completed?()
+    end
+
+    test "setup redirects to / once it is genuinely complete", %{conn: conn} do
+      Homelab.Settings.set("oidc_issuer", "https://auth.example.com")
+      Homelab.Settings.set("oidc_client_id", "homelab")
+
       assert {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/setup?step=5")
     end
   end

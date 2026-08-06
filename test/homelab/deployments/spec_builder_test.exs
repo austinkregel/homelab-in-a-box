@@ -187,6 +187,23 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       refute Map.has_key?(spec.labels, "homelab.adopted")
     end
 
+    test "the sso_protected forwardAuth address comes from configuration, not a literal" do
+      tenant = build_tenant(%{slug: "friends"})
+      template = build_template(%{slug: "nextcloud", exposure_mode: :sso_protected})
+      deployment = build_deployment(tenant, template)
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      # Found by suffix rather than by router name so this does not also assert the
+      # domain-sanitizing scheme, which is a separate concern with its own tests.
+      assert {_key, address} =
+               Enum.find(spec.labels, fn {k, _v} ->
+                 String.ends_with?(k, ".forwardauth.address")
+               end)
+
+      assert address == Homelab.Config.forward_auth_address()
+    end
+
     test "adopted templates carry the homelab.adopted label" do
       tenant = build_tenant(%{slug: "friends"})
       template = build_template(%{slug: "adopted-pg", source: "adopted"})
@@ -733,6 +750,116 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.labels["traefik.http.routers.aut-hair-apps-events.rule"] ==
                "Host(`aut.hair`) && PathPrefix(`/apps/events`)"
     end
+
+    # Traefik applies middleware PER ROUTER, and an extra route is its own router. An
+    # :sso_protected deployment whose /app router omits `.middlewares` therefore serves
+    # that path with no forwardAuth at all — and it is worse than a leak, because the
+    # PathPrefix rule is longer than the bare Host rule and Traefik ranks by rule length:
+    # the UNPROTECTED router outranks the protected one it was added alongside.
+    test "an sso_protected extra route is behind forwardAuth, not wide open" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :sso_protected})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      names = middlewares_on(spec.labels, "aut-hair-app")
+      refute names == [], "the /app router carries no middleware — the path is unguarded"
+
+      # A dangling reference is not a safe failure mode: Traefik rejects a router naming
+      # a middleware it cannot resolve, so "protected" would silently mean "404".
+      Enum.each(names, fn name ->
+        assert middleware_defined?(spec.labels, name),
+               "the /app router references #{name}, which nothing defines"
+      end)
+
+      assert Enum.any?(names, fn name ->
+               spec.labels["traefik.http.middlewares.#{name}.forwardauth.address"] ==
+                 Homelab.Config.forward_auth_address()
+             end)
+    end
+
+    test "a private extra route is behind the ip allowlist, not wide open" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :private})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          routed_port: 8000,
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      names = middlewares_on(spec.labels, "aut-hair-app")
+      refute names == [], "the /app router carries no middleware — the path is unguarded"
+
+      assert Enum.any?(names, fn name ->
+               Map.has_key?(
+                 spec.labels,
+                 "traefik.http.middlewares.#{name}.ipallowlist.sourcerange"
+               )
+             end)
+    end
+
+    # The mirror image, so the fix cannot be "attach a middleware to everything": a
+    # :public deployment has nothing to enforce, and inventing a middleware for it would
+    # be a new failure mode rather than a fix.
+    test "a public extra route stays open, exactly like the route it extends" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "aut.hair",
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert middlewares_on(spec.labels, "aut-hair") == []
+      assert middlewares_on(spec.labels, "aut-hair-app") == []
+      refute Enum.any?(Map.keys(spec.labels), &String.contains?(&1, ".middlewares."))
+    end
+
+    # Phrased over EVERY router the spec emits rather than over the one this test builds:
+    # whenever the base router is guarded, no sibling router may be unguarded. A future
+    # feature that emits another router — a second path, a www alias, a redirect — and
+    # forgets its middlewares fails HERE, without anyone remembering to extend this file.
+    test "no router the spec emits escapes the protection the base router carries" do
+      for exposure <- [:sso_protected, :private] do
+        tenant = build_tenant()
+        template = build_template(%{exposure_mode: exposure})
+
+        deployment =
+          build_deployment(tenant, template, %{
+            domain: "aut.hair",
+            routed_port: 8000,
+            extra_routes: [
+              %{"path_prefix" => "/app", "port" => 6001},
+              %{"path_prefix" => "/apps/events", "port" => 6002}
+            ]
+          })
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+
+        base = middlewares_on(spec.labels, "aut-hair")
+        refute base == [], "#{exposure} base router lost its middleware"
+
+        for router <- router_names(spec.labels) do
+          refute middlewares_on(spec.labels, router) == [],
+                 "#{exposure}: router #{router} reaches the container with no middleware, " <>
+                   "while the base router requires #{Enum.join(base, ",")}"
+        end
+      end
+    end
   end
 
   describe "per-deployment config overrides" do
@@ -1190,5 +1317,32 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert spec.gpu.vendor == "amd"
       assert spec.memory_limit == 2048 * 1_048_576
     end
+  end
+
+  # Every router NAME the label map mentions, discovered rather than listed, so an
+  # assertion can be written about routers a test never named.
+  # "traefik.http.routers.aut-hair-app.rule" -> "aut-hair-app".
+  defp router_names(labels) do
+    labels
+    |> Map.keys()
+    |> Enum.flat_map(fn key ->
+      case String.split(key, ".") do
+        ["traefik", "http", "routers", name | _] -> [name]
+        _ -> []
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  # Traefik reads `.middlewares` as a comma-joined LIST, so it is compared as a set of
+  # names and never as the one string that happens to be there today.
+  defp middlewares_on(labels, router) do
+    labels
+    |> Map.get("traefik.http.routers.#{router}.middlewares", "")
+    |> String.split(",", trim: true)
+  end
+
+  defp middleware_defined?(labels, name) do
+    Enum.any?(Map.keys(labels), &String.starts_with?(&1, "traefik.http.middlewares.#{name}."))
   end
 end

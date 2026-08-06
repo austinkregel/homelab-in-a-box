@@ -171,7 +171,7 @@ defmodule Homelab.Gateways.Traefik do
     %{
       "#{router_name}-auth" => %{
         "forwardAuth" => %{
-          "address" => "http://authentik-proxy:9000/outpost.goauthentik.io/auth/nginx",
+          "address" => Homelab.Config.forward_auth_address(),
           "trustForwardHeader" => true,
           "authResponseHeaders" => [
             "X-authentik-username",

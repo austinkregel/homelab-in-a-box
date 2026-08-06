@@ -15,6 +15,42 @@ defmodule Homelab.Backups do
     |> Repo.all()
   end
 
+  @doc """
+  Backup jobs belonging to one tenant, via their deployments.
+
+  `list_backup_jobs/0` is every tenant's jobs; that is right for the operator's own
+  views, and wrong for anything addressed by an API caller. There is no `tenant_id` on
+  `backup_jobs` — the tenant is reached through the deployment, so the scope has to be a
+  join rather than a `where`.
+  """
+  def list_backup_jobs_for_tenant(tenant_id) do
+    BackupJob
+    |> join(:inner, [b], d in assoc(b, :deployment))
+    |> where([_b, d], d.tenant_id == ^tenant_id)
+    |> preload(deployment: [:tenant, :app_template])
+    |> order_by([b], desc: b.scheduled_at)
+    |> Repo.all()
+  end
+
+  @doc """
+  One backup job, but only if it belongs to this tenant.
+
+  Returns `{:error, :not_found}` for a job that exists under a different tenant — a
+  caller must not be able to tell "not yours" from "does not exist", and every consumer
+  of this already turns `:not_found` into a 404.
+  """
+  def get_backup_job_for_tenant(tenant_id, id) do
+    BackupJob
+    |> join(:inner, [b], d in assoc(b, :deployment))
+    |> where([b, d], b.id == ^id and d.tenant_id == ^tenant_id)
+    |> preload(deployment: [:tenant, :app_template])
+    |> Repo.one()
+    |> case do
+      nil -> {:error, :not_found}
+      job -> {:ok, job}
+    end
+  end
+
   def list_backup_jobs_for_deployment(deployment_id) do
     BackupJob
     |> where(deployment_id: ^deployment_id)

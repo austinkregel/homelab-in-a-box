@@ -249,6 +249,40 @@ defmodule Homelab.ConfigTest do
     end
   end
 
+  describe "forward_auth_address/0" do
+    test "defaults to the historical hardcoded address when the setting is unset" do
+      assert Config.forward_auth_address() == Config.default_forward_auth_address()
+
+      assert Config.default_forward_auth_address() =~ "authentik-proxy"
+    end
+
+    test "an operator setting overrides the default" do
+      Homelab.Settings.set("forward_auth_address", "http://oauth2-proxy:4180/oauth2/auth")
+
+      assert Config.forward_auth_address() == "http://oauth2-proxy:4180/oauth2/auth"
+    end
+
+    test "a blank setting restores the default rather than emitting an empty address" do
+      # An empty forwardAuth address is not "no auth" — Traefik rejects the router
+      # config outright, so the route stops serving entirely. Blank must mean
+      # "back to the default", which is also what `put_setting/2` encodes by deleting
+      # the key.
+      Homelab.Settings.set("forward_auth_address", "   ")
+
+      assert Config.forward_auth_address() == Config.default_forward_auth_address()
+    end
+
+    test "reads through the ETS cache so no-DB callers (SpecBuilder) do not hit the Repo" do
+      Homelab.Settings.set("forward_auth_address", "http://cached:4180/auth")
+
+      # `get_cached/2` never falls back to the Repo. Emptying the table therefore
+      # yields the default, proving the read path is the cache and not a query.
+      Homelab.Settings.reset_cache()
+
+      assert Config.forward_auth_address() == Config.default_forward_auth_address()
+    end
+  end
+
   describe "self-hosted registry" do
     setup do
       prev = %{

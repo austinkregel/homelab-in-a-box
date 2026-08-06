@@ -12,7 +12,18 @@ config :homelab, Homelab.Repo,
   port: String.to_integer(System.get_env("DB_PORT", "5433")),
   database: "homelab_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
-  pool_size: System.schedulers_online() * 2
+  # DBConnection opens the whole pool at Repo start, so this is a per-`mix test`
+  # -process cost, not a per-test one. `POOL_SIZE` exists so several concurrent
+  # test runs (agents working disjoint file sets, each with its own
+  # MIX_TEST_PARTITION) can fit under the server's max_connections without
+  # editing this file — see the note in docker-compose.yml.
+  pool_size:
+    String.to_integer(System.get_env("POOL_SIZE") || to_string(System.schedulers_online() * 2)),
+  # Wait out a busy moment instead of dropping the request (default 50ms/1000ms).
+  # Load-bearing whenever POOL_SIZE is lowered: without it, an under-provisioned
+  # pool surfaces as `DBConnection` queue timeouts that read like test failures.
+  queue_target: 5_000,
+  queue_interval: 10_000
 
 # In test, the Oban repo uses the SQL sandbox. Oban itself runs in manual testing
 # mode (no queues, plugins, or notifier) so jobs only run when a test drains them.

@@ -84,6 +84,9 @@ defmodule HomelabWeb.AuthController do
                       |> put_flash(:info, "Signed in successfully.")
                       |> redirect(to: "/")
 
+                    {:error, :not_allowed} ->
+                      provisioning_refused(conn)
+
                     {:error, _changeset} ->
                       conn
                       |> put_flash(:error, "Failed to create or update user.")
@@ -128,6 +131,25 @@ defmodule HomelabWeb.AuthController do
     |> configure_session(drop: true)
     |> put_flash(:info, "Signed out successfully.")
     |> redirect(to: "/")
+  end
+
+  # The provider authenticated them; this instance will not give them an account
+  # (see `Homelab.Accounts.get_or_create_from_oidc/1`).
+  #
+  # Answered in place with a 403 rather than the flash-and-redirect-to-"/" every other
+  # error branch here uses. "/" is RequireAuth-protected, so it would bounce to
+  # /auth/oidc, on to the provider, back into this callback, and be refused again —
+  # an infinite loop with no way out and no message the user ever gets to read.
+  defp provisioning_refused(conn) do
+    conn
+    |> delete_session(:oidc_state)
+    |> put_resp_content_type("text/plain")
+    |> send_resp(
+      403,
+      "Signed in with your identity provider, but this instance is not permitted to " <>
+        "create an account for you. An administrator can add your email address (or " <>
+        "your whole domain, as @example.com) to the OIDC allowlist in Settings."
+    )
   end
 
   # The OIDC provider is unreachable. If break-glass is configured, send the

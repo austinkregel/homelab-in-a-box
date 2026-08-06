@@ -155,6 +155,19 @@ defmodule HomelabWeb.SettingsLive do
     end
   end
 
+  # Deliberately NOT part of `save_oidc`: that handler refuses to persist anything when
+  # discovery fails, and the forward-auth endpoint is a different component from the
+  # issuer. Bundling them would make an unreachable OIDC provider block a change to the
+  # proxy address — including the change that fixes it.
+  def handle_event("save_forward_auth", %{"forward_auth" => params}, socket) do
+    put_setting(params, "forward_auth_address")
+
+    {:noreply,
+     socket
+     |> load_section_data("authentication")
+     |> put_flash(:info, "Forward-auth endpoint saved.")}
+  end
+
   def handle_event("test_oidc", _params, socket) do
     check =
       case verify_issuer(socket.assigns.oidc_issuer) do
@@ -388,9 +401,40 @@ defmodule HomelabWeb.SettingsLive do
      |> load_section_data("infrastructure")}
   end
 
+  # Deleting `setup_completed` is not a navigation aid. `RequireAuth` deliberately lets
+  # EVERY request through while that key is false -- that fail-open is what makes the
+  # wizard reachable before any user exists -- so clearing it switches authentication
+  # off for the entire instance until the wizard is finished again. Two guards, both
+  # kept at this call site so they hold before A5's route-level `:require_admin` lands
+  # and remain true defence-in-depth after it:
+  #
+  #   * admin only: a member could otherwise turn auth off for everybody.
+  #   * refuse without OIDC: re-running setup with a working issuer/client id is
+  #     recoverable -- you finish the wizard and enforcement comes back. Without one
+  #     there is nothing to finish it with, so the instance would be left open with no
+  #     way to close it except a pre-placed break-glass token.
   def handle_event("rerun_setup", _params, socket) do
-    Settings.delete("setup_completed")
-    {:noreply, push_navigate(socket, to: ~p"/setup")}
+    cond do
+      not admin?(socket) ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Only an admin can re-run the setup wizard."
+         )}
+
+      not oidc_configured?() ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Refusing to re-run setup: no OIDC Issuer URL and Client ID are configured. Re-running setup turns authentication off for this instance until the wizard is finished, and without a working provider there is nothing to finish it with. Configure Authentication first."
+         )}
+
+      true ->
+        Settings.delete("setup_completed")
+        {:noreply, push_navigate(socket, to: ~p"/setup")}
+    end
   end
 
   def handle_event("save_sweep_mode", %{"mode" => mode}, socket)
@@ -517,10 +561,33 @@ defmodule HomelabWeb.SettingsLive do
              |> load_section_data("users")
              |> put_flash(:info, "User role updated!")}
 
+          # `update_user/2` refuses for reasons the operator has to be told — most
+          # importantly that this is the last administrator, which is a deliberate
+          # guard rather than a fault. "Failed to update role" made every one of them
+          # look like the same broken button, which is the bug class
+          # `ChangesetErrors` exists for. Rendering the changeset rather than matching
+          # on a particular reason keeps this correct as new validations are added.
+          {:error, %Ecto.Changeset{} = changeset} ->
+            {:noreply,
+             put_flash(socket, :error, HomelabWeb.ChangesetErrors.to_sentence(changeset))}
+
           {:error, _} ->
             {:noreply, put_flash(socket, :error, "Failed to update role")}
         end
     end
+  end
+
+  # Role check kept here, not only in the route pipeline, so "re-run setup" stays
+  # admin-only regardless of which live_session the view is mounted in.
+  defp admin?(socket) do
+    match?(%{role: :admin}, socket.assigns[:current_user])
+  end
+
+  # Same predicate as `Homelab.Bootstrap`'s: an instance whose auth enforcement can
+  # actually be switched back on has both of these.
+  defp oidc_configured? do
+    present? = fn key -> Settings.get(key) not in [nil, ""] end
+    present?.("oidc_issuer") and present?.("oidc_client_id")
   end
 
   defp load_section_data(socket, "general") do
@@ -542,6 +609,10 @@ defmodule HomelabWeb.SettingsLive do
       if(Settings.get("oidc_client_secret"), do: "••••••••", else: "")
     )
     |> assign(:oidc_redirect_uri, oidc_redirect_uri())
+    # The RESOLVED address, not the raw setting: with the key unset this shows the
+    # default that is actually in effect, so the field never implies "nothing is
+    # configured" when a hardcoded default is doing the work.
+    |> assign(:forward_auth_address, Homelab.Config.forward_auth_address())
     |> assign_new(:oidc_check, fn -> nil end)
   end
 
@@ -945,6 +1016,44 @@ defmodule HomelabWeb.SettingsLive do
           </button>
         </div>
       </.form>
+
+      <div class="mt-8 pt-6 border-t border-base-content/5">
+        <h3 class="text-sm font-semibold text-base-content mb-1.5">Forward authentication</h3>
+        <p class="text-xs text-base-content/50 mb-4 max-w-md leading-snug">
+          The endpoint Traefik asks about each request on a route set to <strong>Reverse proxy — SSO</strong>. This is a separate component from the
+          OIDC provider above: it answers a subrequest with 200 or 401 from a session
+          cookie, which an OIDC authorization server does not do on its own.
+        </p>
+
+        <.form
+          for={%{}}
+          as={:forward_auth}
+          id="forward-auth-form"
+          phx-submit="save_forward_auth"
+          class="space-y-3 max-w-md"
+        >
+          <div>
+            <input
+              type="text"
+              name="forward_auth[forward_auth_address]"
+              value={@forward_auth_address}
+              placeholder={Homelab.Config.default_forward_auth_address()}
+              class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2.5 px-3 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
+            />
+            <p class="text-[10px] text-base-content/40 mt-1">
+              Blank restores the default shown above. Traefik fails closed on an
+              unreachable endpoint, so a route set to SSO returns 502/500 rather than
+              serving unauthenticated traffic.
+            </p>
+          </div>
+
+          <.button
+            type="submit"
+            label="Save"
+            class="px-4 py-2.5 rounded-lg bg-primary text-primary-content text-sm font-medium"
+          />
+        </.form>
+      </div>
     </div>
     """
   end
@@ -2627,11 +2736,17 @@ defmodule HomelabWeb.SettingsLive do
         <div class="rounded-lg border border-error/20 bg-error/5 p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Re-run Setup Wizard</h3>
           <p class="text-xs text-base-content/60 mb-4">
-            Clear setup completion and return to the setup wizard. You will need to reconfigure instance settings.
+            Clears setup completion and returns to the setup wizard. While setup is
+            incomplete this instance <strong>does not require anyone to log in</strong> —
+            every page is served to every visitor until the wizard is finished again. Only
+            an admin can do this, and only while a working OIDC provider is configured to
+            finish the wizard with.
           </p>
           <button
             type="button"
+            id="rerun-setup-button"
             phx-click="rerun_setup"
+            data-confirm="Re-running setup turns authentication OFF for this whole instance until the wizard is finished again — anyone who can reach it will be let straight in. Continue?"
             class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-error hover:bg-error/10 transition-colors cursor-pointer"
           >
             <.icon name="hero-arrow-right" class="size-4" /> Go to Setup
