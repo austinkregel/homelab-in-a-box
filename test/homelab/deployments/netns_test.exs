@@ -642,15 +642,45 @@ defmodule Homelab.Deployments.NetnsTest do
       assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
     end
 
-    test "a donor holding its own domain still gets exactly one publish_ingress", ctx do
+    # The Sonarr-behind-gluetun shape deployed on its own. The child holds a real domain,
+    # so every name-shaped predicate says publish it — but `publish_deployment/1` gates on
+    # `attachable?/1`, and a container living in another's namespace has no endpoint to
+    # attach. The step would fall through to `:ok` and record `"published" => true` for
+    # work that did not happen. Its route is real and is served by the DONOR, which
+    # `SpecBuilder` multi-homes onto ingress via `bridge_networks` at create time.
+    test "a netns child with its own domain is planned no publish_ingress", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+      {:ok, child} = Deployments.update_deployment(child, %{domain: "sonarr.example.com"})
+
+      {:ok, release} = Deployments.deploy_release(Deployments.get_deployment!(child.id))
+      steps = Repo.preload(release, :steps).steps
+      types = Enum.map(steps, & &1.type)
+
+      refute :publish_ingress in types
+
+      # The name is still claimed — those steps belong to whoever holds the domain, and
+      # this child does. Only the attach is skipped.
+      assert :sync_domain in types
+      assert :publish_dns in types
+    end
+
+    # Giving the donor a domain does NOT make the attach meaningful: a gluetun donor is
+    # `exposure_mode: :service`, so `ingress_published?/1` is false via
+    # `Access.proxy_mode?/1` and `publish_deployment/1` would no-op. A stray domain on a
+    # non-proxy deployment is the third shape `reachability_steps/1` has to exclude.
+    #
+    # An earlier revision of this test asserted exactly one `publish_ingress` here, which
+    # was pinning that no-op. The positive case — a domained PROXY deployment gets one —
+    # is covered by the full step-list assertion in `greenfield_release_test.exs`.
+    test "a :service donor carrying a stray domain is still planned no publish_ingress", ctx do
       {:ok, donor} = Deployments.update_deployment(ctx.donor, %{domain: "vpn.example.com"})
       {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, donor))
 
       {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(donor.id))
       steps = Repo.preload(release, :steps).steps
 
-      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 1
-      assert Enum.find(steps, &(&1.type == :publish_ingress)).resource_handle == %{}
+      assert Deployments.get_deployment!(donor.id).domain == "vpn.example.com"
+      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
     end
 
     test "driving the stack from the DONOR gives the same release", ctx do
