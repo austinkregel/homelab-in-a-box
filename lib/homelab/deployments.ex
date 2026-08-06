@@ -582,9 +582,11 @@ defmodule Homelab.Deployments do
   # the whole create-and-plan inside one transaction and enqueue only after it commits
   # (Oban lives on a different repo — see that function).
   defp plan_deploy_release(%Deployment{} = app, companions, _opts) do
+    all_companions = companion_set(app, companions)
+
     steps =
       ingress_proxy_steps(app) ++
-        Enum.flat_map(companion_set(app, companions), fn companion ->
+        Enum.flat_map(all_companions, fn companion ->
           [
             %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
             %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
@@ -595,7 +597,35 @@ defmodule Homelab.Deployments do
           %{type: :await_health, resource_handle: %{}}
         ] ++ ingress_steps(app)
 
-    Releases.plan_release(app, steps)
+    with :ok <- ensure_none_in_flight([app | all_companions]) do
+      Releases.plan_release(app, steps)
+    end
+  end
+
+  # Refuses to plan while ANY deployment this release would drive is already being
+  # driven by another one.
+  #
+  # `releases_one_active_per_deployment` covers `releases.deployment_id` and stops there,
+  # so it never sees a companion — those are named by a step's
+  # `resource_handle["deployment_id"]`. Nothing else checked, and the gap is not exotic:
+  # "deploy the VPN donor, then deploy an app behind it before the donor's release has
+  # finished" is the ordinary flow, and `netns_donor_companions/1` resolves that donor
+  # into the second release's set automatically. Both sagas would then call
+  # `orchestrator.deploy` for it, both would write its `external_id`, and a rollback of
+  # either would undeploy the container the other had just created.
+  #
+  # The app is checked with the same query rather than leaning on the index: the index
+  # cannot see the case where the in-flight release names it as a COMPANION.
+  #
+  # A typed error, never a raise — `Adoption.adopt/2` has used exactly this guard, in
+  # exactly this shape, since before the saga had a second entry point.
+  defp ensure_none_in_flight(deployments) do
+    Enum.reduce_while(deployments, :ok, fn deployment, :ok ->
+      case Releases.active_release_driving(deployment.id) do
+        nil -> {:cont, :ok}
+        _release -> {:halt, {:error, {:release_in_flight, deployment.id}}}
+      end
+    end)
   end
 
   # Every deployment that must be up before the app: its netns donor, plus whatever the
