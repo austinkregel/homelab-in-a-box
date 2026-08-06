@@ -396,6 +396,30 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  describe "enqueue_or_log/1" do
+    # The one case this function exists for is the one it did not handle.
+    #
+    # Its docstring names "the job queue was briefly unreachable", and it matched only
+    # `{:error, reason}`. `Oban.insert/1` returns that shape for a CHANGESET failure; a
+    # BACKEND failure raises out of `Engine.insert_job` -> `Repo.transaction`. So the
+    # raise propagated to a caller holding an already-committed `:planning` release —
+    # `deploy_release/2`, `create_and_deploy_release/2`, `redeploy_netns_stack/1` and
+    # `Adoption.apply_service/3` — and each reported a failed deploy for a release that
+    # is in fact fine and that the reconciler will resume.
+    #
+    # Broken at the backend rather than by stubbing `enqueue/1`: the point is that
+    # `Oban.insert/1` RAISES, and a test that asserted anything else would pass over a
+    # function that still only matched `{:error, _}`. The DDL runs inside the sandbox
+    # transaction, so it is undone with everything else.
+    test "survives a backend failure, which raises rather than returning an error" do
+      release = plan(insert(:deployment))
+
+      Homelab.ObanRepo.query!("ALTER TABLE oban_jobs RENAME TO oban_jobs_unreachable")
+
+      assert :ok = ReleaseRunner.enqueue_or_log(release)
+    end
+  end
+
   describe "terminal releases" do
     test "are a no-op (idempotent re-delivery)" do
       release = plan(insert(:deployment))
