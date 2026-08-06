@@ -8,10 +8,9 @@ defmodule Homelab.Deployments.PermanentHome do
   (referenced by name in container specs) AND a plain directory under the managed
   root — which can be backed up off-box (e.g. rsync to the NAS) like any folder.
 
-  The managed root should be on a local disk with headroom; it defaults to
-  `<home>/homelab-managed` (i.e. `~/homelab-managed`) and is overridable via
-  `HOMELAB_MANAGED_ROOT` or Settings → Infrastructure. Live database data must
-  NOT live on a network mount — network FS is for backups, not for running DBs.
+  The managed root should be on a local disk with headroom; it is set via
+  Settings → Import (or `HOMELAB_MANAGED_ROOT`). Live database data must NOT live
+  on a network mount — network FS is for backups, not for running DBs.
 
   Migration writes the verified copy INTO `backing_dir/2`; the managed container
   then mounts `volume_name/2`, which resolves to those same bytes.
@@ -20,18 +19,69 @@ defmodule Homelab.Deployments.PermanentHome do
   @behaviour Homelab.Deployments.Migrate.VolumeRegistrar
 
   alias Homelab.Docker.Client
+  alias Homelab.Infrastructure
+
+  @unconfigured_message """
+  The managed root is not configured, and this instance is running in a container.
+
+  There is no safe default here. `~/homelab-managed` resolves to `/root/homelab-managed`
+  INSIDE this container, and every path the plane hands the daemon is interpreted on the
+  HOST — so adopted data would be written to the host's `/root/homelab-managed`: a
+  location nobody chose, that no backup covers, and that an operator looking for their
+  data will not think to check.
+
+  Set it in Settings -> Import ("Managed root"), or with the HOMELAB_MANAGED_ROOT
+  environment variable. It must be an absolute HOST path on a local disk with headroom.
+  """
 
   @doc """
-  The disk root where managed volumes physically live. Resolution order: a UI
-  override (Settings `managed_root`, read cache-only), then the
-  `HOMELAB_MANAGED_ROOT` env var (via app config), then a runtime default of
-  `~/homelab-managed` (`/root/homelab-managed` in a container).
+  The disk root where managed volumes physically live, or
+  `{:error, :managed_root_unconfigured}` when it is unset on a containerized
+  install. Non-raising counterpart of `managed_root/0`, for the UI that has to
+  render the problem rather than crash on it.
+
+  Resolution order: a UI override (Settings `managed_root`, read cache-only),
+  then the `HOMELAB_MANAGED_ROOT` env var (via app config), then — only when the
+  plane is NOT containerized — a runtime default of `~/homelab-managed`.
+  """
+  def fetch_managed_root do
+    configured =
+      Homelab.Settings.get_cached("managed_root") ||
+        Application.get_env(:homelab, :managed_root)
+
+    cond do
+      is_binary(configured) and configured != "" ->
+        {:ok, configured}
+
+      # `System.user_home()` is a statement about the machine the code runs on. On a
+      # containerized install that machine is the container, and the resulting path is
+      # then applied by the daemon to the HOST. The two are unrelated directories that
+      # happen to share a name, which is exactly why this cannot be a fallback.
+      Infrastructure.containerized?() ->
+        {:error, :managed_root_unconfigured}
+
+      true ->
+        {:ok, Path.join(System.user_home() || "/root", "homelab-managed")}
+    end
+  end
+
+  @doc """
+  The disk root where managed volumes physically live.
+
+  Raises when it is unconfigured on a containerized install rather than falling
+  back to a container-local path — see `@unconfigured_message`. Everything that
+  WRITES adopted bytes (`backing_dir/2`, `service_dir/1`, the backup restore
+  target) goes through here, so the refusal lands before the first byte moves.
   """
   def managed_root do
-    Homelab.Settings.get_cached("managed_root") ||
-      Application.get_env(:homelab, :managed_root) ||
-      Path.join(System.user_home() || "/root", "homelab-managed")
+    case fetch_managed_root() do
+      {:ok, root} -> root
+      {:error, :managed_root_unconfigured} -> raise ArgumentError, @unconfigured_message
+    end
   end
+
+  @doc "The operator-facing explanation of an unconfigured managed root."
+  def unconfigured_message, do: @unconfigured_message
 
   @doc "The host directory that backs an adopted mount's managed volume."
   def backing_dir(service, container_path) do
