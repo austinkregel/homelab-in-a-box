@@ -510,7 +510,7 @@ defmodule Homelab.Deployments do
     end)
     |> case do
       {:ok, %{release: release} = result} ->
-        enqueue_release(release)
+        ReleaseRunner.enqueue_or_log(release)
         {:ok, result}
 
       {:error, reason} ->
@@ -521,6 +521,7 @@ defmodule Homelab.Deployments do
   # Fails on the FIRST unbuildable spec and returns that reason verbatim, so callers
   # keep matching on `{:error, {:missing_required_env, keys}}` exactly as they do
   # against `deploy_now/1`.
+  #
   # With ONE exception, and it is narrow on purpose. `SpecBuilder.resolve_netns_donor/1`
   # fails closed on a donor that has no container yet — correctly, because a create
   # naming an absent container produces one the daemon will never start. But a donor
@@ -573,7 +574,7 @@ defmodule Homelab.Deployments do
   def deploy_release(%Deployment{} = app, companions \\ [], opts \\ [])
       when is_list(companions) do
     with {:ok, release} <- plan_deploy_release(app, companions, opts) do
-      enqueue_release(release)
+      ReleaseRunner.enqueue_or_log(release)
       {:ok, release}
     end
   end
@@ -598,32 +599,36 @@ defmodule Homelab.Deployments do
     Releases.plan_release(app, steps)
   end
 
-  # A failed enqueue is not fatal and must not be raised as one. The release row is
-  # already committed in `:planning`, and `Reconciler.resume_stuck_releases/0` re-enqueues
-  # every release with no live lease on the next tick — so the worst case is a delay,
-  # not a lost deploy. Crashing here would instead leave a committed release nobody ever
-  # looks at because the caller thinks the whole thing failed.
-  defp enqueue_release(release) do
-    case ReleaseRunner.enqueue(release) do
-      {:ok, _job} ->
-        :ok
+  # Does this deployment answer to a name of its OWN? Distinct from `routed?/1`, and
+  # the distinction is the netns donor: a name is a property of the deployment that
+  # holds it, while reachability is a property of the container Traefik can resolve,
+  # and for a tunneled stack those are two different deployments.
+  defp own_domain?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
 
-      {:error, reason} ->
-        Logger.error(
-          "[deployments] release #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
-            "the reconciler will resume it"
-        )
-
-        :ok
-    end
+  # Does traffic from the proxy reach this deployment? The ONE definition of "routed",
+  # because several step lists key off it and a second inlined copy is exactly how a
+  # plan ends up ensuring a proxy for a release that never publishes a route.
+  #
+  # A donor with routed children is routed even with no domain of its own — which is
+  # the ordinary gluetun shape, where every name in the stack belongs to a child. This
+  # is not a widening for its own sake: `SpecBuilder` already emits `traefik.enable` and
+  # multi-homes that donor onto the ingress network, because a child has no endpoint for
+  # Traefik to discover and its route resolves to the DONOR's address. Reading only
+  # `domain` planned no proxy and no ingress for the one topology that needs both.
+  #
+  # Matched to SpecBuilder's rule exactly, `Access.proxy_mode?` included: a donor whose
+  # children are `:service` or `:host` is not multi-homed there either, and publishing
+  # ingress for it would attach a container Traefik has no labels for.
+  defp routed?(%Deployment{} = deployment) do
+    own_domain?(deployment) or Enum.any?(Netns.children(deployment), &routes_via_donor?/1)
   end
 
-  # Is this deployment served at a name? The ONE definition of "routed", because three
-  # separate step lists key off it (`ingress_proxy_steps/1`, `ingress_steps/1`, and
-  # `redeploy_netns_stack/1` through them) and a fourth copy of `is_binary(domain) and
-  # domain != ""` is exactly how a plan ends up ensuring a proxy for a release that
-  # never publishes a route, or vice versa.
-  defp routed?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+  # `Access.proxy_mode?/1` reads the template, and a caller's preloaded
+  # `:network_children` is not guaranteed to carry one — `Repo.preload/2` on an
+  # already-loaded association is a no-op, so this is only a cost when it is needed.
+  # Short-circuits on `own_domain?/1`, which is a plain field read.
+  defp routes_via_donor?(%Deployment{} = child),
+    do: own_domain?(child) and Access.proxy_mode?(Repo.preload(child, :app_template))
 
   # The proxy has to exist before anything that routes through it. Planned at position
   # 1, ahead of every container: it is a precondition of the route, not a product of
@@ -633,20 +638,34 @@ defmodule Homelab.Deployments do
     if routed?(app), do: [%{type: :ensure_ingress_proxy, resource_handle: %{}}], else: []
   end
 
+  # Claiming a NAME: the local `Domain` row and the A records that resolve it. Keyed off
+  # `own_domain?/1`, not `routed?/1` — these belong to whichever deployment holds the
+  # domain, which for a tunneled stack is the child, not the donor carrying its route.
+  # `handle` targets them; an empty handle means the release's own deployment.
+  defp name_steps(deployment, handle \\ %{}) do
+    if own_domain?(deployment) do
+      [
+        %{type: :sync_domain, resource_handle: handle},
+        %{type: :publish_dns, resource_handle: handle}
+      ]
+    else
+      []
+    end
+  end
+
+  # Granting REACHABILITY: attaching the workload Traefik resolves to the ingress
+  # network. Always the release's own deployment — a netns child has no network endpoint
+  # to attach, so a stack has exactly one of these and it is the donor's.
+  defp reachability_steps(deployment) do
+    if routed?(deployment), do: [%{type: :publish_ingress, resource_handle: %{}}], else: []
+  end
+
   # The tail of a routed release, all of it after the app is healthy: claim the name
   # locally, publish it to DNS, then actually grant reachability. Ordered so nothing
   # advertises a name before something answers to it, and so compensation (which walks
   # descending) severs reachability first, then DNS, then the row.
   defp ingress_steps(app) do
-    if routed?(app) do
-      [
-        %{type: :sync_domain, resource_handle: %{}},
-        %{type: :publish_dns, resource_handle: %{}},
-        %{type: :publish_ingress, resource_handle: %{}}
-      ]
-    else
-      []
-    end
+    name_steps(app) ++ reachability_steps(app)
   end
 
   @doc false
@@ -730,7 +749,12 @@ defmodule Homelab.Deployments do
         parent -> parent
       end
 
-    donor = Repo.preload(donor, [:tenant, :app_template, :network_children])
+    # Children carry their templates: `routed?/1` reads each child's effective exposure
+    # to decide whether the donor needs ingress at all, and a shallow preload would make
+    # that one query per child.
+    donor =
+      Repo.preload(donor, [:tenant, :app_template, network_children: [:app_template, :tenant]])
+
     children = Netns.children(donor)
 
     child_steps =
@@ -740,6 +764,18 @@ defmodule Homelab.Deployments do
           %{type: :await_health, resource_handle: %{"deployment_id" => child.id}}
         ]
       end)
+
+    # Each child's OWN name, published after that child is healthy.
+    #
+    # These used to be absent entirely: the routing steps all carried an empty handle,
+    # so they targeted the donor, and a child in a redeployed stack got no `Domain` row
+    # and no A record — while the same child deployed standalone through
+    # `deploy_release/2` got both. That gap sat on the operation most likely to need
+    # them: a stack redeploy is usually TRIGGERED by a child's route changing, since a
+    # child's Traefik labels live on the donor. So the one path that moves a child's
+    # name was the one that never republished it.
+    child_name_steps =
+      Enum.flat_map(children, &name_steps(&1, %{"deployment_id" => &1.id}))
 
     # Ingress LAST, after the children exist.
     #
@@ -754,12 +790,12 @@ defmodule Homelab.Deployments do
         [
           %{type: :app_container, resource_handle: %{}},
           %{type: :await_health, resource_handle: %{}}
-        ] ++ child_steps ++ ingress_steps(donor)
+        ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor)
 
     with {:ok, donor} <- reset_to_pending(donor),
          {:ok, _children} <- reset_all_to_pending(children),
          {:ok, release} <- Releases.plan_release(donor, steps) do
-      {:ok, _job} = ReleaseRunner.enqueue(release)
+      ReleaseRunner.enqueue_or_log(release)
       {:ok, release}
     end
   end
