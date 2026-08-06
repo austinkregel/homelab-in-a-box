@@ -118,6 +118,10 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       sysctls: Map.get(capture, :sysctls, %{}),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
+      # Binds outside the adoption root: a media library on a second disk, a NAS export.
+      # Carried so the replacement still MOUNTS them — the app needs its library — but
+      # kept out of `preserve`, which is what feeds the backup gate and the migrate copy.
+      external: Enum.filter(mounts, &(&1.tier == :external)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
     }
   end
@@ -141,7 +145,14 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # them in that mode) — unless the original was on the host's network, which
       # publishes no bindings to import and needs the namespace itself carried over.
       exposure_mode: adopted_exposure(review),
-      volumes: Enum.map(review.preserve, &volume_entry(name, &1, strategy)),
+      # Preserved mounts follow the strategy; EXTERNAL ones are always `:in_place`,
+      # whatever the strategy says. A NAS share or a second disk is not this plane's data
+      # to copy into a permanent home — it is mounted where it already lives, exactly as
+      # the original had it. They are absent from `targets` for the same reason, so no
+      # `backup_verify` or `migrate_volume` step is ever planned against them.
+      volumes:
+        Enum.map(review.preserve, &volume_entry(name, &1, strategy)) ++
+          Enum.map(Map.get(review, :external, []), &volume_entry(name, &1, :in_place)),
       # The cutover renames the container. Its siblings do not know that: an app's config
       # says DB_HOST=mysql, not DB_HOST=marketplace-mysql-1. Carry the names it already
       # answers to onto the replacement, or adopting a stack severs its own DNS.
