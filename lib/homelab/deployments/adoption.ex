@@ -70,8 +70,10 @@ defmodule Homelab.Deployments.Adoption do
          :ok <- ensure_no_active_release(deployment.id),
          {:ok, release} <- plan(deployment, steps(service, donor), service) do
       # Enqueue after the release is committed (Oban lives on ObanRepo; the worker
-      # must be able to read the release row).
-      {:ok, _job} = ReleaseRunner.enqueue(release)
+      # must be able to read the release row). A failed enqueue is logged, not raised:
+      # the release is already committed, so raising would abort an adoption that in
+      # fact succeeded, and the reconciler re-enqueues an unleased release anyway.
+      ReleaseRunner.enqueue_or_log(release)
       {:ok, %{service: service.name, deployment: deployment, release: release}}
     end
   end
