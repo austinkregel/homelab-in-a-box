@@ -314,19 +314,78 @@ defmodule Homelab.Networking do
   end
 
   @doc """
-  Removes all managed DNS records for a deployment and pushes
-  deletions to the configured providers.
+  Removes all managed DNS records for a deployment and pushes deletions to the
+  configured providers.
+
+  Returns `:ok`, or `{:error, {:dns_deletion_failed, [{record_id, reason}]}}` if any
+  provider refused. See `delete_dns_records/1` for why the local rows of the refused
+  records are kept.
   """
   def cleanup_deployment_dns_records(deployment_id) do
-    records = list_dns_records_for_deployment(deployment_id)
-    managed = Enum.filter(records, & &1.managed)
+    deployment_id
+    |> list_dns_records_for_deployment()
+    |> Enum.filter(& &1.managed)
+    |> delete_dns_records()
+  end
 
-    Enum.each(managed, fn record ->
-      push_record_deletion(record)
-      delete_dns_record(record)
+  @doc """
+  Removes exactly the managed records named by `record_ids`, and only those still
+  belonging to `deployment_id`.
+
+  The scoped counterpart of `cleanup_deployment_dns_records/1`, for a caller that has
+  to undo the records IT wrote rather than every record a deployment holds — a release
+  compensating its own `publish_dns` step, say. `managed: true` distinguishes
+  homelab-written rows from operator-hand-made ones and says nothing about WHICH writer
+  produced a row, so it cannot answer that question on its own.
+
+  The `deployment_id` re-check is not redundant with the ids: between the write and the
+  undo a record may legitimately have been re-pointed at another deployment, and that
+  row is no longer the caller's to delete.
+
+  Same return shape as `cleanup_deployment_dns_records/1`.
+  """
+  def delete_dns_records_for(record_ids, deployment_id) when is_list(record_ids) do
+    DnsRecord
+    |> where([r], r.id in ^record_ids and r.deployment_id == ^deployment_id and r.managed == true)
+    |> preload(:dns_zone)
+    |> Repo.all()
+    |> delete_dns_records()
+  end
+
+  @doc """
+  Deletes loaded `DnsRecord` rows, pushing each deletion to its provider FIRST.
+
+  The order is the contract. Deleting the local row before (or regardless of) the
+  provider push drops homelab's only record of a record that still exists at
+  Cloudflare — an orphan nothing can ever clean up, because the `provider_record_id`
+  that addresses it lived on the row just deleted. So a record whose provider push
+  fails keeps its row, and the failure is RETURNED: a cleanup that could not reach the
+  provider has not cleaned anything up, and a compensation built on it must not report
+  success.
+
+  Every record is attempted; one refusal does not abandon the rest.
+  """
+  def delete_dns_records(records) when is_list(records) do
+    records
+    |> Enum.reduce([], fn record, failures ->
+      case push_record_deletion(record) do
+        :ok ->
+          delete_dns_record(record)
+          failures
+
+        {:error, reason} ->
+          Logger.error(
+            "DNS provider refused deletion of #{record.name}/#{record.type} " <>
+              "(#{inspect(reason)}); keeping the local row so a retry can still reach it"
+          )
+
+          [{record.id, reason} | failures]
+      end
     end)
-
-    :ok
+    |> case do
+      [] -> :ok
+      failures -> {:error, {:dns_deletion_failed, Enum.reverse(failures)}}
+    end
   end
 
   @doc """
@@ -492,17 +551,36 @@ defmodule Homelab.Networking do
   defp type_matches?(nil, _wanted), do: false
   defp type_matches?(a, b), do: String.upcase(to_string(a)) == String.upcase(to_string(b))
 
+  # `:ok` or `{:error, reasons}`. Results used to be discarded by an `Enum.each`, which
+  # is what let a refused deletion pass for a completed one.
+  defp push_record_deletion(%DnsRecord{provider_record_id: nil}), do: :ok
+
   defp push_record_deletion(%DnsRecord{} = record) do
     record = Repo.preload(record, :dns_zone)
-    zone = record.dns_zone
-    providers = providers_for_scope(record.scope)
 
-    if record.provider_record_id do
-      zone_ref = zone.provider_zone_id || zone.name
+    case record.dns_zone do
+      # No zone means no provider address for this record; there is nothing to push and
+      # nothing to orphan.
+      nil ->
+        :ok
 
-      Enum.each(providers, fn provider ->
-        provider.delete_record(zone_ref, record.provider_record_id)
-      end)
+      zone ->
+        zone_ref = zone.provider_zone_id || zone.name
+
+        record.scope
+        |> providers_for_scope()
+        |> Enum.reduce([], fn provider, failures ->
+          case provider.delete_record(zone_ref, record.provider_record_id) do
+            :ok -> failures
+            {:ok, _} -> failures
+            {:error, reason} -> [reason | failures]
+            other -> [other | failures]
+          end
+        end)
+        |> case do
+          [] -> :ok
+          reasons -> {:error, Enum.reverse(reasons)}
+        end
     end
   end
 
