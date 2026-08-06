@@ -50,11 +50,18 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     {:ok, release} = Deployments.deploy_release(app, [companion])
     types = release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type)
 
+    # The full routed plan. The proxy is ensured BEFORE any container exists (it is a
+    # precondition of the route, and failing there means there is nothing to unwind);
+    # everything that advertises a name — the Domain row, the A records, reachability —
+    # comes after the app's health gate, so nothing points at a workload that is not up.
     assert types == [
+             :ensure_ingress_proxy,
              :dependency_container,
              :await_health,
              :app_container,
              :await_health,
+             :sync_domain,
+             :publish_dns,
              :publish_ingress
            ]
   end
@@ -106,12 +113,40 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     refute :ensure_datastore_grants in Enum.map(release.steps, & &1.type)
   end
 
+  # `reachability_steps/1` reuses `publish_deployment/1`'s runtime gate, and that gate
+  # opens with `Repo.preload(deployment, [:tenant, :app_template])` BEFORE it evaluates
+  # `ingress_published?/1 and attachable?/1`. Restating the predicates on the caller's
+  # struct without the preload added a precondition `deploy_release/2` never had — the
+  # pre-image was a pure `domain` field match — and fails it by RAISING, where the gate
+  # it copied returns `:ok` for the very same struct.
+  test "planning tolerates a deployment loaded without its associations", %{app: app} do
+    bare = Repo.get!(Homelab.Deployments.Deployment, app.id)
+    assert %Ecto.Association.NotLoaded{} = bare.app_template
+
+    # The gate this predicate was copied from is fine with it.
+    assert :ok = Deployments.publish_deployment(bare)
+
+    assert {:ok, release} = Deployments.deploy_release(bare)
+    assert :publish_ingress in Enum.map(release.steps, & &1.type)
+  end
+
   test "no ingress step when the app has no domain", %{companion: companion} do
     tenant = insert(:tenant, slug: "nodomain")
     app = pending_deployment(tenant, "app2", domain: nil)
 
     {:ok, release} = Deployments.deploy_release(app, [companion])
     refute :publish_ingress in Enum.map(release.steps, & &1.type)
+  end
+
+  # A DNS provider IS configured in test, so `publish_dns` really pushes. Stubbing it
+  # here rather than per-test keeps the failures below about the saga, not about Mox.
+  defp stub_dns_provider do
+    stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    stub(Homelab.Mocks.DnsProvider, :create_record, fn _zone, _rec -> {:ok, %{id: "rec"}} end)
+
+    stub(Homelab.Mocks.DnsProvider, :update_record, fn _zone, _id, _rec -> {:ok, %{id: "rec"}} end)
+
+    stub(Homelab.Mocks.DnsProvider, :delete_record, fn _zone, _id -> :ok end)
   end
 
   test "happy path deploys companion + app and lands the release :running", %{
@@ -125,6 +160,7 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     end)
 
     stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
 
     {:ok, release} = Deployments.deploy_release(app, [companion])
     assert :ok = ReleaseRunner.run(release.id, owner: "t")
@@ -135,6 +171,165 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
 
     assert Deployments.get_deployment!(companion.id).external_id == "ext-#{companion.id}"
     assert Deployments.get_deployment!(app.id).external_id == "ext-#{app.id}"
+  end
+
+  # `do_deploy/1` created the Domain row and the A records in `post_deploy_hooks/1`;
+  # the saga did neither, so a release-deployed app was routed by Traefik but had no
+  # Domain row (no exposure for the access layer, no TLS state, nothing on the Domains
+  # page) and no name resolving to it. Both were silently absent — the release still
+  # reported `:running`.
+  test "a routed release persists the Domain row and the DNS records", %{app: app} do
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    assert {:ok, domain} = Homelab.Networking.get_domain_by_fqdn("app.acme.test")
+    assert domain.deployment_id == app.id
+
+    records = Homelab.Networking.list_dns_records_for_deployment(app.id)
+    assert records != []
+    assert Enum.all?(records, & &1.managed)
+  end
+
+  # A DNS A record is the one artifact here that is externally visible and cached by
+  # resolvers: left behind, it points the world at a container that no longer exists.
+  # The Domain row goes too, but ONLY because this release is what created it — a
+  # reclaimed row belongs to whoever had it first.
+  test "a rollback removes the DNS records and the Domain row it created", %{app: app} do
+    app_spec_id = to_string(app.id)
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    # Reachability is the last step and it is what fails, so everything before it —
+    # including the domain row and the records — has to be walked back.
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> {:error, :boom} end)
+    stub(Homelab.Mocks.Orchestrator, :unpublish, fn _, _ -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn "ext-" <> ^app_spec_id -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t")
+
+    assert Homelab.Networking.list_dns_records_for_deployment(app.id) == []
+    assert {:error, :not_found} = Homelab.Networking.get_domain_by_fqdn("app.acme.test")
+  end
+
+  # The other half of that rule: a row this release only RECLAIMED predates it, and
+  # deleting it on rollback would destroy state (TLS status, zone link, another
+  # deployment's claim) the release never owned.
+  test "a rollback leaves a Domain row it merely reclaimed", %{app: app, companion: companion} do
+    app_spec_id = to_string(app.id)
+
+    # The row predates this release and belongs to someone else.
+    {:ok, _pre_existing} =
+      Homelab.Networking.create_domain(%{
+        fqdn: "app.acme.test",
+        deployment_id: companion.id,
+        exposure_mode: :public
+      })
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> {:error, :boom} end)
+    stub(Homelab.Mocks.Orchestrator, :unpublish, fn _, _ -> :ok end)
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn "ext-" <> ^app_spec_id -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t")
+
+    assert {:ok, _still_there} = Homelab.Networking.get_domain_by_fqdn("app.acme.test")
+  end
+
+  # The saga wrote nothing to the Activity page, so every deployment made through a
+  # release had no history at all while every `deploy_now/1` deployment did. Entries
+  # hang off the runner's compare-and-set transitions, which is what makes them
+  # once-only across a resume — and a companion's entry files under the COMPANION,
+  # because that is what the Activity page filters on.
+  test "a release writes Activity entries, attributed per deployment", %{
+    app: app,
+    companion: companion
+  } do
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    entries = Homelab.Services.ActivityLog.recent(200)
+    for_deployment = fn id -> Enum.filter(entries, &(&1.metadata[:deployment_id] == id)) end
+
+    assert Enum.any?(for_deployment.(app.id), &(&1.message =~ "release started"))
+    assert Enum.any?(for_deployment.(app.id), &(&1.message =~ "deployed"))
+    assert Enum.any?(for_deployment.(companion.id), &(&1.message =~ "deployed"))
+  end
+
+  # The failure half of the same deliverable shipped untested — `grep -rn 'rolling
+  # back\|rollback FAILED\|release failed' test/` returned nothing at all. Which is the
+  # half that matters: a successful deploy is visible on the deployment page anyway,
+  # while a rollback is the case where the Activity feed is the ONLY place an operator
+  # can find out what happened and to which deployment.
+  test "a failed release writes the rollback Activity entries", %{
+    app: app,
+    companion: companion
+  } do
+    app_spec_id = to_string(app.id)
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn
+      %{deployment_id: ^app_spec_id} -> {:error, :boom}
+      spec -> {:ok, "ext-" <> spec.deployment_id}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn _id -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t")
+
+    entries = Homelab.Services.ActivityLog.recent(100)
+    for_app = Enum.filter(entries, &(&1.metadata[:deployment_id] == app.id))
+
+    # The release-level transition into compensation, carrying the reason.
+    assert Enum.any?(
+             for_app,
+             &(&1.level == :error and &1.message =~ "release failed, rolling back" and
+                 &1.message =~ "boom")
+           )
+
+    # The step that failed, named, and filed under the deployment it was deploying.
+    assert Enum.any?(
+             for_app,
+             &(&1.level == :error and &1.message =~ "app_container failed")
+           )
+
+    # And the settle, so the feed does not stop at "rolling back" forever.
+    assert Enum.any?(for_app, &(&1.level == :error and &1.message =~ "release rolled back"))
   end
 
   test "app failure rolls back and undeploys the companion (no orphan)", %{

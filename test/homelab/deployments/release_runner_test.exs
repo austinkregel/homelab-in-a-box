@@ -152,6 +152,73 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       assert release.status == :running
       assert Enum.all?(release.steps, &(&1.status == :completed))
     end
+
+    # `:rolling_back` is ACTIVE, not terminal, so the reconciler re-enqueues it and
+    # `run/1`'s terminal guard lets it through — and `drive/2` sent it to `loop/2`, which
+    # only asks for the next `:pending` step. A release interrupted mid-compensation was
+    # therefore driven FORWARD: it wrote the Domain row, published A records to the
+    # external DNS provider and attached ingress, all while rolling back.
+    #
+    # And it could never finish: `finalize/1`'s CAS excludes `:rolling_back`, so the
+    # release sat active forever and `releases_one_active_per_deployment` blocked that
+    # deployment from ever getting another release.
+    test "a release interrupted mid-rollback compensates instead of running on" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+      [s1, s2, _s3, _s4] = Enum.sort_by(release.steps, & &1.position)
+
+      # Mid-compensation when the node died: 1 completed, 2 mid-compensate, 3 and 4
+      # never reached.
+      {:ok, _} = Releases.transition_step(s1, :completed, [:pending])
+      {:ok, _} = Releases.transition_step(s2, :completed, [:pending])
+      {:ok, _} = Releases.transition_step(s2, :compensating, [:completed])
+      {:ok, _} = Releases.transition_release(release, :provisioning, [:planning])
+
+      {:ok, release} =
+        Releases.transition_release(Releases.get_release(release.id), :rolling_back, [
+          :provisioning
+        ])
+
+      assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t-rb")
+
+      # Nothing was driven forward. `:publish_ingress` here stands in for the real
+      # blast radius: on the routed plan this position is a DNS record published to an
+      # external, resolver-cached provider.
+      refute_received {:run, 3, _}
+      refute_received {:run, 4, _}
+
+      # The interrupted step is re-compensated — `compensate/2` is contractually
+      # idempotent — and the walk continues down.
+      assert_received {:compensate, 2, _}
+      assert_received {:compensate, 1, _}
+
+      release = Releases.get_release(release.id)
+      assert release.status == :rolled_back
+    end
+
+    # The other half: a rollback that finds nothing to compensate must still settle. It
+    # used to run every remaining step, no-op `finalize/1`'s CAS, and return `:ok` with
+    # the release still `:rolling_back` — permanently active, permanently blocking the
+    # deployment's next release.
+    test "a rollback with nothing to compensate still reaches a terminal status" do
+      deployment = insert(:deployment)
+      release = plan(deployment)
+
+      {:ok, _} = Releases.transition_release(release, :provisioning, [:planning])
+
+      {:ok, release} =
+        Releases.transition_release(Releases.get_release(release.id), :rolling_back, [
+          :provisioning
+        ])
+
+      assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t-rb2")
+
+      refute_received {:run, _, _}
+      assert Releases.get_release(release.id).status == :rolled_back
+
+      # Terminal for real: the deployment can be given another release.
+      refute Releases.get_active_release(deployment.id)
+    end
   end
 
   # THE GitLab adoption bug. The lease was refreshed only BETWEEN steps, so a step

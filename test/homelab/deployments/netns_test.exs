@@ -464,7 +464,11 @@ defmodule Homelab.Deployments.NetnsTest do
       steps = Enum.sort_by(release.steps, & &1.position)
       types = Enum.map(steps, & &1.type)
 
-      assert Enum.at(types, 0) == :dependency_container
+      # The donor is the first CONTAINER. `:ensure_ingress_proxy` may precede it for a
+      # routed release — it creates nothing, and the ordering claim here is about which
+      # workload is built first.
+      assert Enum.find_index(types, &(&1 in [:dependency_container, :app_container])) ==
+               Enum.find_index(types, &(&1 == :dependency_container))
 
       assert Enum.find(steps, &(&1.type == :dependency_container)).resource_handle == %{
                "deployment_id" => ctx.donor.id
@@ -473,6 +477,38 @@ defmodule Homelab.Deployments.NetnsTest do
       # ...and only then the child itself.
       assert Enum.find_index(types, &(&1 == :app_container)) >
                Enum.find_index(types, &(&1 == :dependency_container))
+    end
+
+    # The compose shape `netns_donor_companions/1`'s own comment names: a bundle where
+    # gluetun is BOTH the namespace donor and an explicit companion. The comment claimed
+    # the set was de-duplicated "because planning it twice would deploy it twice"; no
+    # dedup existed anywhere on the path, so the donor got two `:dependency_container`
+    # steps. Both write `external_id`, so only the second is compensatable and the first
+    # container is orphaned.
+    #
+    # Fixed at the root rather than at a call site, so the invariant the comment asserts
+    # is actually enforced for every caller — `deploy_wizard_live.ex` reaches this
+    # directly with an explicit companion list.
+    test "a donor that is also an explicit companion is planned once", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} =
+        Deployments.deploy_release(Deployments.get_deployment!(child.id), [
+          Deployments.get_deployment!(ctx.donor.id)
+        ])
+
+      release = Repo.preload(release, :steps)
+      donor_handle = %{"deployment_id" => ctx.donor.id}
+
+      assert Enum.count(
+               release.steps,
+               &(&1.type == :dependency_container and &1.resource_handle == donor_handle)
+             ) == 1
+
+      assert Enum.count(
+               release.steps,
+               &(&1.type == :await_health and &1.resource_handle == donor_handle)
+             ) == 1
     end
 
     test "a stack redeploy re-creates the donor and then every child", ctx do
@@ -484,13 +520,180 @@ defmodule Homelab.Deployments.NetnsTest do
       steps = Enum.sort_by(release.steps, & &1.position)
       types = Enum.map(steps, & &1.type)
 
-      # The release is driven from the DONOR — it is what gets a new container id.
+      # The release is driven from the DONOR — it is what gets a new container id, and
+      # it is the first CONTAINER in the plan. `:ensure_ingress_proxy` precedes it (the
+      # child is routed, so the donor is), and creates nothing.
       assert release.deployment_id == ctx.donor.id
-      assert Enum.at(types, 0) == :app_container
+
+      assert Enum.find_index(types, &(&1 in [:app_container, :netns_child_container])) ==
+               Enum.find_index(types, &(&1 == :app_container))
 
       child_step = Enum.find(steps, &(&1.type == :netns_child_container))
       assert child_step.resource_handle == %{"deployment_id" => child.id}
       assert child_step.position > Enum.find(steps, &(&1.type == :app_container)).position
+    end
+
+    # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason
+    # a child's route change re-creates the donor. Publishing before the children were
+    # (re)created advertised every one of those routes to a namespace holding nothing
+    # yet, so the window between "donor healthy" and "last child healthy" served 502s on
+    # names that had been working a moment earlier.
+    test "a routed stack publishes ingress only after every child exists", ctx do
+      {:ok, donor} = Deployments.update_deployment(ctx.donor, %{domain: "vpn.example.com"})
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(child.id))
+      release = Repo.preload(release, :steps)
+
+      steps = Enum.sort_by(release.steps, & &1.position)
+      types = Enum.map(steps, & &1.type)
+
+      last_child = Enum.find_index(Enum.reverse(types), &(&1 == :netns_child_container))
+      last_child = length(types) - 1 - last_child
+
+      for advertising <- [:sync_domain, :publish_dns] do
+        index = Enum.find_index(types, &(&1 == advertising))
+
+        # `Enum.find_index/2` returns nil for a step that was never planned, and in
+        # Elixir's term order an atom sorts ABOVE every integer — so `nil > last_child`
+        # is `true` and the ordering assertion below silently asserts nothing. The
+        # third element of this list used to be `:publish_ingress`, which this donor
+        # (exposure `:service`) never gets, so that iteration measured nothing at all.
+        assert is_integer(index), "#{advertising} must be planned"
+
+        assert index > last_child, "#{advertising} must come after the last child"
+      end
+
+      # And `:publish_ingress` is correctly absent rather than merely unordered: the
+      # donor is `:service`-exposed, so `ingress_published?/1` is false and the step
+      # would fall through having done nothing.
+      refute :publish_ingress in types
+
+      # The proxy is the exception, and is still first: it creates nothing and
+      # advertises nothing — it is a precondition of the route.
+      assert Enum.at(types, 0) == :ensure_ingress_proxy
+    end
+
+    # The shape this actually affects, and the one the test above sidesteps by giving
+    # the donor a domain first: a gluetun donor has NO domain of its own, and every
+    # name in the stack belongs to a child. `SpecBuilder` already treats that donor as
+    # routed — it emits `traefik.enable=true` and multi-homes it onto the ingress
+    # network precisely because the children's routes resolve to the donor's address.
+    # A predicate that reads only `donor.domain` therefore plans no proxy and no
+    # ingress for the one topology that needs both.
+    test "a donor with no domain of its own is routed by its children", ctx do
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+      release = Repo.preload(release, :steps)
+      types = release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type)
+
+      assert Deployments.get_deployment!(ctx.donor.id).domain in [nil, ""]
+      assert :ensure_ingress_proxy in types
+
+      # But NOT `publish_ingress`. `publish_deployment/1` gates on `ingress_published?/1`,
+      # which requires the deployment's OWN domain — so for a domainless donor the step
+      # falls through to `:ok` having done nothing, while recording `"published" => true`.
+      # A step that cannot act should not be planned; the donor's ingress membership
+      # comes from `SpecBuilder`'s `bridge_networks` at container-create time, which is
+      # the mechanism that actually works.
+      refute :publish_ingress in types
+    end
+
+    # A donor whose children are NOT proxy-routed gains nothing from ingress —
+    # `SpecBuilder` does not multi-home it either. The widened predicate has to match
+    # that rule, or `publish_ingress` attaches a container Traefik has no labels for.
+    test "a donor whose children are internal-only is not routed", ctx do
+      attrs = child_attrs(ctx.tenant, ctx.donor, %{exposure_mode_override: "service"})
+      {:ok, _child} = Deployments.create_deployment(attrs)
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+      release = Repo.preload(release, :steps)
+      types = release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type)
+
+      refute :ensure_ingress_proxy in types
+      refute :publish_ingress in types
+    end
+
+    # A stack redeploy is most often TRIGGERED by a child's route changing — that is
+    # the whole reason a child's route change re-creates the donor. So the one operation
+    # most likely to be moving a child's name was also the one that never synced that
+    # child's Domain row or published its A record: the routing steps carried an empty
+    # handle, so they all targeted the donor. Deployed standalone through
+    # `deploy_release/2` the same child gets both.
+    test "each routed child gets its own domain and dns steps", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+      release = Repo.preload(release, :steps)
+      steps = Enum.sort_by(release.steps, & &1.position)
+
+      handle = %{"deployment_id" => child.id}
+
+      assert Enum.any?(steps, &(&1.type == :sync_domain and &1.resource_handle == handle))
+      assert Enum.any?(steps, &(&1.type == :publish_dns and &1.resource_handle == handle))
+
+      # After that child's container exists and is healthy — a name must not be
+      # published ahead of the thing answering to it.
+      child_health =
+        Enum.find(steps, &(&1.type == :await_health and &1.resource_handle == handle))
+
+      child_sync = Enum.find(steps, &(&1.type == :sync_domain and &1.resource_handle == handle))
+      assert child_sync.position > child_health.position
+
+      # And NO `publish_ingress` anywhere in this stack. A child has no network endpoint
+      # to attach, so it never gets one — but neither does this donor, because it holds
+      # no domain of its own: `publish_deployment/1` gates on `ingress_published?/1`
+      # (`deployments.ex:184`), which requires the deployment's OWN domain, so the step
+      # would fall through to `:ok` having done nothing while recording
+      # `"published" => true`.
+      #
+      # The donor is still reachable — `SpecBuilder` puts it on the ingress network via
+      # `bridge_networks` at container-create time, because its children's routes resolve
+      # to its address. This step never contributed to that. A donor that DOES hold a
+      # domain gets exactly one, asserted below.
+      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
+    end
+
+    # The Sonarr-behind-gluetun shape deployed on its own. The child holds a real domain,
+    # so every name-shaped predicate says publish it — but `publish_deployment/1` gates on
+    # `attachable?/1`, and a container living in another's namespace has no endpoint to
+    # attach. The step would fall through to `:ok` and record `"published" => true` for
+    # work that did not happen. Its route is real and is served by the DONOR, which
+    # `SpecBuilder` multi-homes onto ingress via `bridge_networks` at create time.
+    test "a netns child with its own domain is planned no publish_ingress", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+      {:ok, child} = Deployments.update_deployment(child, %{domain: "sonarr.example.com"})
+
+      {:ok, release} = Deployments.deploy_release(Deployments.get_deployment!(child.id))
+      steps = Repo.preload(release, :steps).steps
+      types = Enum.map(steps, & &1.type)
+
+      refute :publish_ingress in types
+
+      # The name is still claimed — those steps belong to whoever holds the domain, and
+      # this child does. Only the attach is skipped.
+      assert :sync_domain in types
+      assert :publish_dns in types
+    end
+
+    # Giving the donor a domain does NOT make the attach meaningful: a gluetun donor is
+    # `exposure_mode: :service`, so `ingress_published?/1` is false via
+    # `Access.proxy_mode?/1` and `publish_deployment/1` would no-op. A stray domain on a
+    # non-proxy deployment is the third shape `reachability_steps/1` has to exclude.
+    #
+    # An earlier revision of this test asserted exactly one `publish_ingress` here, which
+    # was pinning that no-op. The positive case — a domained PROXY deployment gets one —
+    # is covered by the full step-list assertion in `greenfield_release_test.exs`.
+    test "a :service donor carrying a stray domain is still planned no publish_ingress", ctx do
+      {:ok, donor} = Deployments.update_deployment(ctx.donor, %{domain: "vpn.example.com"})
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(donor.id))
+      steps = Repo.preload(release, :steps).steps
+
+      assert Deployments.get_deployment!(donor.id).domain == "vpn.example.com"
+      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
     end
 
     test "driving the stack from the DONOR gives the same release", ctx do

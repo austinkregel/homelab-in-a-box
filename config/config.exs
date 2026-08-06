@@ -51,6 +51,8 @@ config :homelab, Oban,
 config :homelab, :release_step_handlers, %{
   # Greenfield deploy steps.
   provision_credentials: Homelab.Deployments.ReleaseSteps.ProvisionCredentials,
+  # The shared ingress proxy, ensured before any container of a routed release exists.
+  ensure_ingress_proxy: Homelab.Deployments.ReleaseSteps.EnsureIngressProxy,
   dependency_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
   # Applies the credentials ProvisionCredentials only *declared*: a datastore whose
   # volume already has data ignores MARIADB_USER/PASSWORD entirely (init runs once,
@@ -61,6 +63,10 @@ config :homelab, :release_step_handlers, %{
   # other, it just has to happen after the donor whose namespace it names.
   netns_child_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
   await_health: Homelab.Deployments.ReleaseSteps.AwaitHealth,
+  # The name-publishing half of a routed release: the local Domain row, then the
+  # external A records, then reachability. All three only after the app is healthy.
+  sync_domain: Homelab.Deployments.ReleaseSteps.SyncDomain,
+  publish_dns: Homelab.Deployments.ReleaseSteps.PublishDns,
   publish_ingress: Homelab.Deployments.ReleaseSteps.PublishIngress,
   # Adoption steps.
   backup_verify: Homelab.Deployments.ReleaseSteps.BackupVerify,

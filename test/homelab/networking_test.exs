@@ -660,6 +660,40 @@ defmodule Homelab.NetworkingTest do
 
       assert :ok = Networking.cleanup_deployment_dns_records(deployment.id)
     end
+
+    # `push_record_deletion/1` sat inside an `Enum.each` that discarded its result, and
+    # the local row was then deleted unconditionally. A provider that refuses the
+    # deletion therefore left the record LIVE at Cloudflare with nothing locally that
+    # remembers it existed — an orphan no cleanup can ever reach again — and the caller
+    # was told `:ok`.
+    #
+    # Keeping the row is half the fix and the more important half: it is the only handle
+    # a retry has on the provider record.
+    test "a refused provider deletion fails, and keeps the local row" do
+      Homelab.Mocks.DnsProvider
+      |> expect(:delete_record, fn _zone_ref, "prov_rec_1" ->
+        {:error, {:api_error, 500, "nope"}}
+      end)
+
+      deployment = insert(:deployment)
+      zone = insert(:dns_zone, provider_zone_id: "zone_abc")
+
+      insert(:dns_record,
+        dns_zone: zone,
+        deployment: deployment,
+        managed: true,
+        scope: :public,
+        provider_record_id: "prov_rec_1"
+      )
+
+      assert {:error, {:dns_deletion_failed, failures}} =
+               Networking.cleanup_deployment_dns_records(deployment.id)
+
+      assert [{_id, _reason}] = failures
+
+      assert [kept] = Networking.list_dns_records_for_deployment(deployment.id)
+      assert kept.provider_record_id == "prov_rec_1"
+    end
   end
 
   describe "push_record_to_provider/1" do

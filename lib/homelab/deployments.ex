@@ -7,6 +7,7 @@ defmodule Homelab.Deployments do
   """
 
   import Ecto.Query
+  require Logger
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Netns
@@ -455,6 +456,108 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
+  Creates a deployment and provisions it through the durable release saga —
+  the replacement for `deploy_now/1`, which deploys imperatively inside the caller's
+  request with no release row, no health gate, no ingress-after-healthy and no
+  rollback.
+
+  Returns `{:ok, %{deployment: deployment, release: release}}`. Callers need both: the
+  deployment to redirect to, the release to show progress against.
+
+  ## The pre-flight is the point
+
+  `SpecBuilder.build/1` is run synchronously against the app and every companion
+  BEFORE anything is created or planned. Without it the saga swallows the single most
+  common deploy error: `deploy_now/1` returns `{:error, {:missing_required_env, [...]}}`
+  in-request and the wizard flashes it, whereas an unchecked saga would create the row,
+  enqueue the job, hand the operator a green "deployment started", and then roll the
+  whole thing back seconds later in the background. A silently-reverted success is
+  worse than a loud failure.
+
+  It costs nothing: `SpecBuilder.build/1` is a pure read over rows already loaded, and
+  `DeployContainer` rebuilds the spec anyway.
+
+  ## Why the enqueue is outside the transaction
+
+  Create-and-plan is one `Repo.transaction`, so a failed plan cannot leave a deployment
+  row with no release. The Oban insert cannot join it: Oban runs on `Homelab.ObanRepo`,
+  a physically separate Postgres, so there is no transaction spanning both.
+
+  That is a property, not a wart. Enqueuing inside would be a lie (the job would be
+  visible to a worker before the release row committed); enqueuing after means the only
+  failure window leaves a committed `:planning` release with no job — and
+  `Reconciler.resume_stuck_releases/0` re-enqueues exactly those on its next tick. The
+  system converges; it does not lose the deploy.
+  """
+  def create_and_deploy_release(attrs, companions \\ []) when is_list(companions) do
+    Repo.transaction(fn ->
+      with {:ok, deployment} <- create_deployment(attrs),
+           deployment = get_deployment!(deployment.id),
+           # The same set `plan_deploy_release/3` will plan, built by the same function, so
+           # the pre-flight cannot check a different set from the one that gets deployed.
+           # It is passed twice over: once as the things to BUILD (with the app), and once
+           # as the donors this release will bring up, which is what lets the netns
+           # liveness check be skipped for exactly those.
+           all_companions = companion_set(deployment, companions),
+           :ok <- preflight_specs([deployment | all_companions], all_companions),
+           {:ok, release} <- plan_deploy_release(deployment, companions, []) do
+        %{deployment: deployment, release: release}
+      else
+        {:error, reason} -> Repo.rollback(reason)
+        other -> Repo.rollback(other)
+      end
+    end)
+    |> case do
+      {:ok, %{release: release} = result} ->
+        ReleaseRunner.enqueue_or_log(release)
+        {:ok, result}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Fails on the FIRST unbuildable spec and returns that reason verbatim, so callers
+  # keep matching on `{:error, {:missing_required_env, keys}}` exactly as they do
+  # against `deploy_now/1`.
+  #
+  # With ONE exception, and it is narrow on purpose. `SpecBuilder.resolve_netns_donor/1`
+  # fails closed on a donor that has no container yet — correctly, because a create
+  # naming an absent container produces one the daemon will never start. But a donor
+  # THIS release is about to deploy has exactly that shape at plan time, and the release
+  # is what establishes the precondition: the donor is planned first and awaited healthy
+  # before the child's container is created. SpecBuilder's own comment says as much.
+  # Asserting it here made `create_and_deploy_release/2` unable to create a netns child
+  # at all — the transaction rolled back and no deployment was written.
+  #
+  # Scoped to donors in this release's companion set, not to netns errors in general: a
+  # donor that is genuinely missing, or one nothing is going to deploy, still fails fast.
+  # And it costs no other coverage — `SpecBuilder.build/1` validates required env BEFORE
+  # it resolves the donor, so everything the pre-flight exists for has already run by
+  # the time this error can be returned.
+  defp preflight_specs(deployments, companions) do
+    deployable = MapSet.new(companions, & &1.id)
+
+    Enum.reduce_while(deployments, :ok, fn deployment, :ok ->
+      case SpecBuilder.build(with_associations(deployment)) do
+        {:ok, _spec} ->
+          {:cont, :ok}
+
+        {:error, {:netns_donor_not_running, donor_id}} = error ->
+          if MapSet.member?(deployable, donor_id), do: {:cont, :ok}, else: {:halt, error}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  # A no-op for rows the caller already loaded — which is all of them on the common
+  # path, where re-fetching by id would query the same deployment three times.
+  defp with_associations(%Deployment{} = deployment),
+    do: Repo.preload(deployment, [:tenant, :app_template])
+
+  @doc """
   Provisions a deployment (and any companion deployments) durably via the release
   saga instead of the imperative in-request path: plans the ordered steps and
   enqueues `ReleaseRunner`. Companions are deployed and awaited healthy before the
@@ -467,30 +570,188 @@ defmodule Homelab.Deployments do
   `:running` once its `:app_container` step has run, and a failure rolls back the
   companions so nothing is orphaned.
   """
-  def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
+  def deploy_release(%Deployment{} = app, companions \\ [], opts \\ [])
       when is_list(companions) do
+    with {:ok, release} <- plan_deploy_release(app, companions, opts) do
+      ReleaseRunner.enqueue_or_log(release)
+      {:ok, release}
+    end
+  end
+
+  # The plan, without the enqueue. Split out so `create_and_deploy_release/2` can put
+  # the whole create-and-plan inside one transaction and enqueue only after it commits
+  # (Oban lives on a different repo — see that function).
+  defp plan_deploy_release(%Deployment{} = app, companions, _opts) do
+    all_companions = companion_set(app, companions)
+
     steps =
-      Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
-        [
-          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
-          %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
-        ] ++ datastore_grant_steps(app, companion)
-      end) ++
+      ingress_proxy_steps(app) ++
+        Enum.flat_map(all_companions, fn companion ->
+          [
+            %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+            %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
+          ] ++ datastore_grant_steps(app, companion)
+        end) ++
         [
           %{type: :app_container, resource_handle: %{}},
           %{type: :await_health, resource_handle: %{}}
         ] ++ ingress_steps(app)
 
-    with {:ok, release} <- Releases.plan_release(app, steps) do
-      {:ok, _job} = ReleaseRunner.enqueue(release)
-      {:ok, release}
+    with :ok <- ensure_none_in_flight([app | all_companions]) do
+      Releases.plan_release(app, steps)
     end
   end
 
-  defp ingress_steps(%Deployment{domain: domain}) when is_binary(domain) and domain != "",
-    do: [%{type: :publish_ingress, resource_handle: %{}}]
+  # Refuses to plan while ANY deployment this release would drive is already being
+  # driven by another one.
+  #
+  # `releases_one_active_per_deployment` covers `releases.deployment_id` and stops there,
+  # so it never sees a companion — those are named by a step's
+  # `resource_handle["deployment_id"]`. Nothing else checked, and the gap is not exotic:
+  # "deploy the VPN donor, then deploy an app behind it before the donor's release has
+  # finished" is the ordinary flow, and `netns_donor_companions/1` resolves that donor
+  # into the second release's set automatically. Both sagas would then call
+  # `orchestrator.deploy` for it, both would write its `external_id`, and a rollback of
+  # either would undeploy the container the other had just created.
+  #
+  # The app is checked with the same query rather than leaning on the index: the index
+  # cannot see the case where the in-flight release names it as a COMPANION.
+  #
+  # A typed error, never a raise — `Adoption.adopt/2` has used exactly this guard, in
+  # exactly this shape, since before the saga had a second entry point.
+  defp ensure_none_in_flight(deployments) do
+    Enum.reduce_while(deployments, :ok, fn deployment, :ok ->
+      case Releases.active_release_driving(deployment.id) do
+        nil -> {:cont, :ok}
+        _release -> {:halt, {:error, {:release_in_flight, deployment.id}}}
+      end
+    end)
+  end
 
-  defp ingress_steps(_app), do: []
+  # Every deployment that must be up before the app: its netns donor, plus whatever the
+  # caller named. De-duplicated BY ID, and this is the only place that can be — the donor
+  # and the caller's list are only visible together here.
+  #
+  # The dedup is load-bearing, not defensive. A compose bundle where gluetun is both the
+  # namespace donor and an explicit companion (`deploy_release/2` from the wizard's
+  # compose path) otherwise yields two `:dependency_container` steps for one deployment.
+  # Both write `external_id`, so only the second is compensatable and the first container
+  # is orphaned — or the second collides on `service_name/2` and fails a release that
+  # should have succeeded.
+  #
+  # This lived as a comment on `netns_donor_companions/1` claiming the set WAS
+  # de-duplicated while nothing on the path did it. Enforcing it here means every caller
+  # gets it, rather than each one having to remember not to pass the donor through.
+  defp companion_set(%Deployment{} = app, companions) do
+    (netns_donor_companions(app) ++ companions)
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  # Does this deployment answer to a name of its OWN? Distinct from `routed?/1`, and
+  # the distinction is the netns donor: a name is a property of the deployment that
+  # holds it, while reachability is a property of the container Traefik can resolve,
+  # and for a tunneled stack those are two different deployments.
+  defp own_domain?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+
+  # Does traffic from the proxy reach this deployment? The ONE definition of "routed",
+  # because several step lists key off it and a second inlined copy is exactly how a
+  # plan ends up ensuring a proxy for a release that never publishes a route.
+  #
+  # A donor with routed children is routed even with no domain of its own — which is
+  # the ordinary gluetun shape, where every name in the stack belongs to a child. This
+  # is not a widening for its own sake: `SpecBuilder` already emits `traefik.enable` and
+  # multi-homes that donor onto the ingress network, because a child has no endpoint for
+  # Traefik to discover and its route resolves to the DONOR's address. Reading only
+  # `domain` planned no proxy and no ingress for the one topology that needs both.
+  #
+  # Matched to SpecBuilder's rule exactly, `Access.proxy_mode?` included: a donor whose
+  # children are `:service` or `:host` is not multi-homed there either, and publishing
+  # ingress for it would attach a container Traefik has no labels for.
+  defp routed?(%Deployment{} = deployment) do
+    own_domain?(deployment) or Enum.any?(Netns.children(deployment), &routes_via_donor?/1)
+  end
+
+  # `Access.proxy_mode?/1` reads the template, and a caller's preloaded
+  # `:network_children` is not guaranteed to carry one — `Repo.preload/2` on an
+  # already-loaded association is a no-op, so this is only a cost when it is needed.
+  # Short-circuits on `own_domain?/1`, which is a plain field read.
+  defp routes_via_donor?(%Deployment{} = child),
+    do: own_domain?(child) and Access.proxy_mode?(Repo.preload(child, :app_template))
+
+  # The proxy has to exist before anything that routes through it. Planned at position
+  # 1, ahead of every container: it is a precondition of the route, not a product of
+  # it, and failing there means no container has been created yet. See
+  # `ReleaseSteps.EnsureIngressProxy` for why it has no compensation.
+  defp ingress_proxy_steps(app) do
+    if routed?(app), do: [%{type: :ensure_ingress_proxy, resource_handle: %{}}], else: []
+  end
+
+  # Claiming a NAME: the local `Domain` row and the A records that resolve it. Keyed off
+  # `own_domain?/1`, not `routed?/1` — these belong to whichever deployment holds the
+  # domain, which for a tunneled stack is the child, not the donor carrying its route.
+  # `handle` targets them; an empty handle means the release's own deployment.
+  defp name_steps(deployment, handle \\ %{}) do
+    if own_domain?(deployment) do
+      [
+        %{type: :sync_domain, resource_handle: handle},
+        %{type: :publish_dns, resource_handle: handle}
+      ]
+    else
+      []
+    end
+  end
+
+  # Granting REACHABILITY: attaching the workload to the shared ingress network so
+  # Traefik can resolve it.
+  #
+  # The condition is `publish_deployment/1`'s OWN runtime gate, reused verbatim rather
+  # than approximated, so that planned implies acted. Three shapes are proxy-routed by
+  # every other measure and still cannot be attached, and each was previously planned a
+  # step that fell through to `:ok` while recording `"published" => true`:
+  #
+  #   * a netns CHILD holding its own domain — the Sonarr-behind-gluetun shape. Its route
+  #     is real and is served by its DONOR, which `SpecBuilder` multi-homes onto ingress
+  #     via `bridge_networks` at create time. (`attachable?/1`)
+  #   * a `:host_network` deployment — a container in the host namespace has no endpoint
+  #     on any user-defined network. (`attachable?/1`)
+  #   * a `:service`/`:host` deployment carrying a stray domain — not proxy-routed at all.
+  #     (`ingress_published?/1`, via `Access.proxy_mode?/1`)
+  #
+  # A domainless donor with routed children is the fourth: genuinely routed, but it holds
+  # no name of its own, so `ingress_published?/1` is false and its ingress membership
+  # comes from `bridge_networks` too.
+  #
+  # Any predicate narrower than the runtime gate re-opens this, because the question
+  # "will this step do anything" has exactly one correct answer and it already lives in
+  # `publish_deployment/1`. A step that reports success for work it did not do is the
+  # defect class this tier exists to remove.
+  #
+  # `ensure_ingress_proxy` deliberately does NOT share this gate: the proxy must exist
+  # for a child's route whether or not the donor is itself attachable.
+  #
+  # Reusing the gate means reusing its PRELOAD too. `publish_deployment/1` opens with
+  # `Repo.preload(deployment, [:tenant, :app_template])` before it evaluates either
+  # predicate, because `Access.effective_exposure/1` reads the template. Restating the
+  # predicates without it gave `deploy_release/2` a precondition its pre-image (a plain
+  # `domain` field match) never had, and failed it by RAISING `KeyError :exposure_mode`
+  # on the caller's struct — for a struct `publish_deployment/1` itself accepts.
+  # `Repo.preload/2` on an already-loaded association is a no-op, so this costs nothing
+  # on the common path.
+  defp reachability_steps(deployment) do
+    deployment = with_associations(deployment)
+
+    if ingress_published?(deployment) and attachable?(deployment),
+      do: [%{type: :publish_ingress, resource_handle: %{}}],
+      else: []
+  end
+
+  # The tail of a routed release, all of it after the app is healthy: claim the name
+  # locally, publish it to DNS, then actually grant reachability. Ordered so nothing
+  # advertises a name before something answers to it, and so compensation (which walks
+  # descending) severs reachability first, then DNS, then the row.
+  defp ingress_steps(app) do
+    name_steps(app) ++ reachability_steps(app)
+  end
 
   @doc false
   # Reconciles the app's credentials against a datastore companion, AFTER that companion
@@ -539,8 +800,8 @@ defmodule Homelab.Deployments do
   # healthy before the app — so the donor is prepended to the companion list rather than
   # needing an ordering mechanism of its own.
   #
-  # De-duplicated: the donor may also be a companion for another reason (a compose
-  # bundle where gluetun is both), and planning it twice would deploy it twice.
+  # NOT de-duplicated on its own — `companion_set/2` owns that, because dedup can only
+  # happen where the donor and the caller's companions are combined.
   defp netns_donor_companions(%Deployment{network_parent_id: nil}), do: []
 
   defp netns_donor_companions(%Deployment{} = app) do
@@ -573,7 +834,12 @@ defmodule Homelab.Deployments do
         parent -> parent
       end
 
-    donor = Repo.preload(donor, [:tenant, :app_template, :network_children])
+    # Children carry their templates: `routed?/1` reads each child's effective exposure
+    # to decide whether the donor needs ingress at all, and a shallow preload would make
+    # that one query per child.
+    donor =
+      Repo.preload(donor, [:tenant, :app_template, network_children: [:app_template, :tenant]])
+
     children = Netns.children(donor)
 
     child_steps =
@@ -584,16 +850,37 @@ defmodule Homelab.Deployments do
         ]
       end)
 
+    # Each child's OWN name, published after that child is healthy.
+    #
+    # These used to be absent entirely: the routing steps all carried an empty handle,
+    # so they targeted the donor, and a child in a redeployed stack got no `Domain` row
+    # and no A record — while the same child deployed standalone through
+    # `deploy_release/2` got both. That gap sat on the operation most likely to need
+    # them: a stack redeploy is usually TRIGGERED by a child's route changing, since a
+    # child's Traefik labels live on the donor. So the one path that moves a child's
+    # name was the one that never republished it.
+    child_name_steps =
+      Enum.flat_map(children, &name_steps(&1, %{"deployment_id" => &1.id}))
+
+    # Ingress LAST, after the children exist.
+    #
+    # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason
+    # a child's route change re-creates the donor. Publishing before the children were
+    # (re)created advertised every one of those routes to a namespace holding nothing
+    # yet, so the window between "donor healthy" and "last child healthy" served 502s on
+    # names that had been working a moment earlier. The proxy still goes first: it is a
+    # precondition, not an advertisement.
     steps =
-      [
-        %{type: :app_container, resource_handle: %{}},
-        %{type: :await_health, resource_handle: %{}}
-      ] ++ ingress_steps(donor) ++ child_steps
+      ingress_proxy_steps(donor) ++
+        [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}}
+        ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor)
 
     with {:ok, donor} <- reset_to_pending(donor),
          {:ok, _children} <- reset_all_to_pending(children),
          {:ok, release} <- Releases.plan_release(donor, steps) do
-      {:ok, _job} = ReleaseRunner.enqueue(release)
+      ReleaseRunner.enqueue_or_log(release)
       {:ok, release}
     end
   end
@@ -837,7 +1124,16 @@ defmodule Homelab.Deployments do
 
   defp create_dns_records(_deployment), do: :ok
 
-  defp detect_ip_config do
+  @doc """
+  The address deployment DNS records point at: this host's first non-loopback IPv4,
+  used for both the internal and public scope.
+
+  Public only so `ReleaseSteps.PublishDns` can use the SAME guess the imperative
+  `create_dns_records/1` uses. Two copies of "which IP does this host answer on"
+  drifting apart would publish one address through `deploy_now/1` and a different one
+  through the saga for the same deployment.
+  """
+  def detect_ip_config do
     internal_ip = get_host_lan_ip()
     %{internal_ip: internal_ip, public_ip: internal_ip}
   end

@@ -13,6 +13,12 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
   `compensate/2` undeploys the container and clears the row's `external_id`, so a
   rolled-back release leaves no orphan. Idempotent: undeploy of a missing
   container is a no-op.
+
+  Both failure branches mark the deployment `:failed`. That is not cosmetic: a row
+  left `:pending` with no `external_id` is a row the reconciler skips forever
+  (`converge_one/2` returns on `external_id: nil`), so a saga deploy that failed to
+  build a spec or failed at the orchestrator would sit "pending" with no convergence
+  path and no error on the page.
   """
 
   @behaviour Homelab.Deployments.ReleaseStep.Handler
@@ -34,9 +40,31 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
       # which used to drop them because this merge lived here rather than at the seam.
       case orchestrator().deploy(spec) do
         {:ok, external_id} ->
-          Deployments.transition_status(deployment, :deploying, @deployable_from,
-            external_id: external_id
-          )
+          case Deployments.transition_status(deployment, :deploying, @deployable_from,
+                 external_id: external_id
+               ) do
+            {:ok, _} ->
+              :ok
+
+            # The guard did not match, so the id went nowhere. A RUNNING target is the
+            # ordinary case — redeploying a stack whose companion never stopped, which
+            # is every netns donor and every shared datastore — and `:running` is not in
+            # `@deployable_from` because a live workload's status should not be dragged
+            # back to `:deploying`.
+            #
+            # The ID still has to land. On DockerEngine `deploy/1` resolves the name
+            # conflict by stop + force-rm + create, so the id already on the row names a
+            # container that no longer exists: `AwaitHealth` polls the corpse, times
+            # out, and the rollback undeploys the container this step DID create,
+            # leaving `{:stopped, nil}` — which `Reconciler.converge_one/2` skips
+            # forever. Same fallback `start_deployment/1` and the reconciler's converge
+            # already carry.
+            #
+            # `record_external_id/2`, not `ensure_external_id/2`: the id from `deploy/1`
+            # is the workload we just created and is authoritative over the stale one.
+            {:noop, _} ->
+              Deployments.record_external_id(deployment, external_id)
+          end
 
           record_netns_parent(deployment, spec)
 
@@ -50,9 +78,27 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
            }}
 
         {:error, reason} ->
+          mark_failed(deployment, reason)
           {:error, {:deploy_failed, deployment.id, reason}}
       end
+    else
+      # `SpecBuilder.build/1` failed. This `with` had no `else`, so the error fell
+      # straight through to the runner and the deployment row was left `:pending` —
+      # and `Reconciler.converge_one/2` returns immediately for a row with no
+      # `external_id`, so nothing ever moved it again. `do_deploy/1` set `:failed`
+      # here; losing that on the saga path is how a deployment becomes permanently
+      # invisible instead of visibly broken.
+      {:error, reason} ->
+        mark_failed(deployment, reason)
+        {:error, {:spec_build_failed, reason}}
     end
+  end
+
+  # Same shape `do_deploy/1` wrote: a terminal status plus the reason, so the failure
+  # is legible on the deployment page and not only in the release's step row.
+  defp mark_failed(deployment, reason) do
+    _ = Deployments.update_status(deployment, :failed, error: inspect(reason))
+    :ok
   end
 
   @impl true

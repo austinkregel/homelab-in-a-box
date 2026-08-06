@@ -112,6 +112,37 @@ defmodule Homelab.Deployments.Releases do
     |> preload_steps()
   end
 
+  @doc """
+  Any active release that DRIVES `deployment_id` — as its own app, or as a companion
+  named by a step's `resource_handle["deployment_id"]`. Nil if the deployment is free.
+
+  `get_active_release/1` answers only the first half, and so does the
+  `releases_one_active_per_deployment` unique index: both key on
+  `releases.deployment_id`, which a companion never occupies. Nothing therefore stopped
+  two sagas from provisioning one deployment — the everyday "deploy the VPN donor, then
+  deploy an app behind it before the donor's release has finished" shape. Both would
+  call `orchestrator.deploy` for it, both would write its `external_id`, and a rollback
+  of either would undeploy the container the other had just created.
+
+  `driving_release/1` asks a similar question for display and returns the LATEST release
+  whatever its status; this one is a guard and returns only an in-flight one.
+  """
+  def active_release_driving(deployment_id) do
+    id_str = to_string(deployment_id)
+
+    Release
+    |> join(:left, [r], s in assoc(r, :steps))
+    |> where([r], r.status in ^Release.active_statuses())
+    |> where(
+      [r, s],
+      r.deployment_id == ^deployment_id or
+        fragment("?->>'deployment_id' = ?", s.resource_handle, ^id_str)
+    )
+    |> order_by([r], desc: r.inserted_at, desc: r.id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
   @doc "The lowest-position step still `:pending`, or nil."
   def next_pending_step(%Release{} = release) do
     release
@@ -215,6 +246,37 @@ defmodule Homelab.Deployments.Releases do
     else
       {:noop, step}
     end
+  end
+
+  @doc """
+  Merges `handle` into a step's `resource_handle` immediately, without touching its
+  status. Returns the merged map.
+
+  For provenance a handler must not lose if it dies mid-step.
+
+  `ReleaseRunner` persists a handler's handle only at the completion compare-and-set,
+  which is correct for describing what a step CREATED — but useless for a fact the
+  handler learned by observing the world BEFORE it changed it. A node that dies between
+  the side effect and that CAS has `reclaim_running_steps/1` return the step to
+  `:pending` with its `resource_handle` untouched, so the re-run re-derives that fact
+  from a world the first attempt already changed, and silently gets a different answer.
+  `SyncDomain`'s created-vs-reclaimed is exactly that shape.
+
+  Deliberately NOT a compare-and-set: it is called while the step is `:running` and
+  owned by this runner under a held lease, and it records something already true rather
+  than advancing state. A no-op on a missing step id keeps handlers callable with a bare
+  struct in unit tests.
+  """
+  def record_step_handle(%ReleaseStep{id: nil}, handle) when is_map(handle), do: handle
+
+  def record_step_handle(%ReleaseStep{id: id}, handle) when is_map(handle) do
+    merged = Map.merge(Repo.get!(ReleaseStep, id).resource_handle || %{}, handle)
+
+    ReleaseStep
+    |> where([s], s.id == ^id)
+    |> Repo.update_all(set: [resource_handle: merged, updated_at: naive_now()])
+
+    merged
   end
 
   # --- Lease ----------------------------------------------------------------
