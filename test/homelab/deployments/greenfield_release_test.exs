@@ -113,6 +113,23 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     refute :ensure_datastore_grants in Enum.map(release.steps, & &1.type)
   end
 
+  # `reachability_steps/1` reuses `publish_deployment/1`'s runtime gate, and that gate
+  # opens with `Repo.preload(deployment, [:tenant, :app_template])` BEFORE it evaluates
+  # `ingress_published?/1 and attachable?/1`. Restating the predicates on the caller's
+  # struct without the preload added a precondition `deploy_release/2` never had — the
+  # pre-image was a pure `domain` field match — and fails it by RAISING, where the gate
+  # it copied returns `:ok` for the very same struct.
+  test "planning tolerates a deployment loaded without its associations", %{app: app} do
+    bare = Repo.get!(Homelab.Deployments.Deployment, app.id)
+    assert %Ecto.Association.NotLoaded{} = bare.app_template
+
+    # The gate this predicate was copied from is fine with it.
+    assert :ok = Deployments.publish_deployment(bare)
+
+    assert {:ok, release} = Deployments.deploy_release(bare)
+    assert :publish_ingress in Enum.map(release.steps, & &1.type)
+  end
+
   test "no ingress step when the app has no domain", %{companion: companion} do
     tenant = insert(:tenant, slug: "nodomain")
     app = pending_deployment(tenant, "app2", domain: nil)
