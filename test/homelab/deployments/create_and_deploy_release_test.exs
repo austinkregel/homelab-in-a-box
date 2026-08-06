@@ -293,17 +293,31 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
 
     # And a donor that is genuinely absent is still a hard failure — the relaxation is
     # scoped to donors THIS release will deploy, not to netns errors in general.
-    test "still fails when the donor is not part of this release at all", %{tenant: tenant} do
-      template = clean_template()
+    #
+    # This drives the `{:halt, error}` branch through the only door that reaches it: a
+    # caller-supplied COMPANION which is itself a netns child, whose donor is neither in
+    # the companion set nor already running. The app cannot reach that branch —
+    # `companion_set/2` puts the app's own resolved donor into `deployable` whenever
+    # `network_parent_id` resolves — so the guard protects the companion list, and an
+    # earlier version of this test asserted an FK failure from `create_deployment/1`
+    # instead, returning before the pre-flight ever ran.
+    test "still fails when a companion's donor is outside this release", %{
+      tenant: tenant,
+      donor_template: dt
+    } do
+      # Never deployed, and not in the companion set below.
+      absent_donor = donor(tenant, dt, nil)
 
-      # A deployment whose parent row was deleted out from under it cannot be built,
-      # and no companion set makes that true.
-      assert {:error, %Ecto.Changeset{}} =
-               Deployments.create_and_deploy_release(%{
-                 tenant_id: tenant.id,
-                 app_template_id: template.id,
-                 network_parent_id: 999_999
-               })
+      {:ok, stranded_companion} =
+        Deployments.create_deployment(child_attrs(tenant, absent_donor))
+
+      assert {:error, {:netns_donor_not_running, donor_id}} =
+               Deployments.create_and_deploy_release(
+                 %{tenant_id: tenant.id, app_template_id: clean_template().id},
+                 [Deployments.get_deployment!(stranded_companion.id)]
+               )
+
+      assert donor_id == absent_donor.id
     end
   end
 end
