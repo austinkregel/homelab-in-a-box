@@ -165,7 +165,7 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     test "a release interrupted mid-rollback compensates instead of running on" do
       deployment = insert(:deployment)
       release = plan(deployment)
-      [s1, s2, s3, _s4] = Enum.sort_by(release.steps, & &1.position)
+      [s1, s2, _s3, _s4] = Enum.sort_by(release.steps, & &1.position)
 
       # Mid-compensation when the node died: 1 completed, 2 mid-compensate, 3 and 4
       # never reached.
