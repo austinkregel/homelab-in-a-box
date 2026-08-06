@@ -27,11 +27,64 @@ defmodule Homelab.Deployments.PermanentHomeTest do
     assert PermanentHome.managed_root() == "/mnt/tank/managed"
 
     # With nothing configured it derives from the current user's home, never a
-    # hardcoded path.
+    # hardcoded path. Only OUTSIDE a container — stated rather than inferred, so the
+    # assertion does not change meaning depending on where the suite runs.
     Application.delete_env(:homelab, :managed_root)
+    Application.put_env(:homelab, :containerized, false)
+    on_exit(fn -> Application.delete_env(:homelab, :containerized) end)
 
     assert PermanentHome.managed_root() ==
              Path.join(System.user_home() || "/root", "homelab-managed")
+  end
+
+  describe "an unconfigured managed root on a containerized install" do
+    setup do
+      Application.delete_env(:homelab, :managed_root)
+      Homelab.Settings.evict("managed_root")
+      Application.put_env(:homelab, :containerized, true)
+      on_exit(fn -> Application.delete_env(:homelab, :containerized) end)
+      :ok
+    end
+
+    # The silent-default bug. `System.user_home()` is a fact about the CONTAINER
+    # (/root), and every path the plane produces is applied by the daemon to the HOST.
+    # So an unconfigured install had the daemon creating adopted data under the host's
+    # /root/homelab-managed: a directory the operator never chose, that no backup job
+    # covers, and that they will not think to look in when the data goes missing.
+    test "refuses rather than falling back to a container-local path" do
+      assert {:error, :managed_root_unconfigured} = PermanentHome.fetch_managed_root()
+
+      assert_raise ArgumentError, ~r/managed root is not configured/, fn ->
+        PermanentHome.managed_root()
+      end
+    end
+
+    # The refusal has to land on everything that turns the root into a path bytes get
+    # written to, or the guard is decorative.
+    test "backing_dir and service_dir refuse too — nothing derives a path from a guess" do
+      assert_raise ArgumentError, ~r/managed root is not configured/, fn ->
+        PermanentHome.backing_dir("gluetun", "/gluetun")
+      end
+
+      assert_raise ArgumentError, ~r/managed root is not configured/, fn ->
+        PermanentHome.service_dir("gluetun")
+      end
+    end
+
+    test "the refusal names the setting and the env var an operator can fix it with" do
+      message = PermanentHome.unconfigured_message()
+      assert message =~ "HOMELAB_MANAGED_ROOT"
+      assert message =~ "Settings -> Import"
+      assert message =~ "/root/homelab-managed"
+    end
+
+    test "a configured root is still honoured — this is about the DEFAULT, not the setting" do
+      Application.put_env(:homelab, :managed_root, "/mnt/tank/managed")
+      on_exit(fn -> Application.delete_env(:homelab, :managed_root) end)
+
+      assert {:ok, "/mnt/tank/managed"} = PermanentHome.fetch_managed_root()
+      assert PermanentHome.managed_root() == "/mnt/tank/managed"
+    end
   end
 
   test "backing_dir places data under the managed root, slugged" do
