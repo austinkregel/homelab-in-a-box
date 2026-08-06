@@ -286,6 +286,52 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     assert Enum.any?(for_deployment.(companion.id), &(&1.message =~ "deployed"))
   end
 
+  # The failure half of the same deliverable shipped untested — `grep -rn 'rolling
+  # back\|rollback FAILED\|release failed' test/` returned nothing at all. Which is the
+  # half that matters: a successful deploy is visible on the deployment page anyway,
+  # while a rollback is the case where the Activity feed is the ONLY place an operator
+  # can find out what happened and to which deployment.
+  test "a failed release writes the rollback Activity entries", %{
+    app: app,
+    companion: companion
+  } do
+    app_spec_id = to_string(app.id)
+
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn
+      %{deployment_id: ^app_spec_id} -> {:error, :boom}
+      spec -> {:ok, "ext-" <> spec.deployment_id}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :undeploy, fn _id -> :ok end)
+    stub_dns_provider()
+
+    {:ok, release} = Deployments.deploy_release(app, [companion])
+    assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t")
+
+    entries = Homelab.Services.ActivityLog.recent(100)
+    for_app = Enum.filter(entries, &(&1.metadata[:deployment_id] == app.id))
+
+    # The release-level transition into compensation, carrying the reason.
+    assert Enum.any?(
+             for_app,
+             &(&1.level == :error and &1.message =~ "release failed, rolling back" and
+                 &1.message =~ "boom")
+           )
+
+    # The step that failed, named, and filed under the deployment it was deploying.
+    assert Enum.any?(
+             for_app,
+             &(&1.level == :error and &1.message =~ "app_container failed")
+           )
+
+    # And the settle, so the feed does not stop at "rolling back" forever.
+    assert Enum.any?(for_app, &(&1.level == :error and &1.message =~ "release rolled back"))
+  end
+
   test "app failure rolls back and undeploys the companion (no orphan)", %{
     app: app,
     companion: companion
