@@ -40,6 +40,11 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   reason, so a release that published a route onto a proxy nobody could ensure says
   so on the record. Actual reachability is still gated by `PublishIngress`, which
   does fail closed.
+
+  That contract only holds if EVERY return is handled. `ensure_traefik/0` is a `with`
+  with no `else`, so it returns whatever any clause returned, and a `case` listing only
+  the expected shapes would raise `CaseClauseError` — which the runner's rescue turns
+  into a failed step and a full rollback. Hence the catch-all.
   """
 
   @behaviour Homelab.Deployments.ReleaseStep.Handler
@@ -53,7 +58,7 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   def run(step, ctx) do
     deployment_id = target_id(step, ctx)
 
-    case Infrastructure.ensure_traefik() do
+    case ensure_proxy() do
       {:ok, :already_running} ->
         {:ok, %{"ingress_proxy" => "already_running"}}
 
@@ -61,14 +66,39 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
         ActivityLog.info("infrastructure", "Traefik started", %{deployment_id: deployment_id})
         {:ok, %{"ingress_proxy" => "started"}}
 
-      {:error, reason} ->
-        ActivityLog.error("infrastructure", "Traefik failed: #{inspect(reason)}", %{
-          deployment_id: deployment_id
-        })
+      # A catch-all, NOT just `{:error, reason}`. `ensure_traefik/0` is a `with` with no
+      # `else`, so it returns whatever any clause returned — including
+      # `Docker.Network.ensure/1`'s shapes. Matching only the three expected returns
+      # raises `CaseClauseError`, which the runner's rescue turns into a failed step and
+      # a full rollback: the precise inversion of this module's contract.
+      other ->
+        unavailable(other, deployment_id)
+    end
+  end
 
-        Logger.warning("[ensure_ingress_proxy] could not ensure Traefik: #{inspect(reason)}")
+  defp unavailable(result, deployment_id) do
+    reason = inspect(result)
 
-        {:ok, %{"ingress_proxy" => "unavailable", "error" => inspect(reason)}}
+    # WARN, not error. This step is best-effort by construction, and
+    # `{:error, :dns_token_missing}` is the expected-normal return for a LAN-only
+    # install — logging at error severity would put a red row on the Activity feed for
+    # every routed deploy on a correctly configured host, in a 100-entry ring buffer
+    # that other events then age out of.
+    ActivityLog.warn("infrastructure", "Traefik not ensured: #{reason}", %{
+      deployment_id: deployment_id
+    })
+
+    Logger.warning("[ensure_ingress_proxy] could not ensure Traefik: #{reason}")
+
+    {:ok, %{"ingress_proxy" => "unavailable", "error" => reason}}
+  end
+
+  # Overridable so a test can drive the returns `ensure_traefik/0` can actually produce
+  # — including the ones it produces by accident, which is the branch that matters.
+  defp ensure_proxy do
+    case Application.get_env(:homelab, :ingress_proxy_ensurer) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> Infrastructure.ensure_traefik()
     end
   end
 
