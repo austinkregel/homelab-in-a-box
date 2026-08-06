@@ -217,6 +217,70 @@ defmodule Homelab.Deployments.Releases do
   end
 
   @doc """
+  Abandons a wedged release: marks it terminal and touches **nothing else**.
+
+  Returns `{:ok, release}`, or `{:noop, release}` if it had already reached a
+  terminal state (so a double-click, or two operators, cannot fight).
+
+  ## Why this and not "cancel by driving compensation"
+
+  `Adoption.apply_service/3` refuses to plan while a release is active, and a
+  release interrupted mid-compensation stays active forever — so before this
+  existed, a wedged release meant that service could never be re-imported and
+  there was no way out short of SQL. Two ways to offer an exit:
+
+    * **Drive it through compensation.** More correct in principle: the saga
+      undoes its own half-finished work. And more dangerous than anything else in
+      this codebase, because compensation acts on a release whose recorded state
+      you have already decided not to trust. `AdoptContainer.compensate/2` removes
+      the managed container and restarts the original; `MigrateCopy.compensate/2`
+      `File.rm_rf`s each recorded `dest`. Run that against a stale handle — hours
+      old, on an install the operator has since repaired by hand — and it tears
+      down the container that is currently serving, using a plan written before
+      any of that happened. The whole reason the release is being abandoned is
+      that nobody believes its state any more.
+
+    * **Mark it terminal and leave every resource exactly as it is.** Honest, and
+      it leaves orphans: a half-created container, a permanent home holding a
+      copy, secrets imported by `AdoptCredentials`. Nothing is destroyed and
+      nothing is claimed to have been undone.
+
+  Only the second is offered. The first is not available anywhere in the UI, and
+  should not be added without a way to re-verify the handles first — an operator
+  who genuinely wants the rollback still has it, by retrying the import (which
+  plans a fresh release against the world as it is now) or by removing the
+  workload from the deployment page, both of which act on OBSERVED state.
+
+  `:failed` rather than a new `:abandoned` status: the release did not complete,
+  which is exactly what `:failed` means everywhere else in the system, and the
+  `error_message` carries the rest. A dedicated status would ripple through every
+  list of statuses for a state that behaves identically in all of them.
+
+  The lease is cleared so the reconciler does not resume what an operator just
+  abandoned.
+  """
+  @abandon_note "Abandoned by an operator. Nothing was stopped, removed or deleted: " <>
+                  "no container, no volume, no directory, no secret. Any half-finished work " <>
+                  "from this release is still on the host, exactly as it was."
+
+  def abandon_release(%Release{} = release, opts \\ []) do
+    note =
+      case Keyword.get(opts, :by) do
+        who when is_binary(who) and who != "" -> @abandon_note <> " (abandoned by #{who})"
+        _ -> @abandon_note
+      end
+
+    transition_release(release, :failed, Release.active_statuses(),
+      error: note,
+      lease_owner: nil,
+      lease_expires_at: nil
+    )
+  end
+
+  @doc "The exact wording an abandoned release records — the UI's confirmation quotes it."
+  def abandon_note, do: @abandon_note
+
+  @doc """
   Compare-and-set a step status. `opts` may carry `:error` and `:handle` (stored
   in `resource_handle`). Returns `{:ok, step}` or `{:noop, step}`.
   """
