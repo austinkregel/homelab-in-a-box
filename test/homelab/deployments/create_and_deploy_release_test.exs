@@ -151,4 +151,159 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
       assert Deployments.get_deployment!(deployment.id).status == :pending
     end
   end
+
+  # Every case above uses a plain deployment, and that is exactly why both of the
+  # bugs below survived: the netns path is the one where `create_and_deploy_release/2`
+  # both resolves an implicit companion AND depends on the release to establish a
+  # precondition the pre-flight would otherwise assert.
+  describe "create_and_deploy_release/2 in a network namespace" do
+    setup %{tenant: tenant} do
+      donor_template =
+        insert(:app_template,
+          name: "Gluetun",
+          slug: "gluetun-#{System.unique_integer([:positive])}",
+          required_env: [],
+          default_env: %{},
+          volumes: [],
+          ports: [%{"internal" => 8000, "role" => "other"}],
+          netns_donor_kind: "gluetun",
+          exposure_mode: :service
+        )
+
+      %{donor_template: donor_template}
+    end
+
+    defp child_attrs(tenant, donor) do
+      template =
+        insert(:app_template,
+          name: "Sonarr #{System.unique_integer([:positive])}",
+          slug: "sonarr-#{System.unique_integer([:positive])}",
+          required_env: [],
+          default_env: %{},
+          volumes: [],
+          ports: [%{"internal" => 8989, "role" => "web"}],
+          exposure_mode: :public
+        )
+
+      %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        network_parent_id: donor.id,
+        domain: "sonarr.example.com"
+      }
+    end
+
+    defp donor(tenant, template, external_id) do
+      insert(:deployment,
+        tenant: tenant,
+        app_template: template,
+        domain: nil,
+        status: if(external_id, do: :running, else: :pending),
+        external_id: external_id
+      )
+    end
+
+    # `create_and_deploy_release/2` resolved the donor into `all_companions` and then
+    # handed that list to the planner, which resolves the donor AGAIN and appends the
+    # caller's companions to it. `netns_donor_companions/1` does not `uniq` and
+    # `plan_release/3` inserts step specs verbatim, so the donor was planned twice.
+    #
+    # Two `:dependency_container` steps for one deployment is the orphan-container class
+    # this tier exists to close: both write `external_id`, so only the second is
+    # compensatable and the first container is stranded — or the second collides on
+    # `service_name/2` and fails a release that should have succeeded.
+    test "plans the netns donor exactly once", %{tenant: tenant, donor_template: dt} do
+      donor = donor(tenant, dt, "gluetun-container-1")
+
+      assert {:ok, %{release: release}} =
+               Deployments.create_and_deploy_release(child_attrs(tenant, donor))
+
+      donor_handle = %{"deployment_id" => donor.id}
+
+      deps =
+        Enum.filter(
+          release.steps,
+          &(&1.type == :dependency_container and
+              &1.resource_handle == donor_handle)
+        )
+
+      assert length(deps) == 1
+
+      waits =
+        Enum.filter(
+          release.steps,
+          &(&1.type == :await_health and
+              &1.resource_handle == donor_handle)
+        )
+
+      assert length(waits) == 1
+    end
+
+    # The pre-flight built the CHILD's spec, and `resolve_netns_donor/1` fails closed on
+    # a donor with no container — which is precisely the state of a donor this same
+    # release is about to deploy. So the transaction rolled back and the child was never
+    # created, for the exact case the saga exists to handle. SpecBuilder's own comment
+    # says release ordering is what normally prevents this; the pre-flight was asserting
+    # a precondition the release establishes.
+    test "creates a child whose donor this release has not deployed yet", %{
+      tenant: tenant,
+      donor_template: dt
+    } do
+      donor = donor(tenant, dt, nil)
+
+      assert {:ok, %{deployment: child, release: release}} =
+               Deployments.create_and_deploy_release(child_attrs(tenant, donor))
+
+      assert child.network_parent_id == donor.id
+      assert Deployments.get_deployment!(child.id)
+
+      # ...and the plan is what makes it safe: the donor is deployed and awaited healthy
+      # before the child's container is created against its id.
+      types = release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type)
+
+      assert Enum.find_index(types, &(&1 == :dependency_container)) <
+               Enum.find_index(types, &(&1 == :app_container))
+    end
+
+    # The relaxation must be surgical. `:missing_required_env` is checked BEFORE the
+    # donor is resolved in `SpecBuilder.build/1`, so skipping a not-running donor costs
+    # nothing — every other pre-flight failure still fails fast.
+    test "still fails fast on missing env for a child of an undeployed donor", %{
+      tenant: tenant,
+      donor_template: dt
+    } do
+      donor = donor(tenant, dt, nil)
+
+      template =
+        insert(:app_template,
+          slug: "needs-env-#{System.unique_integer([:positive])}",
+          required_env: ["MUST_HAVE_KEY"],
+          default_env: %{},
+          volumes: [],
+          ports: []
+        )
+
+      assert {:error, {:missing_required_env, ["MUST_HAVE_KEY"]}} =
+               Deployments.create_and_deploy_release(%{
+                 tenant_id: tenant.id,
+                 app_template_id: template.id,
+                 network_parent_id: donor.id
+               })
+    end
+
+    # And a donor that is genuinely absent is still a hard failure — the relaxation is
+    # scoped to donors THIS release will deploy, not to netns errors in general.
+    test "still fails when the donor is not part of this release at all", %{tenant: tenant} do
+      template = clean_template()
+
+      # A deployment whose parent row was deleted out from under it cannot be built,
+      # and no companion set makes that true.
+      assert {:error, %Ecto.Changeset{}} =
+               Deployments.create_and_deploy_release(%{
+                 tenant_id: tenant.id,
+                 app_template_id: template.id,
+                 network_parent_id: 999_999
+               })
+    end
+  end
 end
