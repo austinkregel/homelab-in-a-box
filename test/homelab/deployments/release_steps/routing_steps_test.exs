@@ -263,7 +263,7 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     test "compensate leaves unmanaged records alone" do
       stub_dns_provider()
       app = routed_deployment("mixed.example.test")
-      {:ok, _} = PublishDns.run(step(%{}), ctx(app))
+      {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
 
       [managed | _] = Networking.list_dns_records_for_deployment(app.id)
 
@@ -278,10 +278,77 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
           dns_zone_id: managed.dns_zone_id
         })
 
-      assert :ok = PublishDns.compensate(step(%{"deployment_id" => app.id}), ctx(app))
+      assert :ok = PublishDns.compensate(step(handle), ctx(app))
 
       assert [survivor] = Networking.list_dns_records_for_deployment(app.id)
       assert survivor.managed == false
+    end
+
+    # `run/2` UPSERTS, so it is not the only writer of the rows it touches; `managed:
+    # true` is set unconditionally on every record of every release and distinguishes
+    # homelab-written from operator-hand-made, not release-2's rows from release-1's.
+    # Compensating through `cleanup_deployment_dns_records/1` therefore deleted every
+    # managed record the DEPLOYMENT holds, including ones this step never wrote.
+    #
+    # The domain move is where that is unambiguous: release 1 publishes `old`, the
+    # operator moves the name, release 2 publishes `new` and rolls back. The `old`
+    # records are not release 2's to destroy — they are still the deployment's only
+    # resolving name, and the world is still cached against them.
+    test "compensate removes only the records this step actually wrote" do
+      stub_dns_provider()
+      app = routed_deployment("old.example.test")
+
+      {:ok, _first} = PublishDns.run(step(%{}), ctx(app))
+      old_ids = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert old_ids != []
+
+      {:ok, _} = Deployments.update_deployment(app, %{domain: "new.example.test"})
+      moved = Deployments.get_deployment!(app.id)
+
+      {:ok, second} = PublishDns.run(step(%{}), ctx(moved))
+      assert :ok = PublishDns.compensate(step(second), ctx(moved))
+
+      surviving = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert Enum.sort(surviving) == Enum.sort(old_ids)
+    end
+
+    # The other half of "only what this step recorded": a record re-pointed at another
+    # deployment between the write and the undo is no longer ours, even though its id is
+    # still in our handle.
+    test "compensate leaves a record that now belongs to another deployment" do
+      stub_dns_provider()
+      app = routed_deployment("moved.example.test")
+      other = routed_deployment("elsewhere.example.test")
+
+      {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
+
+      for record <- Networking.list_dns_records_for_deployment(app.id) do
+        {:ok, _} = Networking.update_dns_record(record, %{deployment_id: other.id})
+      end
+
+      assert :ok = PublishDns.compensate(step(handle), ctx(app))
+      assert Networking.list_dns_records_for_deployment(other.id) != []
+    end
+
+    # A compensation that could not reach the provider has undone nothing externally.
+    # Reporting `:ok` there is exactly the "orphan nothing can ever clean up" this
+    # module's own moduledoc claims the design prevents: the release settles
+    # `:rolled_back`, the operator is told the world is clean, and the A record is still
+    # live at Cloudflare pointing at a container that no longer exists.
+    test "compensate fails when the provider refuses the deletion" do
+      stub_dns_provider()
+      app = routed_deployment("stuck.example.test")
+
+      {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
+
+      stub(Homelab.Mocks.DnsProvider, :delete_record, fn _zone, _id ->
+        {:error, {:api_error, 500, "nope"}}
+      end)
+
+      assert {:error, _reason} = PublishDns.compensate(step(handle), ctx(app))
+
+      # And the local rows are kept, so a retry still knows what to delete.
+      assert Networking.list_dns_records_for_deployment(app.id) != []
     end
   end
 
@@ -290,10 +357,28 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     # and keeps working. `detect_ip_config/0` is the one thing they now SHARE, so the
     # saga and the imperative path cannot publish two different addresses for the same
     # deployment.
-    test "detect_ip_config/0 is the single source both paths read" do
-      config = Deployments.detect_ip_config()
-      assert Map.has_key?(config, :internal_ip)
-      assert config.internal_ip == config.public_ip
+    #
+    # Asserted against the VALUE that reaches the record, not against the shape of the
+    # map. The earlier version of this test read `detect_ip_config/0` and checked it had
+    # an `:internal_ip` equal to its `:public_ip` — true of the function whether or not
+    # anything calls it, so hardcoding an address in `PublishDns.run/2` left it green
+    # and the drift it exists to prevent went unmeasured.
+    test "detect_ip_config/0 is the address the saga actually publishes" do
+      stub_dns_provider()
+      expected = Deployments.detect_ip_config()
+      assert expected.internal_ip == expected.public_ip
+      assert is_binary(expected.internal_ip)
+
+      app = routed_deployment("shared-ip.example.test")
+      assert {:ok, _} = PublishDns.run(step(%{}), ctx(app))
+
+      values =
+        app.id
+        |> Networking.list_dns_records_for_deployment()
+        |> Enum.map(& &1.value)
+        |> Enum.uniq()
+
+      assert values == [expected.internal_ip]
     end
   end
 end
