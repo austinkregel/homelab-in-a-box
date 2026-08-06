@@ -181,6 +181,31 @@ defmodule Homelab.Networking do
     |> Repo.all()
   end
 
+  @doc """
+  Every record row that already resolves `fqdn`, whoever wrote it.
+
+  Deliberately NOT scoped to a deployment. The question this answers is "which of these
+  rows did I not write", and the rows a caller did not write are precisely the ones
+  belonging to another deployment, to an earlier release, or to nobody — so scoping by
+  `deployment_id` would return an empty answer for the cases that matter.
+
+  Decomposed into zone + record name the same way `ensure_deployment_dns_records/2`
+  does, so a caller asking this before an upsert sees exactly the rows that upsert is
+  about to take over.
+  """
+  def list_dns_records_for_fqdn(fqdn) when is_binary(fqdn) do
+    zone_name = extract_zone_name(fqdn)
+    record_name = extract_record_name(fqdn, zone_name)
+
+    DnsRecord
+    |> join(:inner, [r], z in assoc(r, :dns_zone))
+    |> where([r, z], z.name == ^zone_name and r.name == ^record_name)
+    |> preload(:dns_zone)
+    |> Repo.all()
+  end
+
+  def list_dns_records_for_fqdn(_fqdn), do: []
+
   def get_dns_record(id) do
     case Repo.get(DnsRecord, id) do
       nil -> {:error, :not_found}

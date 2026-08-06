@@ -17,7 +17,7 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
   release that reports `:running` for a routed app whose name resolves nowhere is the
   exact "success for durable work that did not happen" this step exists to prevent.
 
-  ## `compensate/2`: exactly the records THIS step wrote
+  ## `compensate/2`: exactly the records THIS step CREATED
 
   A DNS A record is the one artifact in this plan that is externally visible and
   **cached by resolvers** — leaving it behind after a rollback points the world at a
@@ -31,6 +31,21 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
   most visibly after a domain move, where rolling back the release that published the
   NEW name also destroyed the OLD name the deployment is still answering to and the
   world is still cached against.
+
+  Recording the ids is necessary and was not sufficient. `upsert_dns_record/2` takes
+  over whatever row already resolves the name — any writer's — so the SAME-name case
+  slipped through the id scoping: release 2 republishes a name release 1 published,
+  records those ids as its own, and its rollback deletes them at the provider. The
+  deployment reverts to the container it was already running, and its name resolves
+  nowhere. So `run/2` reads the rows that already resolve the name BEFORE it upserts and
+  subtracts them: what it took over is recorded as `"took_over_record_ids"` for the
+  account, and only what it CREATED goes into `"record_ids"`.
+
+  This is the rule `SyncDomain` already applies to the `Domain` row — delete a row this
+  step created, leave one it only reclaimed — and the two now agree. It is what makes an
+  adoption rollback safe: an adoption that rolls back must leave the ORIGINAL serving,
+  and deleting the record the original is reached at would make the rollback worse than
+  never adopting.
 
   The deletion goes through `Networking.delete_dns_records_for/2`, which pushes to the
   provider FIRST and keeps the local row if that push is refused: dropping the row
@@ -66,6 +81,11 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
   def run(step, ctx) do
     deployment = Deployments.get_deployment!(target_id(step, ctx))
 
+    # Read BEFORE the upsert: the rows that already resolve this name are the ones
+    # `ensure_deployment_dns_records/2` is about to take over rather than create, and
+    # after it has run there is nothing left to tell them apart by. See the moduledoc.
+    took_over = preexisting_ids(deployment.domain)
+
     case Networking.ensure_deployment_dns_records(deployment, Deployments.detect_ip_config()) do
       {:ok, results} ->
         {written, failed} = Enum.split_with(results, &match?({:ok, _}, &1))
@@ -83,7 +103,14 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
             # without retiring the previous one. Both sets are this step's to undo.
             # (`record_count` stays this attempt's count: it describes what was just
             # written, which is what the Activity line reports.)
-            "record_ids" => Enum.uniq(recorded_ids(step) ++ written_ids(written)),
+            #
+            # Minus the rows that already existed. Those were taken over, not created,
+            # and are not this step's to delete — see the moduledoc. The union above is
+            # what keeps that correct across a reclaim: a row THIS step created on an
+            # earlier attempt is "pre-existing" by the time the re-run reads, and is
+            # carried back in from the handle rather than re-derived.
+            "record_ids" => Enum.uniq(recorded_ids(step) ++ (written_ids(written) -- took_over)),
+            "took_over_record_ids" => took_over,
             "record_count" => length(written)
           }
 
@@ -130,6 +157,11 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
   end
 
   defp written_ids(written), do: Enum.map(written, fn {:ok, record} -> record.id end)
+
+  defp preexisting_ids(domain) when is_binary(domain) and domain != "",
+    do: domain |> Networking.list_dns_records_for_fqdn() |> Enum.map(& &1.id)
+
+  defp preexisting_ids(_domain), do: []
 
   defp recorded_ids(step) do
     case (step.resource_handle || %{})["record_ids"] do

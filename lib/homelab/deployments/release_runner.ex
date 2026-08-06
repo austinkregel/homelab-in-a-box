@@ -17,7 +17,8 @@ defmodule Homelab.Deployments.ReleaseRunner do
       rather than double-driving. It is held for the whole time a step runs, not
       just between steps — a step is not interruptible and can run far longer
       than the TTL, so a HEARTBEAT renews it while the handler works (see
-      `with_lease_heartbeat/3`).
+      `with_lease_heartbeat/3`). The same heartbeat wraps the whole
+      COMPENSATION walk, which can outlast the TTL just as easily.
     * On resume the runner first reclaims any step left `:running` by a crashed
       node back to `:pending` so it re-runs from scratch — which is safe because
       handlers are required to be idempotent.
@@ -80,20 +81,36 @@ defmodule Homelab.Deployments.ReleaseRunner do
   Nothing is lost by not raising: `Reconciler.resume_stuck_releases/0` re-enqueues
   every release with no live lease on its next tick, so the un-enqueued release is
   picked up automatically. The worst case is a delay.
+
+  ## Why the `rescue`, and why it is the load-bearing half
+
+  A `case` on `{:error, reason}` alone did not survive the failure named above.
+  `Oban.insert/1` returns `{:error, changeset}` for a CHANGESET failure — a shape this
+  function's callers can never actually produce, since the args are built right here.
+  A BACKEND failure — the queue's Postgres unreachable, its connection pool exhausted,
+  its jobs table missing — RAISES, out of `Engine.insert_job` -> `Repo.transaction`.
+
+  So the only branch that ever fired was the one that could not happen, and the
+  unreachable-queue case propagated a `Postgrex.Error` to a caller that had already
+  committed a `:planning` release. Both are downgraded now; the guarantee is "always
+  `:ok`", and a guarantee with an exception in it is not one.
   """
   def enqueue_or_log(%Release{} = release) do
     case enqueue(release) do
-      {:ok, _job} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "[release] #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
-            "the reconciler will resume it"
-        )
-
-        :ok
+      {:ok, _job} -> :ok
+      {:error, reason} -> log_not_enqueued(release, reason)
     end
+  rescue
+    e -> log_not_enqueued(release, e)
+  end
+
+  defp log_not_enqueued(release, reason) do
+    Logger.error(
+      "[release] #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
+        "the reconciler will resume it"
+    )
+
+    :ok
   end
 
   # --- Engine (directly callable, used by Oban and by tests) ----------------
@@ -337,7 +354,26 @@ defmodule Homelab.Deployments.ReleaseRunner do
     _ = Releases.acquire_lease(release, owner, lease_ttl_seconds())
     ctx = build_ctx(release)
 
-    case compensate_all(Releases.completed_steps_desc(release), ctx) do
+    # The WHOLE walk under a heartbeat, not just the acquire at the top.
+    #
+    # The forward path renews while a handler runs; compensation took the lease once
+    # here and then ran unheartbeated under a 120s TTL. A rollback undeploying several
+    # containers — each a stop with the daemon's stop timeout, a force-rm and a network
+    # prune — exceeds that, at which point `list_resumable_releases/0` hands the release
+    # to a second runner while this one is still compensating. Two runners compensating
+    # one release is exactly the state the lease exists to prevent; the compare-and-set
+    # transitions keep it from corrupting the ROW, but nothing makes the handlers' side
+    # effects safe to run twice concurrently (`FileCopy`'s `File.rm_rf!` is the standing
+    # example on the forward path).
+    #
+    # Wrapped around the walk rather than around each `handler.compensate/2`, because
+    # the gap being closed is the elapsed time of the walk, and the transitions BETWEEN
+    # steps are inside it too. Same non-escalation rule as the forward path: a lost
+    # lease is logged, not raised — compensation that is already running cannot be
+    # un-run, and the loser's CAS transitions no-op.
+    walk = fn -> compensate_all(Releases.completed_steps_desc(release), ctx) end
+
+    case with_lease_heartbeat(release_id, owner, walk) do
       :ok ->
         release = Releases.get_release(release_id)
 

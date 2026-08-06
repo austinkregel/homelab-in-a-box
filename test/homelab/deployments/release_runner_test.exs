@@ -305,6 +305,83 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  describe "lease heartbeat (a compensation walk longer than the TTL)" do
+    # The forward path renews the lease while a handler runs. Compensation did not: the
+    # lease was acquired once at the top of `rollback/3` and the whole descending walk
+    # ran under it. A rollback undeploying several containers — each a stop with the
+    # daemon's timeout, a force-rm and a network prune — outlives the TTL, and
+    # `list_resumable_releases/0` then hands the release to a SECOND runner while the
+    # first is still compensating.
+    defmodule SlowCompensator do
+      @behaviour Homelab.Deployments.ReleaseStep.Handler
+
+      @impl true
+      def run(step, _ctx) do
+        cfg = Application.get_env(:homelab, :test_release_handler)
+
+        if step.position == cfg[:fail_at],
+          do: {:error, {:boom, step.position}},
+          else: {:ok, %{"ran" => step.position}}
+      end
+
+      @impl true
+      def compensate(step, _ctx) do
+        cfg = Application.get_env(:homelab, :test_release_handler)
+
+        # The FIRST step compensated (the walk is descending) sits past the TTL. The
+        # next one then reports whether a rival runner could have taken the release
+        # out from under it — which is the actual damage, not the elapsed time.
+        # Comfortably past the 1s TTL. `lease_expires_at` is `:utc_datetime`, so both
+        # sides of the comparison are truncated to whole seconds and a margin under
+        # ~1s makes the answer depend on where in the second the walk started.
+        if step.position == cfg[:slow_at] do
+          Process.sleep(2_500)
+        else
+          send(
+            cfg.pid,
+            {:rival, step.position, Releases.acquire_lease(cfg.release, "rival-runner", 120)}
+          )
+        end
+
+        :ok
+      end
+    end
+
+    setup do
+      Application.put_env(:homelab, :release_step_handlers, %{default: SlowCompensator})
+      Application.put_env(:homelab, :release_lease_ttl_seconds, 1)
+      Application.put_env(:homelab, :release_lease_heartbeat_ms, 100)
+
+      on_exit(fn ->
+        Application.delete_env(:homelab, :release_lease_ttl_seconds)
+        Application.delete_env(:homelab, :release_lease_heartbeat_ms)
+      end)
+
+      :ok
+    end
+
+    test "the lease is held for the whole walk, not just its first step" do
+      release = plan(insert(:deployment), [:network, :app_container, :publish_ingress])
+
+      Application.put_env(:homelab, :test_release_handler, %{
+        pid: self(),
+        fail_at: 3,
+        slow_at: 2,
+        release: release
+      })
+
+      assert {:cancel, _} = ReleaseRunner.run(release.id, owner: "rb-owner")
+
+      # Step 2 compensated slowly; step 1 then asked whether anyone else could have
+      # grabbed the release mid-walk. Without a heartbeat the 1s lease has lapsed and
+      # the answer is yes.
+      assert_received {:rival, 1, result}
+
+      assert result == :taken,
+             "a second runner acquired the lease mid-compensation: #{inspect(result)}"
+    end
+  end
+
   describe "lease contention" do
     test "snoozes when another owner holds an unexpired lease" do
       release = plan(insert(:deployment))
@@ -316,6 +393,30 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       # No work happened.
       refute_received {:run, _, _}
       assert Releases.get_release(release.id).status == :planning
+    end
+  end
+
+  describe "enqueue_or_log/1" do
+    # The one case this function exists for is the one it did not handle.
+    #
+    # Its docstring names "the job queue was briefly unreachable", and it matched only
+    # `{:error, reason}`. `Oban.insert/1` returns that shape for a CHANGESET failure; a
+    # BACKEND failure raises out of `Engine.insert_job` -> `Repo.transaction`. So the
+    # raise propagated to a caller holding an already-committed `:planning` release —
+    # `deploy_release/2`, `create_and_deploy_release/2`, `redeploy_netns_stack/1` and
+    # `Adoption.apply_service/3` — and each reported a failed deploy for a release that
+    # is in fact fine and that the reconciler will resume.
+    #
+    # Broken at the backend rather than by stubbing `enqueue/1`: the point is that
+    # `Oban.insert/1` RAISES, and a test that asserted anything else would pass over a
+    # function that still only matched `{:error, _}`. The DDL runs inside the sandbox
+    # transaction, so it is undone with everything else.
+    test "survives a backend failure, which raises rather than returning an error" do
+      release = plan(insert(:deployment))
+
+      Homelab.ObanRepo.query!("ALTER TABLE oban_jobs RENAME TO oban_jobs_unreachable")
+
+      assert :ok = ReleaseRunner.enqueue_or_log(release)
     end
   end
 

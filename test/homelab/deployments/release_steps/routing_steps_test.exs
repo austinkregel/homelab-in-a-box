@@ -414,6 +414,36 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert Networking.list_dns_records_for_deployment(app.id) == []
     end
 
+    # The same rule `SyncDomain` already applies to the `Domain` row, applied to the A
+    # record: delete only what this step CREATED, never a row it merely upserted over.
+    #
+    # `run/2` upserts, and `upsert_dns_record/2` takes over whatever row already resolves
+    # the name — any writer's, `managed` flag rewritten to true. So a release that
+    # republishes a name the deployment is ALREADY serving at records the pre-existing
+    # ids as its own, and a rollback deletes them at the provider. The deployment reverts
+    # to the container it was already running and its name now resolves nowhere.
+    #
+    # The plain shape is a redeploy: release 1 publishes, release 2 republishes the same
+    # name and fails. It is worse under adoption, where the rollback contract is that the
+    # ORIGINAL keeps serving — a compensation that removes the record the original is
+    # reached at makes the rollback worse than never having adopted.
+    test "compensate leaves a record it only took over" do
+      stub_dns_provider()
+      app = routed_deployment("kept.example.test")
+
+      # Release 1 publishes the name, succeeds, and stays.
+      {:ok, _first} = PublishDns.run(step(%{}), ctx(app))
+      existing = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert existing != []
+
+      # Release 2 republishes the SAME name, then rolls back.
+      {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
+      assert :ok = PublishDns.compensate(step(handle), ctx(app))
+
+      surviving = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert Enum.sort(surviving) == Enum.sort(existing)
+    end
+
     # A compensation that could not reach the provider has undone nothing externally.
     # Reporting `:ok` there is exactly the "orphan nothing can ever clean up" this
     # module's own moduledoc claims the design prevents: the release settles

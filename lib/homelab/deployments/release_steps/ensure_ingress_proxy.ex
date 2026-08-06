@@ -35,11 +35,39 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   deploy impossible on those installs — a far worse regression than the gap it would
   close, and a behaviour change to a path this step is meant to preserve.
 
-  The failure is not swallowed, though: it is written to the ActivityLog *and*
-  recorded in `resource_handle` as `"ingress_proxy" => "unavailable"` with the
-  reason, so a release that published a route onto a proxy nobody could ensure says
-  so on the record. Actual reachability is still gated by `PublishIngress`, which
-  does fail closed.
+  ## What actually backstops this — NOT what this moduledoc used to claim
+
+  It used to say "actual reachability is still gated by `PublishIngress`, which does
+  fail closed." That is false. `publish_deployment/1` -> `DockerEngine.publish/2`
+  CREATES the ingress network itself (`ensure_network/1`) and attaches the container to
+  it. It fails closed on the ATTACHMENT, and never checks that Traefik exists or is on
+  that network. A missing proxy passes it every time.
+
+  What is true is narrower, and worth stating exactly because it is the whole safety
+  argument:
+
+    * The attach is genuinely fail-closed, on every topology. Where `publish_ingress`
+      is planned it happens there; where it is NOT planned (netns donor, netns child,
+      `:host_network`) it still happens at container-create time via
+      `DockerEngine.maybe_connect_routing_network/2`, which returns
+      `{:network_attach_failed, _, _}` rather than swallowing it.
+    * So "the workload is on the ingress network" is guaranteed. "Something is
+      listening on the other end of it" is not guaranteed by anything in the plan.
+
+  A missing proxy is therefore a real and reachable outcome of a green release, which
+  is why the failure is recorded rather than merely logged: to the ActivityLog, to
+  `resource_handle` as `"ingress_proxy" => "unavailable"` with the reason, and — since
+  neither of those reaches the operator, one being a 100-entry ring buffer and the
+  other rendered nowhere — onto the step's own `error_message`, which the release card
+  renders underneath the step. The release is green and says why the route may not
+  resolve.
+
+  Not failing the release is still right: `{:error, :dns_token_missing}` is the
+  expected-normal return for a LAN-only install and for anyone running Traefik from
+  their own compose file, and hard-failing would make every routed deploy on those
+  hosts impossible. The defect class this tier removes is "reports success for work it
+  did not do" — and a step that completes while saying, on the record the operator
+  reads, that it could not ensure the proxy is not that.
 
   That contract only holds if EVERY return is handled. `ensure_traefik/0` is a `with`
   with no `else`, so it returns whatever any clause returned, and a `case` listing only
@@ -51,6 +79,7 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
 
   require Logger
 
+  alias Homelab.Deployments.Releases
   alias Homelab.Infrastructure
   alias Homelab.Services.ActivityLog
 
@@ -72,12 +101,19 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
       # raises `CaseClauseError`, which the runner's rescue turns into a failed step and
       # a full rollback: the precise inversion of this module's contract.
       other ->
-        unavailable(other, deployment_id)
+        unavailable(step, other, deployment_id)
     end
   end
 
-  defp unavailable(result, deployment_id) do
+  defp unavailable(step, result, deployment_id) do
     reason = inspect(result)
+
+    # On the STEP row, which is the only durable, release-scoped place an operator
+    # actually looks — the release card renders this field under the step. The
+    # ActivityLog entry below is a 100-entry ring buffer and the `resource_handle` key
+    # is rendered nowhere, so without this a release reports `:running` for a route no
+    # proxy is serving and says nothing about it anywhere the operator will see.
+    _ = Releases.record_step_note(step, "Traefik not ensured: #{reason}")
 
     # WARN, not error. This step is best-effort by construction, and
     # `{:error, :dns_token_missing}` is the expected-normal return for a LAN-only

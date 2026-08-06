@@ -68,7 +68,7 @@ defmodule Homelab.Deployments.Adoption do
              netns_attrs(service[:deployment_attrs] || %{}, donor)
            ),
          :ok <- ensure_no_active_release(deployment.id),
-         {:ok, release} <- plan(deployment, steps(service, donor), service) do
+         {:ok, release} <- plan(deployment, steps(service, donor, deployment), service) do
       # Enqueue after the release is committed (Oban lives on ObanRepo; the worker
       # must be able to read the release row). A failed enqueue is logged, not raised:
       # the release is already committed, so raising would abort an adoption that in
@@ -122,7 +122,67 @@ defmodule Homelab.Deployments.Adoption do
   defp netns_attrs(attrs, nil), do: attrs
   defp netns_attrs(attrs, donor), do: Map.put(attrs, :network_parent_id, donor.id)
 
-  defp steps(service, nil), do: service.phase1 ++ service.phase2
+  # The full ordered plan for one service: the planner's pure phases, wrapped in the
+  # ROUTING steps the other two planners already emit.
+  #
+  # `AdoptionPlanner` cannot build these itself — it is pure by construction and the
+  # `Deployment` row does not exist until `get_or_create_deployment/3` above has run, and
+  # the routing predicates are all reads of that row (its domain, its effective exposure,
+  # its netns children). So they are composed here, from `Deployments`' own builders, and
+  # the predicate has exactly one definition.
+  #
+  # ## Why the proxy goes first and the name goes last
+  #
+  # `ensure_ingress_proxy` at position 1, matching greenfield: the proxy is a
+  # precondition of the route, not a product of it. In an adoption that is also the
+  # cheapest possible place to fail — ahead of `backup_verify`, so nothing has been
+  # quiesced, copied or cut over and there is nothing to unwind.
+  #
+  # The name (`sync_domain`, `publish_dns`) and reachability (`publish_ingress`) go at
+  # the very END, after `verify_integrity`. Adoption IS a cutover, but the name is not
+  # one the plane already holds: before adoption there is no `Domain` row and no
+  # plane-written A record — that absence is the gap being closed — so these steps are a
+  # first claim, not a re-point, and there is no continuity to preserve by publishing
+  # early. Publishing early is strictly worse in three ways:
+  #
+  #   * `quiesce_old` deliberately STOPS the original for the length of the data copy.
+  #     A name advertised in phase 1 resolves, through that whole window, to a proxy
+  #     with no backend — and resolvers cache it.
+  #   * between phase 1 and `adopt_container` the managed container does not exist at
+  #     all. `redeploy_netns_stack/1` already makes this argument for its own ingress
+  #     step: publishing before the workload exists serves 502s on a working name.
+  #   * `sync_domain`'s first act is `retire_stale_domains/2`, which DELETES this
+  #     deployment's rows for every other name. Running that before the cutover has
+  #     proven the replacement can serve destroys domain state for a workload that may
+  #     then roll back.
+  #
+  # `verify_integrity` is adoption's proof that the managed container came up on the
+  # migrated data. Claiming the name after it means the name is never advertised for
+  # something unproven.
+  #
+  # ## What this means on ROLLBACK
+  #
+  # Compensation walks descending, so the undo order is: detach ingress, delete the A
+  # records, delete the `Domain` row, and only then unwind the cutover back to the
+  # original container. That is the correct direction — reachability is severed before
+  # the backend it points at is taken away.
+  #
+  # The DNS delete is safe here for one specific reason, and it is worth stating because
+  # the alternative is catastrophic: an adoption that rolls back must leave the ORIGINAL
+  # serving, so a compensation that deleted the record the original is reached at would
+  # be worse than never adopting. It does not: `PublishDns.compensate/2` deletes only
+  # records its own `run/2` CREATED, never one it merely upserted over. A name the
+  # operator was already resolving survives the rollback, exactly as `SyncDomain` already
+  # refuses to delete a `Domain` row it only reclaimed.
+  defp steps(service, donor, deployment) do
+    Deployments.ingress_proxy_steps(deployment) ++
+      service.phase1 ++
+      donor_barrier(donor) ++
+      service.phase2 ++
+      Deployments.ingress_steps(deployment)
+  end
+
+  defp donor_barrier(nil), do: []
 
   # The cutover embeds the donor's CONTAINER id in the child's create payload, so it
   # cannot run until the donor's managed container exists and is up. Adopting the donor
@@ -137,17 +197,16 @@ defmodule Homelab.Deployments.Adoption do
   # A generous timeout because what it is waiting behind is another service's data copy,
   # which for a media library is minutes to hours — the 2-minute default would roll this
   # release back for no reason other than that the donor was big.
-  defp steps(service, donor) do
-    service.phase1 ++
-      [
-        %{
-          type: :await_health,
-          resource_handle: %{
-            "deployment_id" => donor.id,
-            "timeout_ms" => netns_donor_timeout_ms()
-          }
+  defp donor_barrier(donor) do
+    [
+      %{
+        type: :await_health,
+        resource_handle: %{
+          "deployment_id" => donor.id,
+          "timeout_ms" => netns_donor_timeout_ms()
         }
-      ] ++ service.phase2
+      }
+    ]
   end
 
   defp netns_donor_timeout_ms,
