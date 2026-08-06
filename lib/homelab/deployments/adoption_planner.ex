@@ -16,18 +16,34 @@ defmodule Homelab.Deployments.AdoptionPlanner do
 
   @doc """
   Discovers in-scope containers and returns a per-service review model, or an error.
+
+  The adoption root is resolved FIRST, through the non-raising
+  `AdoptionPolicy.fetch_adoption_root/0`. Every scope decision below reads it, so
+  an unconfigured root on a containerized install would otherwise raise from
+  inside `service_in_scope?/3` and take the caller down; here it is an ordinary
+  `{:error, :adoption_root_unconfigured}` the Import screen can explain.
   """
   def review do
-    case AdoptionDiscovery.discover_in_scope() do
-      # Ordered donor-first here too, so the list of checkboxes reads in the order things
-      # will actually be applied. Discovery order is the daemon's, which put a tunneled app
-      # above the container holding its network — and since the apply IS sequential and
-      # halts on the first failure, that ordering read as the cause of the failure rather
-      # than as an unrelated detail of how the list happened to be sorted.
-      {:ok, captures} -> {:ok, captures |> Enum.map(&to_review/1) |> order_donors_first()}
-      {:error, reason} -> {:error, reason}
+    with {:ok, _root} <- AdoptionPolicy.fetch_adoption_root(),
+         # Ordered donor-first here too, so the list of checkboxes reads in the order
+         # things will actually be applied. Discovery order is the daemon's, which put a
+         # tunneled app above the container holding its network — and since the apply IS
+         # sequential and halts on the first failure, that ordering read as the cause of
+         # the failure rather than as an unrelated detail of how the list was sorted.
+         {:ok, captures} <- AdoptionDiscovery.discover_in_scope() do
+      {:ok, captures |> Enum.map(&to_review/1) |> order_donors_first()}
     end
   end
+
+  @doc """
+  The deterministic `AppTemplate` slug an adopted container gets: `adopted-<slug>`.
+
+  Public because it is an IDENTITY, not an implementation detail — it is how a
+  caller asks "has this container already been imported?" without duplicating the
+  slugging rule (`Adoption.upsert_template/1` looks the template up by exactly
+  this, and the Import preview looks the deployment up through it).
+  """
+  def template_slug(container_name), do: "adopted-#{slug(container_name)}"
 
   @doc """
   Builds a dry-run plan from selected review entries (the maps `review/0` returns).
@@ -132,7 +148,7 @@ defmodule Homelab.Deployments.AdoptionPlanner do
     targets = Enum.map(review.preserve, &target(name, &1, strategy))
 
     template_attrs = %{
-      slug: "adopted-#{slug(name)}",
+      slug: template_slug(name),
       name: name,
       version: "adopted",
       image: review.image,
