@@ -279,6 +279,37 @@ defmodule Homelab.Deployments.Releases do
     merged
   end
 
+  @doc """
+  Records a human-readable note on a step without touching its status.
+
+  For the handler that SUCCEEDS while telling the operator something went wrong — of
+  which `EnsureIngressProxy` is the whole category. It is best-effort by construction
+  (`ensure_traefik/0` returns `{:error, :dns_token_missing}` on any LAN-only install,
+  and failing there would make every routed deploy impossible), so it must complete;
+  but a green step with no message is how a release reports `:running` for a route
+  nothing is proxying.
+
+  It writes `error_message` because that is the field the release card renders under a
+  step. A second "warning" column would be the tidier schema and would show up nowhere.
+
+  Safe against the runner's completion compare-and-set, which sets `status` and
+  `resource_handle` and passes no `:error` — `put_kw/3` skips a nil, so the note
+  survives the step being completed.
+
+  Like `record_step_handle/2`: not a CAS (the step is `:running` and owned by this
+  runner under a held lease), and a no-op on a bare struct so handlers stay callable in
+  unit tests.
+  """
+  def record_step_note(%ReleaseStep{id: nil}, _note), do: :ok
+
+  def record_step_note(%ReleaseStep{id: id}, note) when is_binary(note) do
+    ReleaseStep
+    |> where([s], s.id == ^id)
+    |> Repo.update_all(set: [error_message: note, updated_at: naive_now()])
+
+    :ok
+  end
+
   # --- Lease ----------------------------------------------------------------
 
   @doc """
