@@ -170,7 +170,7 @@ defmodule HomelabWeb.Layouts do
                 id="notif-dropdown"
                 phx-window-keydown={JS.hide(to: "#notif-dropdown")}
                 phx-key="escape"
-                class="hidden absolute bottom-full right-0 mb-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-base-content/10 bg-base-100 shadow-xl z-50"
+                class="hidden absolute bottom-full left-0 mb-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-base-content/10 bg-base-100 shadow-xl z-50"
               >
                 <div class="flex items-center justify-between px-4 py-2.5 border-b border-base-content/[0.06]">
                   <span class="text-sm font-semibold text-base-content">Notifications</span>
