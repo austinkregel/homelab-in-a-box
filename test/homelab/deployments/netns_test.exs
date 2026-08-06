@@ -479,6 +479,38 @@ defmodule Homelab.Deployments.NetnsTest do
                Enum.find_index(types, &(&1 == :dependency_container))
     end
 
+    # The compose shape `netns_donor_companions/1`'s own comment names: a bundle where
+    # gluetun is BOTH the namespace donor and an explicit companion. The comment claimed
+    # the set was de-duplicated "because planning it twice would deploy it twice"; no
+    # dedup existed anywhere on the path, so the donor got two `:dependency_container`
+    # steps. Both write `external_id`, so only the second is compensatable and the first
+    # container is orphaned.
+    #
+    # Fixed at the root rather than at a call site, so the invariant the comment asserts
+    # is actually enforced for every caller — `deploy_wizard_live.ex` reaches this
+    # directly with an explicit companion list.
+    test "a donor that is also an explicit companion is planned once", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} =
+        Deployments.deploy_release(Deployments.get_deployment!(child.id), [
+          Deployments.get_deployment!(ctx.donor.id)
+        ])
+
+      release = Repo.preload(release, :steps)
+      donor_handle = %{"deployment_id" => ctx.donor.id}
+
+      assert Enum.count(
+               release.steps,
+               &(&1.type == :dependency_container and &1.resource_handle == donor_handle)
+             ) == 1
+
+      assert Enum.count(
+               release.steps,
+               &(&1.type == :await_health and &1.resource_handle == donor_handle)
+             ) == 1
+    end
+
     test "a stack redeploy re-creates the donor and then every child", ctx do
       {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
 
@@ -545,7 +577,14 @@ defmodule Homelab.Deployments.NetnsTest do
 
       assert Deployments.get_deployment!(ctx.donor.id).domain in [nil, ""]
       assert :ensure_ingress_proxy in types
-      assert :publish_ingress in types
+
+      # But NOT `publish_ingress`. `publish_deployment/1` gates on `ingress_published?/1`,
+      # which requires the deployment's OWN domain — so for a domainless donor the step
+      # falls through to `:ok` having done nothing, while recording `"published" => true`.
+      # A step that cannot act should not be planned; the donor's ingress membership
+      # comes from `SpecBuilder`'s `bridge_networks` at container-create time, which is
+      # the mechanism that actually works.
+      refute :publish_ingress in types
     end
 
     # A donor whose children are NOT proxy-routed gains nothing from ingress —
@@ -589,8 +628,27 @@ defmodule Homelab.Deployments.NetnsTest do
       child_sync = Enum.find(steps, &(&1.type == :sync_domain and &1.resource_handle == handle))
       assert child_sync.position > child_health.position
 
-      # `publish_ingress` stays the DONOR's, exactly once: a child has no network
-      # endpoint to attach, and the donor is the container Traefik resolves.
+      # And NO `publish_ingress` anywhere in this stack. A child has no network endpoint
+      # to attach, so it never gets one — but neither does this donor, because it holds
+      # no domain of its own: `publish_deployment/1` gates on `ingress_published?/1`
+      # (`deployments.ex:184`), which requires the deployment's OWN domain, so the step
+      # would fall through to `:ok` having done nothing while recording
+      # `"published" => true`.
+      #
+      # The donor is still reachable — `SpecBuilder` puts it on the ingress network via
+      # `bridge_networks` at container-create time, because its children's routes resolve
+      # to its address. This step never contributed to that. A donor that DOES hold a
+      # domain gets exactly one, asserted below.
+      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
+    end
+
+    test "a donor holding its own domain still gets exactly one publish_ingress", ctx do
+      {:ok, donor} = Deployments.update_deployment(ctx.donor, %{domain: "vpn.example.com"})
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(donor.id))
+      steps = Repo.preload(release, :steps).steps
+
       assert Enum.count(steps, &(&1.type == :publish_ingress)) == 1
       assert Enum.find(steps, &(&1.type == :publish_ingress)).resource_handle == %{}
     end
