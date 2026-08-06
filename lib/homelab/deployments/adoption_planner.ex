@@ -107,6 +107,15 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # dropping this one turns `Adoption.refuse_netns_child/1` into dead code that always
       # matches nil, silently adopting a tunneled container onto the tenant network.
       netns_parent_container_id: Map.get(capture, :netns_parent_container_id),
+      # Same explicit-key-list trap as the line above, and this one bit in production: the
+      # capture read NET_ADMIN and /dev/net/tun off the live gluetun, `plan_service/2`
+      # would have put them on the replacement, and nothing carried them between the two.
+      # The adopted VPN could not initialise iptables, failed closed, and took every app in
+      # its namespace down with it — while the import reported success.
+      capabilities_add: Map.get(capture, :capabilities_add, []),
+      capabilities_drop: Map.get(capture, :capabilities_drop, []),
+      devices: Map.get(capture, :devices, []),
+      sysctls: Map.get(capture, :sysctls, %{}),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       out_of_scope: Enum.filter(mounts, &(&1.tier == :out_of_scope))
@@ -141,7 +150,20 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # default: minio's overridden `command` exits (loud), redis's `--requirepass` does
       # not (silent -- an unauthenticated redis, reported as adopted).
       command: Map.get(review, :command),
-      entrypoint: Map.get(review, :entrypoint)
+      entrypoint: Map.get(review, :entrypoint),
+      # What the KERNEL let it do. Captured off the live container's HostConfig and
+      # carried here, because the replacement has to be granted the same or it is not a
+      # replacement. Dropping these produced a gluetun with no NET_ADMIN and no
+      # /dev/net/tun: it fails closed, so every app in its namespace loses connectivity
+      # with it, and the import reports success.
+      #
+      # Defaulted to empty rather than nil: nil on these columns means "inherit the
+      # catalog default", and an adopted template has no catalog behind it — the original
+      # container IS the specification, and it was granted none.
+      capabilities_add: Map.get(review, :capabilities_add) || [],
+      capabilities_drop: Map.get(review, :capabilities_drop) || [],
+      devices: Map.get(review, :devices) || [],
+      sysctls: Map.get(review, :sysctls) || %{}
     }
 
     {phase1, phase2} = phases(strategy, name, container, review, targets)
