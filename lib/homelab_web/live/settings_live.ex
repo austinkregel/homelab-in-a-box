@@ -7,6 +7,7 @@ defmodule HomelabWeb.SettingsLive do
   alias Homelab.Docker.Client, as: DockerClient
   alias Homelab.Infrastructure.DaemonFacts
   alias Homelab.Deployments.AdoptionPolicy
+  alias Homelab.Deployments.PermanentHome
   alias Homelab.Infrastructure.SwarmSettings
 
   @sections [
@@ -221,8 +222,14 @@ defmodule HomelabWeb.SettingsLive do
          |> assign(:import_selected, MapSet.new(Enum.map(services, & &1.name)))
          |> assign(:import_plan, nil)
          |> assign(:import_error, nil)
-         |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+         |> assign(:adoption_root, resolved_root(AdoptionPolicy.fetch_adoption_root()))
          |> assign(:adoption_total, container_total())}
+
+      {:error, :adoption_root_unconfigured} ->
+        {:noreply,
+         socket
+         |> assign(:import_services, [])
+         |> assign(:import_error, AdoptionPolicy.unconfigured_message())}
 
       {:error, reason} ->
         {:noreply,
@@ -247,10 +254,31 @@ defmodule HomelabWeb.SettingsLive do
 
       {:noreply,
        socket
-       |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+       |> assign(:adoption_root, resolved_root(AdoptionPolicy.fetch_adoption_root()))
        |> put_flash(:info, "Adoption root set to #{root}. Re-scan to discover.")}
     else
       {:noreply, put_flash(socket, :error, "The adoption root must be an absolute host path.")}
+    end
+  end
+
+  # The managed root is where adopted BYTES land, so an unset one is worse than an unset
+  # adoption root: discovery merely finds nothing, but a migrate-strategy import writes
+  # the operator's data to a `System.user_home()` path that the daemon then applies to the
+  # HOST — `/root/homelab-managed`, somewhere nobody chose. `PermanentHome` now refuses
+  # that outright when containerized; this is the control that resolves the refusal, and
+  # it sits next to the adoption root because they are set in the same sitting.
+  def handle_event("save_managed_root", %{"managed" => %{"root" => root}}, socket) do
+    root = String.trim(root)
+
+    if String.starts_with?(root, "/") do
+      Settings.set("managed_root", root, category: "adoption")
+
+      {:noreply,
+       socket
+       |> assign(:managed_root, resolved_root(PermanentHome.fetch_managed_root()))
+       |> put_flash(:info, "Managed root set to #{root}.")}
+    else
+      {:noreply, put_flash(socket, :error, "The managed root must be an absolute host path.")}
     end
   end
 
@@ -651,8 +679,8 @@ defmodule HomelabWeb.SettingsLive do
       |> assign(:selected_orchestrator, current_id)
       |> assign(:gateways, Homelab.Config.gateways())
       |> assign(:selected_gateway, current_gateway_id)
-      |> assign(:adoption_root, Homelab.Deployments.AdoptionPolicy.adoption_root())
-      |> assign(:managed_root, Homelab.Deployments.PermanentHome.managed_root())
+      |> assign(:adoption_root, resolved_root(AdoptionPolicy.fetch_adoption_root()))
+      |> assign(:managed_root, resolved_root(PermanentHome.fetch_managed_root()))
       |> assign(:swarm_mode?, swarm_mode?)
       |> assign(:swarm_fields, SwarmSettings.fields())
       |> assign(:swarm_errors, %{})
@@ -717,7 +745,8 @@ defmodule HomelabWeb.SettingsLive do
 
   defp load_section_data(socket, "import") do
     socket
-    |> assign(:adoption_root, AdoptionPolicy.adoption_root())
+    |> assign(:adoption_root, resolved_root(AdoptionPolicy.fetch_adoption_root()))
+    |> assign(:managed_root, resolved_root(PermanentHome.fetch_managed_root()))
     # Deployments left behind by an orchestrator switch. Distinct from discovery: these are
     # already managed, their data is already plane-owned, and there is nothing to migrate
     # but the workload itself. See `Homelab.Deployments.Reclaim`.
@@ -2278,6 +2307,51 @@ defmodule HomelabWeb.SettingsLive do
         </p>
       </.form>
 
+      <%!-- The managed root belongs here, not only under Infrastructure: it is the OTHER
+            half of the same decision, set in the same sitting, and an unset one is the
+            more dangerous of the two. `PermanentHome` refuses to guess it on a
+            containerized install rather than write adopted data to the host's
+            /root/homelab-managed — a directory the operator never chose, that no backup
+            covers, and that they will not think to look in. --%>
+      <.form
+        for={%{}}
+        as={:managed}
+        id="managed-root-form"
+        phx-submit="save_managed_root"
+        class={[
+          "rounded-lg p-3 space-y-2",
+          if(@managed_root, do: "bg-base-200/50", else: "bg-error/10 border border-error/25")
+        ]}
+      >
+        <label class="block text-xs font-medium text-base-content/70">Managed root</label>
+        <div class="flex items-center gap-2">
+          <input
+            type="text"
+            name="managed[root]"
+            value={@managed_root}
+            placeholder="/home/you/homelab-managed"
+            class="flex-1 rounded-lg bg-base-100 border-0 text-sm font-mono text-base-content py-2 px-3"
+          />
+          <.button
+            type="submit"
+            label="Save"
+            class="px-3 py-2 rounded-lg bg-base-content/10 text-sm font-medium whitespace-nowrap"
+          />
+        </div>
+        <p :if={@managed_root} class="text-[10px] text-base-content/40 leading-snug">
+          The <strong>host</strong>
+          disk where copied data physically lives, when you choose "Copy into a managed home".
+          Needs headroom, and must be a local disk — a database on a network mount corrupts.
+        </p>
+        <p :if={is_nil(@managed_root)} class="text-[11px] text-error leading-snug">
+          <strong>Not set — imports that copy data are blocked.</strong>
+          This instance runs in a container, so there is no safe default: <code>~/homelab-managed</code>
+          means <code>/root/homelab-managed</code>
+          in here, and the daemon would apply that to the <strong>host</strong>. Set an
+          absolute host path (or the <code>HOMELAB_MANAGED_ROOT</code> env var).
+        </p>
+      </.form>
+
       <div
         :if={@import_error}
         class="rounded-lg bg-error/10 border border-error/20 p-3 text-sm text-error"
@@ -2534,6 +2608,12 @@ defmodule HomelabWeb.SettingsLive do
     </div>
     """
   end
+
+  # `nil` for an unconfigured root, never a guessed path. The forms render nil as an empty
+  # box next to the explanation, which is the honest state — a pre-filled
+  # `/root/homelab-managed` reads as a decision somebody made.
+  defp resolved_root({:ok, root}), do: root
+  defp resolved_root({:error, _reason}), do: nil
 
   defp selected_import_services(socket) do
     (socket.assigns.import_services || [])
