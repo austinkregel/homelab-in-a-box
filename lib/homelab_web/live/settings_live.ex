@@ -219,7 +219,13 @@ defmodule HomelabWeb.SettingsLive do
         {:noreply,
          socket
          |> assign(:import_services, services)
-         |> assign(:import_selected, MapSet.new(Enum.map(services, & &1.name)))
+         |> assign_existing_adoptions(services)
+         # Anything already imported starts UNCHECKED. Discovery cannot tell a fresh
+         # candidate from one a failed run already produced rows for — the original is
+         # untouched and carries no `homelab.managed` label either way — so pre-selecting
+         # it would make "Apply" the default action on a retry the operator has not yet
+         # decided to make.
+         |> assign(:import_selected, default_selection(services))
          |> assign(:import_plan, nil)
          |> assign(:import_error, nil)
          |> assign(:adoption_root, resolved_root(AdoptionPolicy.fetch_adoption_root()))
@@ -341,6 +347,39 @@ defmodule HomelabWeb.SettingsLive do
           {:error, {service, reason}} ->
             {:noreply,
              put_flash(socket, :error, "Import failed for #{service}: #{import_error(reason)}")}
+        end
+    end
+  end
+
+  # The only exit from a release that got stuck (interrupted mid-compensation, before the
+  # recent fix). It marks the release terminal and touches NOTHING else — see
+  # `Releases.abandon_release/2` for why driving a distrusted release through compensation
+  # is deliberately not offered anywhere in this UI.
+  def handle_event("abandon_release", %{"id" => id}, socket) do
+    case Homelab.Deployments.Releases.get_release(String.to_integer(id)) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "That release no longer exists.")}
+
+      release ->
+        case Homelab.Deployments.Releases.abandon_release(release, by: current_user_label(socket)) do
+          {:ok, _abandoned} ->
+            {:noreply,
+             socket
+             |> refresh_existing_adoptions()
+             |> load_section_data("import")
+             |> put_flash(
+               :info,
+               "Release ##{release.id} abandoned. Nothing on the host was touched — " <>
+                 "check the service before retrying the import."
+             )}
+
+          {:noop, _} ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "Release ##{release.id} had already finished; nothing to abandon."
+             )}
         end
     end
   end
@@ -751,7 +790,13 @@ defmodule HomelabWeb.SettingsLive do
     # already managed, their data is already plane-owned, and there is nothing to migrate
     # but the workload itself. See `Homelab.Deployments.Reclaim`.
     |> assign(:stranded, Homelab.Deployments.Reclaim.stranded())
+    # Adopted deployments that never finished — :pending with no external_id. READ-ONLY:
+    # they are the residue of failed imports (including the ones the inert space selector
+    # left in the wrong space), and the platform cannot tell damage from a deliberate
+    # choice, so it shows them and never touches them.
+    |> assign(:incomplete_imports, Homelab.Deployments.Adoption.incomplete_imports())
     |> assign_new(:adoption_total, fn -> nil end)
+    |> assign_new(:import_existing, fn -> %{} end)
     |> assign_new(:import_services, fn -> nil end)
     |> assign_new(:import_selected, fn -> MapSet.new() end)
     |> assign_new(:import_plan, fn -> nil end)
@@ -2258,6 +2303,53 @@ defmodule HomelabWeb.SettingsLive do
         </div>
       </div>
 
+      <%!-- Read-only, on purpose. These rows are the residue of imports that never
+            finished — including the ones the inert space selector left in the wrong space.
+            PRODUCTION.md's policy is that a fix stops the bleeding and never rewrites
+            existing rows, because the platform cannot tell damage from a deliberate
+            choice. So this lists them and offers no button that changes them. --%>
+      <div
+        :if={@incomplete_imports != []}
+        class="rounded-lg border border-base-content/[0.08] bg-base-200/40 p-4 space-y-3"
+      >
+        <div>
+          <h2 class="text-sm font-semibold text-base-content flex items-center gap-2">
+            <.icon name="hero-clock" class="size-4 text-base-content/40" />
+            {length(@incomplete_imports)} import(s) that never finished
+          </h2>
+          <p class="text-xs text-base-content/60 mt-1 leading-relaxed">
+            Adopted deployments still <span class="font-mono">pending</span>
+            with no container of their own — a previous import planned them and did not
+            complete. They are shown here and <strong>nothing is changed automatically</strong>:
+            a half-finished import and a deliberate choice look identical from here. Open one
+            to retry or remove it.
+          </p>
+        </div>
+
+        <div
+          :for={deployment <- @incomplete_imports}
+          class="flex items-center justify-between gap-3 rounded-md bg-base-100 p-2.5"
+        >
+          <div class="min-w-0">
+            <p class="text-sm text-base-content truncate">
+              {deployment.app_template.name}
+              <span class="text-base-content/40 text-xs">
+                in {deployment.tenant.name}
+              </span>
+            </p>
+            <p class="text-[11px] text-base-content/40 font-mono">
+              deployment {deployment.id} · {deployment.app_template.slug} · pending, no container
+            </p>
+          </div>
+          <.link
+            navigate={~p"/deployments/#{deployment.id}"}
+            class="px-3 py-1.5 rounded-md bg-base-content/10 text-xs font-medium hover:bg-base-content/15 transition-colors whitespace-nowrap"
+          >
+            Open
+          </.link>
+        </div>
+      </div>
+
       <div class="flex items-start justify-between gap-4">
         <div>
           <h2 class="text-lg font-semibold text-base-content">Import existing stack</h2>
@@ -2408,6 +2500,51 @@ defmodule HomelabWeb.SettingsLive do
                 >
                   uid {svc.user}
                 </span>
+              </div>
+
+              <%!-- A failed import leaves the original container untouched and unlabelled,
+                    so discovery offers it again as though nothing had happened — while a
+                    :pending deployment and an adopted template already exist from the
+                    previous attempt. Say so, with retry framing, instead of presenting it
+                    as a new candidate. --%>
+              <div
+                :if={existing = Map.get(@import_existing, svc.name)}
+                class="mt-2 rounded-md border border-warning/30 bg-warning/5 p-2 space-y-1.5"
+              >
+                <p class="text-[11px] text-base-content/80 leading-snug">
+                  <strong>Already imported into {existing.space || "another space"}</strong>
+                  — deployment
+                  <.link
+                    navigate={~p"/deployments/#{existing.deployment_id}"}
+                    class="text-primary hover:underline font-mono"
+                  >
+                    #{existing.deployment_id}
+                  </.link>
+                  , status <span class="font-mono">{existing.status}</span>{if existing.external_id,
+                    do: "",
+                    else: ", no container of its own yet"}. Importing again is a
+                  <strong>retry</strong>
+                  of that same deployment, not a new one — and it can only be retried into
+                  the space it is already in.
+                </p>
+
+                <div :if={existing.active_release} class="pt-1 border-t border-warning/20">
+                  <p class="text-[11px] text-base-content/70 leading-snug">
+                    Release <span class="font-mono">#{existing.active_release.id}</span>
+                    is still <span class="font-mono">{existing.active_release.status}</span>, so a
+                    retry is blocked. If it is stuck, abandon it — that only marks the release
+                    finished; it stops nothing and deletes nothing.
+                  </p>
+                  <button
+                    type="button"
+                    phx-click="abandon_release"
+                    phx-value-id={existing.active_release.id}
+                    data-confirm={abandon_confirm(svc.name, existing)}
+                    class="mt-1.5 px-2.5 py-1 rounded-md bg-warning/20 text-warning text-[11px] font-medium hover:bg-warning/30 transition-colors cursor-pointer"
+                  >
+                    Abandon release #{existing.active_release.id}
+                  </button>
+                </div>
               </div>
               <div class="flex items-center gap-1.5 mt-1.5 flex-wrap">
                 <span
@@ -2607,6 +2744,49 @@ defmodule HomelabWeb.SettingsLive do
       </div>
     </div>
     """
+  end
+
+  # Which of the discovered containers already have an adopted deployment, and where.
+  #
+  # The lookup lives here rather than in `AdoptionPlanner`: the planner is pure by
+  # construction (no DB, no daemon) and this is a DB read. The Import preview is the only
+  # place that needs it, and it needs it precisely because discovery CANNOT know — a
+  # failed run leaves the original container untouched and unlabelled.
+  defp assign_existing_adoptions(socket, services) do
+    names = Enum.map(services, & &1.name)
+    assign(socket, :import_existing, Homelab.Deployments.Adoption.existing_adoptions(names))
+  end
+
+  defp refresh_existing_adoptions(socket) do
+    assign_existing_adoptions(socket, socket.assigns[:import_services] || [])
+  end
+
+  defp default_selection(services) do
+    existing = Homelab.Deployments.Adoption.existing_adoptions(Enum.map(services, & &1.name))
+
+    services
+    |> Enum.reject(&Map.has_key?(existing, &1.name))
+    |> MapSet.new(& &1.name)
+  end
+
+  # The confirmation is part of the fix, not decoration: it names what will and will not be
+  # touched, because the operation's whole value is that it is the exit which destroys
+  # nothing, and an operator has no other way to know that.
+  defp abandon_confirm(service, existing) do
+    "Abandon release ##{existing.active_release.id} for #{service}?\n\n" <>
+      "WILL happen: the release is marked finished (failed) and stops blocking a retry " <>
+      "of deployment ##{existing.deployment_id}.\n\n" <>
+      "Will NOT happen: no container is stopped, started or removed; no volume, " <>
+      "directory or file is deleted; no secret is revoked. Nothing this release already " <>
+      "did is undone — a half-created container or a copied folder stays exactly where it " <>
+      "is, and you should check the service by hand before retrying."
+  end
+
+  defp current_user_label(socket) do
+    case socket.assigns[:current_user] do
+      %{email: email} when is_binary(email) -> email
+      _ -> nil
+    end
   end
 
   # `nil` for an unconfigured root, never a guessed path. The forms render nil as an empty
@@ -2893,7 +3073,16 @@ defmodule HomelabWeb.SettingsLive do
     do: "it is already adopted. Remove the existing deployment first if you want to redo it."
 
   defp import_error(:release_in_flight),
-    do: "a release is already running for it. Wait for that to finish, then retry."
+    do:
+      "a release is already running for it. Wait for that to finish, then retry — " <>
+        "or, if it is stuck, abandon it from the list above."
+
+  defp import_error({:adopted_elsewhere, detail}) do
+    "it is already imported into #{detail.space || "another space"} as deployment " <>
+      "##{detail.deployment_id}. One container can only belong to one deployment — two " <>
+      "would both claim the same container. Retry the import into that space, or remove " <>
+      "that deployment first."
+  end
 
   defp import_error(%Ecto.Changeset{} = changeset),
     do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
