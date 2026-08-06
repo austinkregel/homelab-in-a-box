@@ -87,10 +87,13 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
     %{release: %Release{steps: []}, deployment: nil}
   end
 
-  defp pg_backing_dir, do: PermanentHome.backing_dir("homelab-postgres", "/var/lib/postgresql/data")
+  defp pg_backing_dir,
+    do: PermanentHome.backing_dir("homelab-postgres", "/var/lib/postgresql/data")
 
   test "registers the managed volume once the copy step reports the home written" do
-    assert {:ok, handle} = AdoptVolume.run(step([target()]), ctx_with_migrated([pg_backing_dir()]))
+    assert {:ok, handle} =
+             AdoptVolume.run(step([target()]), ctx_with_migrated([pg_backing_dir()]))
+
     assert [%{"name" => name, "created" => true}] = handle["volumes"]
     assert_received {:ensure, ^name}
   end
@@ -106,7 +109,9 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
     refute File.dir?(pg_backing_dir()),
            "the host path must NOT exist locally — that is the whole point"
 
-    assert {:ok, handle} = AdoptVolume.run(step([target()]), ctx_with_migrated([pg_backing_dir()]))
+    assert {:ok, handle} =
+             AdoptVolume.run(step([target()]), ctx_with_migrated([pg_backing_dir()]))
+
     assert [%{"created" => true}] = handle["volumes"]
   end
 
