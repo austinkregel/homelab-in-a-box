@@ -366,4 +366,92 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     assert ext == "ext-#{companion.id}"
     assert Deployments.get_deployment!(companion.id).external_id == nil
   end
+
+  # --- EnsureIngressProxy: registration, and the signal when it cannot ensure ---
+
+  defp running_stack do
+    stub(Homelab.Mocks.Orchestrator, :deploy, fn spec -> {:ok, "ext-" <> spec.deployment_id} end)
+
+    stub(Homelab.Mocks.Orchestrator, :get_service, fn _id ->
+      {:ok, %{id: "x", state: :running, health: :healthy}}
+    end)
+
+    stub(Homelab.Mocks.Orchestrator, :publish, fn _, _ -> :ok end)
+    stub_dns_provider()
+  end
+
+  defp proxy_step(release_id) do
+    release_id
+    |> Releases.get_release()
+    |> Map.fetch!(:steps)
+    |> Enum.find(&(&1.type == :ensure_ingress_proxy))
+  end
+
+  # An unregistered step type falls through to `NoopHandler`, which logs and succeeds.
+  # So deleting the `:ensure_ingress_proxy` line from `config/config.exs` left the whole
+  # suite green while no release ensured a proxy again: the step is still planned, still
+  # runs, still completes. Nothing that only looks at plans or statuses can tell the
+  # difference.
+  #
+  # The handle is what can: `NoopHandler` writes `%{"noop" => true, "type" => ...}`,
+  # `EnsureIngressProxy` writes `"ingress_proxy"`.
+  test "the ensure_ingress_proxy step runs its registered handler, not the noop fallback",
+       %{app: app} do
+    running_stack()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    step = proxy_step(release.id)
+    assert step.status == :completed
+    refute step.resource_handle["noop"]
+    assert step.resource_handle["ingress_proxy"] in ~w(already_running started unavailable)
+  end
+
+  # `EnsureIngressProxy` deliberately never fails the release: `ensure_traefik/0` returns
+  # `{:error, :dns_token_missing}` on any install without a DNS-01 token, which is normal
+  # for a LAN-only homelab, and hard-failing would make every routed deploy impossible
+  # there. That argument survives — but it leaves a `:running` release for a route no
+  # plane-managed proxy is serving, and the only trace was an ActivityLog warn in a
+  # 100-entry ring buffer plus a `resource_handle` key nothing renders. The release card
+  # showed "ensure ingress proxy · completed" and nothing else.
+  #
+  # So the reason is recorded on the step row itself, in the field the card already
+  # renders under a step. Scoped to the release that has the problem, and it ages out of
+  # nothing.
+  test "an unavailable proxy leaves its reason on the step, not only in a log", %{app: app} do
+    Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:error, :dns_token_missing} end)
+    on_exit(fn -> Application.delete_env(:homelab, :ingress_proxy_ensurer) end)
+
+    running_stack()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    step = proxy_step(release.id)
+
+    # Still not a failure — the release is green and every container was created.
+    assert step.status == :completed
+    assert Releases.get_release(release.id).status == :running
+
+    # But the release says WHY the route may not resolve.
+    assert step.error_message =~ "Traefik not ensured"
+    assert step.error_message =~ "dns_token_missing"
+  end
+
+  # The other side of it: an install that HAS a proxy gets no note, so the note means
+  # something when it is there.
+  test "a proxy that was already running leaves no note", %{app: app} do
+    Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:ok, :already_running} end)
+    on_exit(fn -> Application.delete_env(:homelab, :ingress_proxy_ensurer) end)
+
+    running_stack()
+
+    {:ok, release} = Deployments.deploy_release(app)
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    step = proxy_step(release.id)
+    assert step.resource_handle["ingress_proxy"] == "already_running"
+    assert step.error_message == nil
+  end
 end
