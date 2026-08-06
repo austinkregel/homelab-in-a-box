@@ -67,7 +67,7 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
       # here; losing that on the saga path is how a deployment becomes permanently
       # invisible instead of visibly broken.
       {:error, reason} ->
-        mark_failed(load_target(step, ctx), reason)
+        mark_failed(deployment, reason)
         {:error, {:spec_build_failed, reason}}
     end
   end
