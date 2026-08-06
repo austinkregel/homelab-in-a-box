@@ -217,6 +217,37 @@ defmodule Homelab.Deployments.Releases do
     end
   end
 
+  @doc """
+  Merges `handle` into a step's `resource_handle` immediately, without touching its
+  status. Returns the merged map.
+
+  For provenance a handler must not lose if it dies mid-step.
+
+  `ReleaseRunner` persists a handler's handle only at the completion compare-and-set,
+  which is correct for describing what a step CREATED — but useless for a fact the
+  handler learned by observing the world BEFORE it changed it. A node that dies between
+  the side effect and that CAS has `reclaim_running_steps/1` return the step to
+  `:pending` with its `resource_handle` untouched, so the re-run re-derives that fact
+  from a world the first attempt already changed, and silently gets a different answer.
+  `SyncDomain`'s created-vs-reclaimed is exactly that shape.
+
+  Deliberately NOT a compare-and-set: it is called while the step is `:running` and
+  owned by this runner under a held lease, and it records something already true rather
+  than advancing state. A no-op on a missing step id keeps handlers callable with a bare
+  struct in unit tests.
+  """
+  def record_step_handle(%ReleaseStep{id: nil}, handle) when is_map(handle), do: handle
+
+  def record_step_handle(%ReleaseStep{id: id}, handle) when is_map(handle) do
+    merged = Map.merge(Repo.get!(ReleaseStep, id).resource_handle || %{}, handle)
+
+    ReleaseStep
+    |> where([s], s.id == ^id)
+    |> Repo.update_all(set: [resource_handle: merged, updated_at: naive_now()])
+
+    merged
+  end
+
   # --- Lease ----------------------------------------------------------------
 
   @doc """
