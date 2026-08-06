@@ -2464,22 +2464,31 @@ defmodule HomelabWeb.SettingsLive do
         </div>
 
         <div class="flex items-end gap-3 pt-2 border-t border-base-content/[0.06]">
-          <label class="text-xs text-base-content/60">
-            Import into space
-            <select
-              name="tenant_id"
-              phx-change="select_import_tenant"
-              class="mt-1 block rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm"
-            >
-              <option
-                :for={tenant <- @tenants}
-                value={tenant.id}
-                selected={tenant.id == @import_tenant_id}
+          <%!-- The form is load-bearing, not decoration. LiveView serializes a change
+                event from the input's OWNING FORM (`serializeForm(inputEl.form, ...)`);
+                a bare input with `phx-change` and no ancestor form throws
+                "form events require the input to be inside a form" in the browser and
+                the event never reaches the server. This select had none, so choosing a
+                space did nothing at all and every import silently landed in whichever
+                space happened to be first. --%>
+          <.form for={%{}} as={:import} id="import-tenant-form" phx-change="select_import_tenant">
+            <label class="text-xs text-base-content/60">
+              Import into space
+              <select
+                name="tenant_id"
+                id="import-tenant-select"
+                class="mt-1 block rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm"
               >
-                {tenant.name}
-              </option>
-            </select>
-          </label>
+                <option
+                  :for={tenant <- @tenants}
+                  value={tenant.id}
+                  selected={tenant.id == @import_tenant_id}
+                >
+                  {tenant.name}
+                </option>
+              </select>
+            </label>
+          </.form>
           <button
             type="button"
             phx-click="apply_import"
