@@ -67,6 +67,35 @@ defmodule Homelab.Deployments.ReleaseRunner do
     %{"release_id" => release_id} |> new() |> Oban.insert()
   end
 
+  @doc """
+  Enqueues a release, downgrading a failed enqueue to a log line. Always `:ok`.
+
+  This is the shape every planner wants, and `{:ok, _job} = enqueue(release)` is the
+  shape none of them do. Oban runs on `Homelab.ObanRepo`, a physically separate
+  Postgres, so the enqueue can never join the transaction that committed the release —
+  by the time it runs, the release row EXISTS. Raising there converts "the job queue
+  was briefly unreachable" into a caller who believes the whole deploy failed, while a
+  perfectly good `:planning` release sits committed.
+
+  Nothing is lost by not raising: `Reconciler.resume_stuck_releases/0` re-enqueues
+  every release with no live lease on its next tick, so the un-enqueued release is
+  picked up automatically. The worst case is a delay.
+  """
+  def enqueue_or_log(%Release{} = release) do
+    case enqueue(release) do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[release] #{release.id} planned but not enqueued (#{inspect(reason)}); " <>
+            "the reconciler will resume it"
+        )
+
+        :ok
+    end
+  end
+
   # --- Engine (directly callable, used by Oban and by tests) ----------------
 
   @doc """
