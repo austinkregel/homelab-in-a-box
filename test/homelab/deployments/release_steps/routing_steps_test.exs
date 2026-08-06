@@ -29,6 +29,21 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
   defp ctx(deployment), do: %{release: nil, deployment: deployment}
   defp step(handle), do: %ReleaseStep{resource_handle: handle}
 
+  # A PERSISTED step, as the runner actually hands one to a handler. Load-bearing for
+  # the reclaim tests: a bare struct has no id, so nothing a handler writes to its own
+  # row can be read back.
+  defp persisted_step(deployment, type) do
+    {:ok, release} =
+      Homelab.Deployments.Releases.plan_release(deployment, [%{type: type, resource_handle: %{}}])
+
+    [step] = release.steps
+    {release, step}
+  end
+
+  # What `ReleaseRunner.reclaim_running_steps/1` leaves behind after a crashed node:
+  # the step goes back to `:pending` and is re-read from the database.
+  defp reread(step), do: Repo.get!(ReleaseStep, step.id)
+
   defp stub_dns_provider do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
     stub(Homelab.Mocks.DnsProvider, :create_record, fn _zone, _rec -> {:ok, %{id: "rec"}} end)
@@ -58,8 +73,29 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     # Traefik is a shared singleton: every routed deployment on the host resolves
     # through the same container. Compensating this step would sever every OTHER
     # deployment's route because one release rolled back.
+    #
+    # Asserted against a module confirmed to be LOADED and to export `run/2`, so this
+    # cannot quietly pass by the module having been renamed out from under it.
     test "has no compensate/2 — deliberately" do
+      Code.ensure_loaded!(EnsureIngressProxy)
+      assert function_exported?(EnsureIngressProxy, :run, 2)
       refute function_exported?(EnsureIngressProxy, :compensate, 2)
+    end
+
+    # `Infrastructure.ensure_traefik/0` is a `with` with no `else`, so it returns
+    # whatever any clause returned — including `Docker.Network.ensure/1`'s own shapes.
+    # A `case` matching only the three expected returns raises `CaseClauseError`, the
+    # runner's rescue turns that into a failed step, and a full rollback follows: the
+    # exact inversion of this module's stated contract that a proxy problem never fails
+    # a release.
+    test "an unexpected return from ensure_traefik is still not fatal" do
+      app = routed_deployment("weird.example.test")
+
+      Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:error, :enoent, :extra} end)
+      on_exit(fn -> Application.delete_env(:homelab, :ingress_proxy_ensurer) end)
+
+      assert {:ok, handle} = EnsureIngressProxy.run(step(%{}), ctx(app))
+      assert handle["ingress_proxy"] == "unavailable"
     end
   end
 
@@ -76,10 +112,10 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert row.deployment_id == app.id
     end
 
-    # `sync_domain_records/1` is convergent, so re-running after a crash must not
-    # produce a second row or flip the handle's provenance from reclaimed back to
-    # created — which is what `compensate/2` keys off.
-    test "is idempotent, and a second run reports a reclaim rather than a create" do
+    # `sync_domain_records/1` is convergent, so re-running must not produce a second
+    # row. A SEPARATE, later invocation against a row that already exists is a genuine
+    # reclaim — this is the case where `created: false` is the right answer.
+    test "is idempotent, and a fresh invocation over an existing row is a reclaim" do
       app = routed_deployment("twice.example.test")
 
       assert {:ok, first} = SyncDomain.run(step(%{}), ctx(app))
@@ -89,6 +125,52 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert second["created"] == false
       assert second["reclaimed"] == true
       assert second["domain_id"] == first["domain_id"]
+    end
+
+    # THE reclaim bug. `ReleaseRunner` persists a handle only at the completion CAS, so
+    # a node that dies after the handler wrote the Domain row but before that CAS loses
+    # the provenance entirely — `reclaim_running_steps/1` returns the step to `:pending`
+    # with an EMPTY `resource_handle`, and the re-run reads a row that now exists and
+    # concludes it was reclaimed. `compensate/2` then refuses to delete a row this
+    # release did create, stranding the unique `fqdn` claim this step exists to protect.
+    #
+    # Note the provenance has to be durable BEFORE the mutation, not merely carried in
+    # the returned handle: the returned handle is exactly what the crash discards.
+    test "provenance survives a step reclaimed after the row was written" do
+      app = routed_deployment("crashed.example.test")
+      {_release, step} = persisted_step(app, :sync_domain)
+
+      # First attempt: writes the row, then the node dies before the runner can record
+      # the returned handle.
+      assert {:ok, _discarded} = SyncDomain.run(step, ctx(app))
+      assert {:ok, _} = Networking.get_domain_by_fqdn("crashed.example.test")
+
+      # Resume: the step is re-read and re-run from scratch.
+      assert {:ok, handle} = SyncDomain.run(reread(step), ctx(app))
+      assert handle["created"] == true
+
+      # ...so compensation still undoes what this release actually did.
+      assert :ok = SyncDomain.compensate(step(handle), ctx(app))
+      assert {:error, :not_found} = Networking.get_domain_by_fqdn("crashed.example.test")
+    end
+
+    # The same durability must not manufacture provenance. A row that predates the step
+    # is still a reclaim after a reclaim.
+    test "a reclaimed row stays reclaimed across a re-run" do
+      other = routed_deployment("pre.example.test")
+      {:ok, _} = Networking.create_domain(%{fqdn: "pre.example.test", deployment_id: other.id})
+
+      app = routed_deployment("pre.example.test")
+      {_release, step} = persisted_step(app, :sync_domain)
+
+      assert {:ok, _} = SyncDomain.run(step, ctx(app))
+      assert {:ok, handle} = SyncDomain.run(reread(step), ctx(app))
+
+      assert handle["created"] == false
+      assert handle["reclaimed"] == true
+
+      assert :ok = SyncDomain.compensate(step(handle), ctx(app))
+      assert {:ok, _} = Networking.get_domain_by_fqdn("pre.example.test")
     end
 
     test "compensate deletes a row it created" do
