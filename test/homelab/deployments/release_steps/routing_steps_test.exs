@@ -201,6 +201,62 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert {:ok, _} = Networking.get_domain_by_fqdn("shared.example.test")
     end
 
+    # `sync_domain_records/1`'s FIRST act is `retire_stale_domains/2`, which DELETES the
+    # deployment's rows for every other name — TLS status, zone link, exposure and all.
+    # That is a destruction this step performs, and the moduledoc claimed `"created" =>
+    # true` meant deleting the created row "restores exactly the prior world". It does
+    # not: `["first"]` became `["second"]` and then `[]`.
+    #
+    # The retirement is deliberately NOT restored — see the moduledoc — but it must be
+    # RECORDED, so a rollback leaves a legible account of what it could not undo. It was
+    # in neither branch of the handle.
+    test "records the rows it retires, and does not resurrect them on compensate" do
+      app = routed_deployment("first.example.test")
+
+      {:ok, _} =
+        Networking.create_domain(%{
+          fqdn: "first.example.test",
+          deployment_id: app.id,
+          exposure_mode: :public,
+          tls_status: :active
+        })
+
+      {:ok, _} = Deployments.update_deployment(app, %{domain: "second.example.test"})
+      moved = Deployments.get_deployment!(app.id)
+
+      assert {:ok, handle} = SyncDomain.run(step(%{}), ctx(moved))
+      assert [retired] = handle["retired"]
+      assert retired["fqdn"] == "first.example.test"
+      assert retired["exposure_mode"] == "public"
+      assert retired["tls_status"] == "active"
+
+      assert :ok = SyncDomain.compensate(step(handle), ctx(moved))
+
+      # The row this step created is gone; the retired one stays gone, as documented.
+      assert {:error, :not_found} = Networking.get_domain_by_fqdn("second.example.test")
+      assert {:error, :not_found} = Networking.get_domain_by_fqdn("first.example.test")
+    end
+
+    # The same account has to survive a crash. The retirement is observed BEFORE the
+    # mutation and the returned handle is what the crash discards, so it is persisted
+    # through `record_step_handle/2` alongside the created-vs-reclaimed provenance —
+    # the re-run cannot re-derive it, because the first attempt already deleted the rows.
+    test "the retirement record survives a step reclaimed after the sync ran" do
+      app = routed_deployment("keep.example.test")
+
+      {:ok, _} =
+        Networking.create_domain(%{fqdn: "stale.example.test", deployment_id: app.id})
+
+      {_release, s} = persisted_step(app, :sync_domain)
+
+      assert {:ok, _discarded} = SyncDomain.run(s, ctx(app))
+      assert [%{"fqdn" => "stale.example.test"}] = reread(s).resource_handle["retired"]
+
+      # The re-run sees nothing left to retire and must not erase the account.
+      assert {:ok, handle} = SyncDomain.run(reread(s), ctx(app))
+      assert [%{"fqdn" => "stale.example.test"}] = handle["retired"]
+    end
+
     # `sync_domain_records/1` returns `:ok` whether or not the row was written — it
     # logs the failure and moves on, which is right for a fire-and-forget hook and
     # wrong for a saga step. The read-back is what turns a dropped row into a failure.
