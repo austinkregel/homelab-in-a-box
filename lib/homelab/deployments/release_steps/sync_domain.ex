@@ -38,6 +38,17 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
 
   Reachability is a separate concern and is not undone here; `PublishIngress.compensate/2`
   owns that.
+
+  ## Provenance has to be durable, not merely returned
+
+  The created-vs-reclaimed answer is learned by observing the world BEFORE this step
+  changes it, and the runner persists a returned handle only at the completion
+  compare-and-set. A node that dies in between leaves the row written and the
+  provenance lost — `reclaim_running_steps/1` puts the step back to `:pending` with an
+  empty handle, the re-run sees a row that exists because WE wrote it, and concludes it
+  was reclaimed. So the answer is written to the step row through
+  `Releases.record_step_handle/2` before `sync_domain_records/1` runs, and a handle
+  already claiming `"created"` always wins over a fresh read.
   """
 
   @behaviour Homelab.Deployments.ReleaseStep.Handler
@@ -45,6 +56,7 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.Releases
   alias Homelab.Networking
 
   @impl true
@@ -53,10 +65,31 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
 
     case deployment.domain do
       domain when is_binary(domain) and domain != "" ->
-        # Read BEFORE the sync, so the handle records whether this step is the one
-        # that brought the row into existence. `compensate/2` refuses to delete
-        # anything it did not create.
+        # Read BEFORE the sync, so the handle records whether this step is the one that
+        # brought the row into existence. `compensate/2` refuses to delete anything it
+        # did not create.
+        #
+        # A handle already carrying `"created" => true` WINS over that read. This step
+        # can be re-run from scratch — a node that dies after the row is written but
+        # before the runner's completion CAS has `reclaim_running_steps/1` put the step
+        # back to `:pending` — and on the re-run the row exists because WE wrote it. Re-
+        # deriving provenance there flips it to "reclaimed" and compensation then
+        # refuses to delete a row this release created, stranding the unique `fqdn`
+        # claim this step exists to protect.
         existed? = match?({:ok, _}, Networking.get_domain_by_fqdn(domain))
+        created? = handle(step)["created"] == true or not existed?
+
+        # Persisted BEFORE the mutation, and this is the load-bearing half. Returning
+        # the provenance in the handle is not enough: the returned handle is exactly
+        # what a crash between the side effect and the CAS discards. See
+        # `Releases.record_step_handle/2`.
+        _ =
+          Releases.record_step_handle(step, %{
+            "created" => created?,
+            "reclaimed" => not created?,
+            "fqdn" => domain,
+            "deployment_id" => deployment.id
+          })
 
         Deployments.sync_domain_records(deployment)
 
@@ -67,8 +100,8 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
                "fqdn" => row.fqdn,
                "domain_id" => row.id,
                "deployment_id" => deployment.id,
-               "created" => not existed?,
-               "reclaimed" => existed?
+               "created" => created?,
+               "reclaimed" => not created?
              }}
 
           {:error, :not_found} ->
@@ -84,7 +117,7 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
 
   @impl true
   def compensate(step, _ctx) do
-    handle = step.resource_handle || %{}
+    handle = handle(step)
 
     with true <- handle["created"] == true,
          fqdn when is_binary(fqdn) <- handle["fqdn"],
@@ -102,7 +135,9 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
     end
   end
 
+  defp handle(step), do: step.resource_handle || %{}
+
   defp target_id(step, ctx) do
-    Map.get(step.resource_handle || %{}, "deployment_id") || ctx.deployment.id
+    Map.get(handle(step), "deployment_id") || ctx.deployment.id
   end
 end
