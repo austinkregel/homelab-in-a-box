@@ -108,6 +108,49 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
     assert cap.sysctls == %{}
   end
 
+  # WHEN it is ready, as opposed to merely started. `Config` on a container inspect is the
+  # EFFECTIVE config, so an image-level HEALTHCHECK appears here even though the compose
+  # file never mentioned one — the gluetun case exactly.
+  test "captures the healthcheck, converting Docker's nanoseconds to seconds" do
+    cap =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "Config" => %{
+            "Image" => "qmcgaw/gluetun:latest",
+            "Healthcheck" => %{
+              "Test" => ["CMD-SHELL", "/gluetun-entrypoint healthcheck"],
+              "Interval" => 30_000_000_000,
+              "Timeout" => 5_000_000_000,
+              "Retries" => 5,
+              "StartPeriod" => 20_000_000_000
+            }
+          }
+        })
+      )
+
+    assert cap.health_check["test"] == ["CMD-SHELL", "/gluetun-entrypoint healthcheck"]
+    assert cap.health_check["interval"] == 30
+    assert cap.health_check["timeout"] == 5
+    assert cap.health_check["retries"] == 5
+    assert cap.health_check["start_period"] == 20
+  end
+
+  # `["NONE"]` is Docker's explicit "this image ships a healthcheck and I do not want it".
+  # Captured verbatim it would emit a literal `NONE` command that fails every probe, so an
+  # adopted container that was deliberately unchecked would come up permanently unhealthy.
+  test "an explicitly disabled healthcheck adopts as none, not as a NONE command" do
+    cap =
+      AdoptionDiscovery.capture(
+        inspect_json(%{"Config" => %{"Healthcheck" => %{"Test" => ["NONE"]}}})
+      )
+
+    assert cap.health_check == %{}
+  end
+
+  test "a container with no healthcheck captures none" do
+    assert AdoptionDiscovery.capture(inspect_json(%{})).health_check == %{}
+  end
+
   # HOW the container was reached, not just what it ran. A host-network original has no
   # port bindings for the cutover's port import to read, so this is the only signal that
   # it was reachable at all — and the only way the replacement keeps the broadcast /
