@@ -204,6 +204,40 @@ defmodule Homelab.Config do
       "homelab.local"
   end
 
+  @doc """
+  The parent domains a wildcard certificate is held for, most specific first.
+
+  `base_domain` is always in the list: `Infrastructure.self_ingress_yaml/2` provisions
+  `*.<base_domain>` unconditionally, so that wildcard exists whether or not anyone
+  configured it, and a router under it should reuse it rather than order its own cert.
+
+  Additional parents come from the `wildcard_domains` Setting. They are not free —
+  Traefik will attempt a DNS-01 challenge for each one a route actually matches, which
+  needs the plane's DNS token to have authority over that zone. Listing a parent is the
+  operator asserting it does.
+
+  Sorted longest-first so the list reads most-specific-first for a human. Callers do not
+  depend on the order: coverage is an exact one-label test, so at most one parent can
+  match any given host.
+
+  Read through `get_cached/2` rather than `get/1`. `SpecBuilder` builds labels on paths
+  with no database checked out — the same trap that took 38 specs down when
+  `forward_auth_address/0` first read straight through.
+  """
+  def wildcard_domains do
+    configured =
+      "wildcard_domains"
+      |> Homelab.Settings.get_cached("")
+      |> to_string()
+      |> String.split([",", "\n"], trim: true)
+      |> Enum.map(&(&1 |> String.trim() |> String.trim_leading("*.")))
+      |> Enum.reject(&(&1 == ""))
+
+    [base_domain() | configured]
+    |> Enum.uniq()
+    |> Enum.sort_by(&byte_size/1, :desc)
+  end
+
   # The address Traefik's forwardAuth middleware calls to authorize a request on a
   # `:sso_protected` route. Authentik's outpost shape, because that is what this
   # default has always been.
