@@ -201,6 +201,17 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       # unauthenticated redis, reported as a successful adoption.
       command: empty_to_nil(Map.get(config, "Cmd")),
       entrypoint: empty_to_nil(Map.get(config, "Entrypoint")),
+      # WHEN it is ready, as opposed to merely started. Dropped, the replacement declares
+      # no healthcheck, and everything that gates on readiness silently weakens to "the
+      # process exists".
+      #
+      # That gap is the whole point of a netns donor. `Adoption.donor_barrier/1` holds a
+      # child's cutover behind `AwaitHealth` on the donor — but with no declared
+      # healthcheck that step passes on `state == :running`, which for gluetun is true the
+      # instant the process starts and some tens of seconds before the tunnel is up. The
+      # barrier is there, correctly placed, and it was releasing early because the signal
+      # it needed had been thrown away one layer down.
+      health_check: capture_health_check(config),
       # HOW it was reached, not just what it ran. A container on the host's network
       # publishes no port bindings at all, so the port import has nothing to read: adopting
       # one as a :host deployment produced a replacement on a private bridge, reachable on
@@ -220,6 +231,41 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       mounts: classified
     }
   end
+
+  # Docker's `Config.Healthcheck` into the canonical map `SpecBuilder.build_health_check/2`
+  # reads. `Config` on a CONTAINER inspect is the effective config, so an image-level
+  # HEALTHCHECK is reported here even though the compose file never mentioned one — which
+  # is exactly the gluetun case.
+  #
+  # Durations arrive in NANOSECONDS and the canonical map is in seconds; `build_health_check/2`
+  # multiplies them back up, so capturing them raw would inflate a 30s interval into 950
+  # years and the probe would never run a second time.
+  #
+  # `["NONE"]` is Docker's explicit "this image has a healthcheck and I do not want it".
+  # Capturing that verbatim would emit a literal `NONE` command that fails every probe;
+  # honouring it as "no healthcheck" reproduces what the original actually did.
+  defp capture_health_check(config) do
+    case Map.get(config, "Healthcheck") do
+      %{"Test" => test} = hc when is_list(test) and test != [] and test != ["NONE"] ->
+        %{
+          "test" => test,
+          "interval" => ns_to_seconds(Map.get(hc, "Interval"), 30),
+          "timeout" => ns_to_seconds(Map.get(hc, "Timeout"), 10),
+          "retries" => Map.get(hc, "Retries") || 3,
+          "start_period" => ns_to_seconds(Map.get(hc, "StartPeriod"), 10)
+        }
+
+      _ ->
+        %{}
+    end
+  end
+
+  # Docker reports 0 for "unset, use the daemon default" rather than omitting the key, and
+  # a 0-second interval is not a value this can pass on.
+  defp ns_to_seconds(ns, _default) when is_integer(ns) and ns > 0,
+    do: max(div(ns, 1_000_000_000), 1)
+
+  defp ns_to_seconds(_ns, default), do: default
 
   defp netns_parent_id(host_config) do
     case Map.get(host_config, "NetworkMode") do

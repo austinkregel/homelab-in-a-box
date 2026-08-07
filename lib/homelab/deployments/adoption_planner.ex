@@ -132,6 +132,10 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       capabilities_drop: Map.get(capture, :capabilities_drop, []),
       devices: Map.get(capture, :devices, []),
       sysctls: Map.get(capture, :sysctls, %{}),
+      # And the same trap a third time. Without this key the adopted template declares no
+      # healthcheck, so `AwaitHealth` — including the donor barrier a netns child's cutover
+      # waits on — weakens to "the process is running".
+      health_check: Map.get(capture, :health_check, %{}),
       preserve: Enum.filter(mounts, &(&1.tier == :preserve)),
       rebuildable: Enum.filter(mounts, &(&1.tier == :rebuildable)),
       # Binds outside the adoption root: a media library on a second disk, a NAS export.
@@ -178,6 +182,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
       # not (silent -- an unauthenticated redis, reported as adopted).
       command: Map.get(review, :command),
       entrypoint: Map.get(review, :entrypoint),
+      # Reproduce WHEN the original called itself ready. This is what makes the donor
+      # barrier mean anything: a gluetun whose healthcheck is carried over is `:healthy`
+      # only once its tunnel is up, so the app in its namespace starts into a working VPN
+      # rather than into one that is still dialling.
+      health_check: Map.get(review, :health_check, %{}),
       # What the KERNEL let it do. Captured off the live container's HostConfig and
       # carried here, because the replacement has to be granted the same or it is not a
       # replacement. Dropping these produced a gluetun with no NET_ADMIN and no
