@@ -96,6 +96,44 @@ defmodule Homelab.Deployments.AdoptionPlannerTest do
     end
   end
 
+  # The barrier that holds a netns child's cutover behind its donor is `AwaitHealth` on
+  # the donor deployment (`Adoption.donor_barrier/1`). That step only requires `:healthy`
+  # when the template DECLARES a healthcheck; with none it accepts `state == :running`.
+  # So dropping the healthcheck here does not merely lose a field — it converts "wait for
+  # the VPN to be up" into "wait for the process to exist", and the app in the namespace
+  # starts into a tunnel that is still dialling.
+  describe "readiness survives adoption" do
+    test "the adopted template carries the original's healthcheck" do
+      review =
+        review_fixture(%{
+          name: "gluetun",
+          image: "qmcgaw/gluetun:latest",
+          health_check: %{
+            "test" => ["CMD-SHELL", "/gluetun-entrypoint healthcheck"],
+            "interval" => 30,
+            "timeout" => 10,
+            "retries" => 3,
+            "start_period" => 10
+          }
+        })
+
+      attrs = hd(AdoptionPlanner.build_plan([review]).services).template_attrs
+
+      assert attrs.health_check["test"] == ["CMD-SHELL", "/gluetun-entrypoint healthcheck"]
+
+      assert Homelab.Deployments.SpecBuilder.declares_healthcheck?(attrs.health_check),
+             "the adopted template declares no healthcheck, so every readiness gate " <>
+               "degrades to 'the process is running'"
+    end
+
+    test "a container with no healthcheck adopts to none, not to an invented one" do
+      attrs = hd(AdoptionPlanner.build_plan([review_fixture()]).services).template_attrs
+
+      assert attrs.health_check == %{}
+      refute Homelab.Deployments.SpecBuilder.declares_healthcheck?(attrs.health_check)
+    end
+  end
+
   # An external mount is still MOUNTED — the app needs its media library — it is simply
   # not this plane's data to copy, checksum, or give a permanent home to. Dropping it
   # would be the opposite failure to the one this fixes: a silently crippled app instead
