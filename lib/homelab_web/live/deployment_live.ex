@@ -350,29 +350,20 @@ defmodule HomelabWeb.DeploymentLive do
     {:noreply, assign(socket, :env_rows, rows)}
   end
 
-  def handle_event("save_env", params, socket) do
-    deployment = socket.assigns.deployment
+  # A real submission carries the form's rows, its marker, or both. Anything arriving
+  # with neither sent no inputs at all — which is a control that is not wired to the
+  # form, not an operator asking for zero variables. Answering it by writing `%{}` is a
+  # silent, total, unrecoverable wipe of every credential on the deployment, reported as
+  # "Environment updated". Refuse instead; the marker keeps a genuine clear-them-all
+  # working (see `deleting every row still clears the environment`).
+  def handle_event("save_env", %{"env" => _} = params, socket), do: save_env(params, socket)
 
-    env_overrides =
-      params["env"]
-      |> rows_from_params()
-      |> Enum.reject(fn row -> String.trim(row["key"] || "") == "" end)
-      |> Map.new(fn row -> {String.trim(row["key"]), row["value"] || ""} end)
+  def handle_event("save_env", %{"env_submitted" => "1"} = params, socket),
+    do: save_env(params, socket)
 
-    case apply_config(deployment, %{env_overrides: env_overrides}) do
-      {:ok, updated} ->
-        {:noreply,
-         socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
-         |> assign(:env_edit_mode, false)
-         |> assign(:env_form, nil)
-         |> assign(:env_rows, [])
-         |> put_flash(:info, "Environment updated — recreating the container.")}
-
-      {:error, message} ->
-        {:noreply, put_flash(socket, :error, message)}
-    end
+  def handle_event("save_env", _params, socket) do
+    {:noreply,
+     put_flash(socket, :error, "No environment variables were submitted — nothing was changed.")}
   end
 
   # --- Version ---
@@ -2485,9 +2476,14 @@ defmodule HomelabWeb.DeploymentLive do
                 >
                   Cancel
                 </button>
+                
+    <!-- Associated with #env-form by id, not by nesting: this button lives in the section
+         header and the inputs live in the card body below it. As a bare `phx-click` it
+         submitted no inputs at all, and the handler read that as "zero variables" and
+         deleted every one of them. -->
                 <button
-                  type="button"
-                  phx-click="save_env"
+                  type="submit"
+                  form="env-form"
                   class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium"
                 >
                   Save
@@ -2512,6 +2508,11 @@ defmodule HomelabWeb.DeploymentLive do
                 phx-submit="save_env"
                 class="space-y-3"
               >
+                <!-- Proof that a submission actually happened. Deleting every row leaves the
+                     form with no `env[...]` inputs, so a legitimate "clear them all" is
+                     indistinguishable from a control that submitted nothing — unless the form
+                     says so itself. -->
+                <input type="hidden" name="env_submitted" value="1" />
                 <div :for={{row, idx} <- Enum.with_index(@env_rows)} class="flex items-center gap-2">
                   <input
                     type="text"
@@ -2872,6 +2873,34 @@ defmodule HomelabWeb.DeploymentLive do
   # The editor posts indexed rows (%{"0" => %{"key" =>, "value" =>}}) because the key
   # is editable. A flat %{"KEY" => "value"} map is still accepted so a caller that
   # only wants to set values doesn't have to know about row indices.
+  # Lives down here with the other private helpers rather than beside its `handle_event`
+  # clauses: a `defp` between them splits the clause group and fails
+  # `--warnings-as-errors`.
+  defp save_env(params, socket) do
+    deployment = socket.assigns.deployment
+
+    env_overrides =
+      params["env"]
+      |> rows_from_params()
+      |> Enum.reject(fn row -> String.trim(row["key"] || "") == "" end)
+      |> Map.new(fn row -> {String.trim(row["key"]), row["value"] || ""} end)
+
+    case apply_config(deployment, %{env_overrides: env_overrides}) do
+      {:ok, updated} ->
+        {:noreply,
+         socket
+         |> assign(:deployment, updated)
+         |> assign_derived()
+         |> assign(:env_edit_mode, false)
+         |> assign(:env_form, nil)
+         |> assign(:env_rows, [])
+         |> put_flash(:info, "Environment updated — recreating the container.")}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
   defp rows_from_params(nil), do: []
 
   defp rows_from_params(params) when is_map(params) do

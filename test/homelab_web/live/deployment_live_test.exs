@@ -266,6 +266,64 @@ defmodule HomelabWeb.DeploymentLiveTest do
       refute Map.has_key?(env, "   ")
     end
 
+    # Found in production, on a gluetun container holding VPN credentials. The Save in
+    # the section HEADER was `type="button" phx-click="save_env"` and sat outside
+    # `#env-form`, so the browser sent the event with no form data at all. Every test
+    # above invokes the handler directly with params the real button never sent, which
+    # is exactly why a total wipe survived a green suite.
+    test "the header Save submits the form rather than firing a bare click", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      html = render_click(view, "start_env_edit", %{})
+
+      refute html =~ ~s(phx-click="save_env"),
+             "a control fires save_env as a bare click — no <input> value reaches the handler"
+
+      assert html =~ ~s(form="env-form"),
+             "the header Save is not associated with #env-form, so it submits nothing"
+    end
+
+    # The class, not just the instance: whatever reaches this handler, "no variables were
+    # submitted" must never be read as "the operator wants zero variables". The form marks
+    # its own submissions so that deleting every row still works and remains distinguishable.
+    test "a save carrying no env params is refused rather than wiping every variable", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, dep} =
+        Homelab.Deployments.update_deployment(dep, %{
+          env_overrides: %{"OPENVPN_USER" => "austin", "OPENVPN_PASSWORD" => "hunter2"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      html = render_click(view, "save_env", %{})
+
+      env = Homelab.Deployments.get_deployment!(dep.id).env_overrides
+      assert env["OPENVPN_USER"] == "austin"
+      assert env["OPENVPN_PASSWORD"] == "hunter2"
+      refute html =~ "Environment updated"
+    end
+
+    test "deleting every row still clears the environment", %{conn: conn, deployment: dep} do
+      {:ok, dep} =
+        Homelab.Deployments.update_deployment(dep, %{env_overrides: %{"GOING_AWAY" => "yes"}})
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      html = render_click(view, "save_env", %{"env_submitted" => "1"})
+
+      assert html =~ "Environment updated"
+      assert Homelab.Deployments.get_deployment!(dep.id).env_overrides == %{}
+    end
+
     test "add_env_var appends an empty row and remove_env_var drops one", %{
       conn: conn,
       deployment: dep
