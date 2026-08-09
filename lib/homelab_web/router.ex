@@ -91,9 +91,16 @@ defmodule HomelabWeb.Router do
   # deliberately fails open while setup is incomplete). `/settings/export` travels with
   # it because it dumps the instance's configuration as JSON.
   #
-  # The other three create or reconfigure real infrastructure: `/deploy/new` and
-  # `/workbench` both end in running a container image on the Docker host, and
-  # `/tenants/:id` is where a space and its deployments are edited and destroyed.
+  # The rest create or reconfigure real infrastructure: `/deploy/new` and `/workbench`
+  # both end in running a container image on the Docker host, and `/tenants/:id` is where
+  # a space and its deployments are edited and destroyed.
+  #
+  # `/storage` and `/containers` are here for a subtler reason than the others — most of
+  # what they render is read-only. But `/storage` creates and deletes named volumes and
+  # rewrites a live deployment's mounts (a wrong path there is data loss, not a bad
+  # render), and `/containers` reads EVERY container on the daemon rather than only the
+  # ones we manage: the image, command, and labels of the operator's unrelated stacks.
+  # Both are admin-shaped even where the page looks like a table.
   #
   # Note what this is NOT. With no user<->tenant relationship in the schema, admin/member
   # is the only boundary that exists — it is read-vs-write, not tenant isolation. A
@@ -110,6 +117,8 @@ defmodule HomelabWeb.Router do
       ] do
       live "/settings", SettingsLive, :index
       live "/workbench", WorkbenchLive, :index
+      live "/storage", StorageLive, :index
+      live "/containers", ContainersLive, :index
       live "/deploy/new", DeployWizardLive, :new
       live "/tenants/:id", TenantLive, :show
     end
