@@ -113,6 +113,15 @@ defmodule Homelab.System.Metrics do
   # filesystems. This applies in prod too, since the app runs containerized.
   @injected_file_mounts ["/etc/hostname", "/etc/hosts", "/etc/resolv.conf"]
 
+  @doc """
+  The real filesystems visible to this process, as `%{mount:, total:, used:, percent:}`.
+
+  Same list `collect/0` returns under `:disk`, without the rest of the poll — `collect/0`
+  sleeps 100ms to sample CPU and calls the daemon for `/info`, neither of which a
+  storage view needs.
+  """
+  def disks, do: collect_disk()
+
   defp collect_disk do
     case System.cmd("df", ["-Pk"], stderr_to_stdout: true) do
       {output, 0} -> parse_disk_output(output)
