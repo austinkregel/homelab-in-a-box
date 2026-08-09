@@ -60,11 +60,12 @@ defmodule HomelabWeb.SettingsLive do
 
   def handle_event(
         "save_general",
-        %{"general" => %{"instance_name" => name, "base_domain" => domain}},
+        %{"general" => %{"instance_name" => name, "base_domain" => domain} = general},
         socket
       ) do
     Settings.set("instance_name", name)
     Settings.set("base_domain", domain)
+    Settings.set("wildcard_domains", Map.get(general, "wildcard_domains", ""))
 
     {:noreply,
      socket
@@ -660,11 +661,13 @@ defmodule HomelabWeb.SettingsLive do
   defp load_section_data(socket, "general") do
     params = %{
       "instance_name" => Settings.get("instance_name", ""),
-      "base_domain" => Settings.get("base_domain", "")
+      "base_domain" => Settings.get("base_domain", ""),
+      "wildcard_domains" => Settings.get("wildcard_domains", "")
     }
 
     assign(socket, :instance_name, params["instance_name"])
     |> assign(:base_domain, params["base_domain"])
+    |> assign(:wildcard_domains, params["wildcard_domains"])
     |> assign(:general_form, to_form(params, as: :general))
   end
 
@@ -939,6 +942,22 @@ defmodule HomelabWeb.SettingsLive do
             label="Base Domain"
             placeholder="lab.example.com"
           />
+        </div>
+        <div>
+          <.input
+            name="general[wildcard_domains]"
+            value={@wildcard_domains}
+            type="text"
+            label="Additional wildcard certificates"
+            placeholder="*.example.com, *.lab.example.com"
+          />
+          <p class="mt-1.5 text-xs text-base-content/60">
+            Comma-separated. A route exactly one label under any of these reuses that
+            wildcard instead of requesting a certificate of its own.
+            <span class="font-mono">*.{@base_domain}</span>
+            is always included. Each entry needs your DNS token to have authority over that
+            zone, since the wildcard is issued over a DNS-01 challenge.
+          </p>
         </div>
         <.button
           type="submit"

@@ -644,10 +644,62 @@ defmodule Homelab.Deployments.SpecBuilder do
     }
 
     base
+    |> Map.merge(wildcard_cert_labels(router, domain))
     |> Map.merge(exposure_middleware_labels(router, exposure))
     |> Map.merge(sticky_labels(router, deployment))
     |> Map.merge(extra_route_labels(deployment, router, domain))
   end
+
+  # The plane already provisions exactly one wildcard: `Infrastructure.self_ingress_yaml/2`
+  # asks for `main: <base_domain>` + `sans: *.<base_domain>`. So a host one label under the
+  # base domain is covered by a certificate that already exists.
+  #
+  # A router carrying `certresolver` and no `tls.domains` makes Traefik read the domain off
+  # the Host rule and order a SEPARATE single-name certificate for it — a fresh DNS-01
+  # challenge, a fresh entry in acme.json, and another draw against Let's Encrypt's
+  # per-registered-domain limit, for a name the wildcard already authenticates. Naming the
+  # wildcard is what makes the router reuse it, and it is also what makes several routers
+  # on the same wildcard share ONE ACME order instead of each opening their own.
+  #
+  # Matched on a LABEL boundary rather than a suffix. `downloads.example.com` ends with
+  # `example.com` but is a SIBLING of `lab.example.com`, not a child of it; and a
+  # wildcard covers exactly one label, so `a.b.lab.example.com` is not covered either.
+  # Claiming coverage in either case would point the router at a certificate that does not
+  # authenticate it, and the component that rejects that is the browser — after the route
+  # is live.
+  #
+  # Written as "is this host exactly one label under THAT parent" and folded over the
+  # configured parents, so nesting costs nothing: `example.com` and `lab.example.com`
+  # can both be wildcards and each host lands on the right one. Because the rule is an
+  # EXACT label count rather than a suffix, at most one parent can ever match a given
+  # host — `downloads.lab.example.com` is one label under `lab.example.com` and two
+  # under `example.com` — so the list needs no precedence rule and `find` is honest.
+  defp wildcard_cert_labels(router, domain) do
+    case Enum.find(Homelab.Config.wildcard_domains(), &covered_by_wildcard?(domain, &1)) do
+      nil ->
+        %{}
+
+      parent ->
+        %{
+          "traefik.http.routers.#{router}.tls.domains[0].main" => parent,
+          "traefik.http.routers.#{router}.tls.domains[0].sans" => "*.#{parent}"
+        }
+    end
+  end
+
+  @spec covered_by_wildcard?(term(), term()) :: boolean()
+  defp covered_by_wildcard?(domain, parent)
+       when is_binary(domain) and is_binary(parent) and parent != "" do
+    # Splitting on the FIRST dot is what enforces the single-label rule structurally:
+    # the head is a label that cannot itself contain a dot, so `a.b.lab.example.com`
+    # yields `"a"` + `"b.lab.example.com"` and simply fails to match the parent.
+    case String.split(domain, ".", parts: 2) do
+      [label, ^parent] -> label != ""
+      _ -> false
+    end
+  end
+
+  defp covered_by_wildcard?(_domain, _parent), do: false
 
   @doc """
   Routers + services for a deployment's `extra_routes` — a path on the same host that
@@ -685,6 +737,9 @@ defmodule Homelab.Deployments.SpecBuilder do
       if is_binary(path) and is_integer(port) do
         name = "#{router}-#{sanitize_path(path)}"
 
+        # Same host as the base router, so the same certificate. This router carries its
+        # own `certresolver`, and without this it would order a single-name cert for a
+        # name the base router is already serving off the wildcard.
         [
           {"traefik.http.routers.#{name}.rule", "Host(`#{domain}`) && PathPrefix(`#{path}`)"},
           {"traefik.http.routers.#{name}.entrypoints", "web,websecure"},
@@ -692,7 +747,9 @@ defmodule Homelab.Deployments.SpecBuilder do
           {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
           {"traefik.http.routers.#{name}.service", name},
           {"traefik.http.services.#{name}.loadbalancer.server.port", to_string(port)}
-        ] ++ Map.to_list(router_middleware_labels(name, router, exposure))
+        ] ++
+          Map.to_list(router_middleware_labels(name, router, exposure)) ++
+          Map.to_list(wildcard_cert_labels(name, domain))
       else
         []
       end
