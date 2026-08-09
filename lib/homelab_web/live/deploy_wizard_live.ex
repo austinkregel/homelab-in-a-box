@@ -129,13 +129,13 @@ defmodule HomelabWeb.DeployWizardLive do
     end
   end
 
-  defp maybe_load_from_params(socket, %{"type" => type}, _already_loaded)
+  defp maybe_load_from_params(
+         %{assigns: %{deploy_type: nil}} = socket,
+         %{"type" => type},
+         _already_loaded
+       )
        when type in ~w(container compose stack) do
-    if socket.assigns.deploy_type == nil do
-      assign(socket, :deploy_type, type)
-    else
-      socket
-    end
+    assign(socket, :deploy_type, type)
   end
 
   defp maybe_load_from_params(socket, _params, _already_loaded), do: socket

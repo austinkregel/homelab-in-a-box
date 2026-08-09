@@ -337,17 +337,15 @@ defmodule Homelab.Deployments.Netns do
     end
   end
 
-  defp validate_parent_is_not_itself_a_child(changeset, parent) do
-    if is_nil(parent.network_parent_id) do
-      changeset
-    else
-      add_error(
-        changeset,
-        :network_parent_id,
-        "already routes through another container — chains are not supported, point at the " <>
-          "container that owns the namespace instead"
-      )
-    end
+  defp validate_parent_is_not_itself_a_child(changeset, %{network_parent_id: nil}), do: changeset
+
+  defp validate_parent_is_not_itself_a_child(changeset, _parent) do
+    add_error(
+      changeset,
+      :network_parent_id,
+      "already routes through another container — chains are not supported, point at the " <>
+        "container that owns the namespace instead"
+    )
   end
 
   defp validate_parent_can_donate(changeset, parent) do

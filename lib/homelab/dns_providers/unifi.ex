@@ -252,13 +252,8 @@ defmodule Homelab.DnsProviders.Unifi do
     [{"x-api-key", config.api_key}]
   end
 
-  defp connect_opts(config) do
-    if config.skip_tls_verify do
-      [transport_opts: [verify: :verify_none]]
-    else
-      []
-    end
-  end
+  defp connect_opts(%{skip_tls_verify: true}), do: [transport_opts: [verify: :verify_none]]
+  defp connect_opts(_config), do: []
 
   # --- Record normalization ---
 
