@@ -141,6 +141,12 @@ defmodule HomelabWeb.RouterAuthTest do
     {:get, "/deploy/new"},
     # Where a space and its deployments are edited and destroyed.
     {:get, "/tenants/:id"},
+    # Creates and deletes named volumes and rewrites a live deployment's mounts — a
+    # wrong path there is data loss, not a bad render.
+    {:get, "/storage"},
+    # Reads EVERY container on the daemon, not only the ones we manage: the image,
+    # command, and labels of the operator's unrelated stacks.
+    {:get, "/containers"},
     # Every mutating API route. `POST .../deployments` reaches `deploy_now/1` and
     # `image_override` takes any parseable reference; `DELETE` destroys real
     # infrastructure; `restore` overwrites live data from a snapshot.
