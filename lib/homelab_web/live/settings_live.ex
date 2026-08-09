@@ -3170,7 +3170,6 @@ defmodule HomelabWeb.SettingsLive do
   # An unchecked box posts nothing — and so does a box inside an `:if`-hidden section.
   # Only write one when its section was actually rendered, or an unrelated save silently
   # flips it (this is what pointed a sandboxed Namecheap registrar at production).
-  defp put_checkbox(params, key, rendered?) do
-    if rendered?, do: Settings.set(key, params[key] || "false"), else: :ok
-  end
+  defp put_checkbox(_params, _key, false), do: :ok
+  defp put_checkbox(params, key, true), do: Settings.set(key, params[key] || "false")
 end

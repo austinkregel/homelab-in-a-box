@@ -98,22 +98,24 @@ defmodule HomelabWeb.CatalogLive do
     {:noreply, assign(socket, :curated_entries, deduplicate_entries(entries))}
   end
 
-  def handle_info({:enrichment_complete, enriched_entry}, socket) do
-    if socket.assigns.selected_entry do
-      template = update_template_from_enrichment(socket.assigns.selected_template, enriched_entry)
-      deploy_form = build_deploy_form(template)
+  def handle_info(
+        {:enrichment_complete, _enriched_entry},
+        %{assigns: %{selected_entry: nil}} = socket
+      ),
+      do: {:noreply, assign(socket, :enriching, false)}
 
-      {:noreply,
-       socket
-       |> assign(:selected_entry, enriched_entry)
-       |> assign(:selected_template, template)
-       |> assign(:deploy_form, deploy_form)
-       |> assign(:deploy_ports, template.ports || [])
-       |> assign(:deploy_volumes, template.volumes || [])
-       |> assign(:enriching, false)}
-    else
-      {:noreply, assign(socket, :enriching, false)}
-    end
+  def handle_info({:enrichment_complete, enriched_entry}, socket) do
+    template = update_template_from_enrichment(socket.assigns.selected_template, enriched_entry)
+    deploy_form = build_deploy_form(template)
+
+    {:noreply,
+     socket
+     |> assign(:selected_entry, enriched_entry)
+     |> assign(:selected_template, template)
+     |> assign(:deploy_form, deploy_form)
+     |> assign(:deploy_ports, template.ports || [])
+     |> assign(:deploy_volumes, template.volumes || [])
+     |> assign(:enriching, false)}
   end
 
   # Enrichment reports its stage as it goes; the modal shows a single spinner
@@ -208,42 +210,43 @@ defmodule HomelabWeb.CatalogLive do
     {:noreply, socket}
   end
 
+  def handle_event("deploy_custom", %{"image" => image, "name" => name}, socket)
+      when image == "" or name == "" do
+    {:noreply, put_flash(socket, :error, "Image and name are required.")}
+  end
+
   def handle_event("deploy_custom", %{"image" => image, "tag" => tag, "name" => name}, socket) do
-    if image == "" or name == "" do
-      {:noreply, put_flash(socket, :error, "Image and name are required.")}
-    else
-      full_image = if String.contains?(image, ":"), do: image, else: "#{image}:#{tag}"
-      slug = "custom-#{slugify(name)}-#{System.unique_integer([:positive]) |> rem(10000)}"
+    full_image = if String.contains?(image, ":"), do: image, else: "#{image}:#{tag}"
+    slug = "custom-#{slugify(name)}-#{System.unique_integer([:positive]) |> rem(10000)}"
 
-      template_attrs = %{
-        slug: slug,
-        name: name,
-        version: tag,
-        image: full_image,
-        description: "Custom deployment",
-        source: "custom",
-        source_id: full_image,
-        required_env: [],
-        default_env: %{},
-        volumes: []
-      }
+    template_attrs = %{
+      slug: slug,
+      name: name,
+      version: tag,
+      image: full_image,
+      description: "Custom deployment",
+      source: "custom",
+      source_id: full_image,
+      required_env: [],
+      default_env: %{},
+      volumes: []
+    }
 
-      case Catalog.create_app_template(template_attrs) do
-        {:ok, template} ->
-          deploy_form =
-            to_form(%{"tenant_id" => "", "domain" => "", "env_overrides" => %{}})
+    case Catalog.create_app_template(template_attrs) do
+      {:ok, template} ->
+        deploy_form =
+          to_form(%{"tenant_id" => "", "domain" => "", "env_overrides" => %{}})
 
-          {:noreply,
-           socket
-           |> assign(:selected_template, template)
-           |> assign(:deploy_form, deploy_form)
-           |> assign(:deploy_ports, template.ports || [])
-           |> assign(:deploy_volumes, template.volumes || [])
-           |> assign(:tab, "curated")}
+        {:noreply,
+         socket
+         |> assign(:selected_template, template)
+         |> assign(:deploy_form, deploy_form)
+         |> assign(:deploy_ports, template.ports || [])
+         |> assign(:deploy_volumes, template.volumes || [])
+         |> assign(:tab, "curated")}
 
-        {:error, changeset} ->
-          {:noreply, put_flash(socket, :error, "Failed to create: #{inspect(changeset.errors)}")}
-      end
+      {:error, changeset} ->
+        {:noreply, put_flash(socket, :error, "Failed to create: #{inspect(changeset.errors)}")}
     end
   end
 

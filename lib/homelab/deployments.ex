@@ -366,17 +366,15 @@ defmodule Homelab.Deployments do
     end
   end
 
-  def restart_deployment(%Deployment{} = deployment) do
-    if deployment.external_id do
-      case Homelab.Config.orchestrator().restart(deployment.external_id) do
-        :ok ->
-          update_status(deployment, :deploying)
+  def restart_deployment(%Deployment{external_id: nil}), do: {:error, :not_deployed}
 
-        {:error, _reason} ->
-          {:error, :restart_failed}
-      end
-    else
-      {:error, :not_deployed}
+  def restart_deployment(%Deployment{} = deployment) do
+    case Homelab.Config.orchestrator().restart(deployment.external_id) do
+      :ok ->
+        update_status(deployment, :deploying)
+
+      {:error, _reason} ->
+        {:error, :restart_failed}
     end
   end
 

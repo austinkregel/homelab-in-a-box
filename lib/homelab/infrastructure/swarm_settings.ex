@@ -263,13 +263,10 @@ defmodule Homelab.Infrastructure.SwarmSettings do
   defp cast_int(value, field) when is_integer(value), do: bounds_check(value, field)
   defp cast_int(_, _), do: {:error, "is required"}
 
-  defp bounds_check(int, field) do
-    if int >= field.min and int <= field.max do
-      {:ok, int}
-    else
-      {:error, "must be between #{field.min} and #{field.max} #{field.unit}"}
-    end
-  end
+  defp bounds_check(int, field) when int >= field.min and int <= field.max, do: {:ok, int}
+
+  defp bounds_check(_int, field),
+    do: {:error, "must be between #{field.min} and #{field.max} #{field.unit}"}
 
   @doc """
   Merges validated changes into a full spec.

@@ -183,21 +183,23 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
+  def handle_info(
+        {:release_updated, _release_deployment_id},
+        %{assigns: %{deployment: nil}} = socket
+      ),
+      do: {:noreply, socket}
+
   def handle_info({:release_updated, _release_deployment_id}, socket) do
     # We only subscribe to topics for this deployment and its driving release, so
     # any release update we receive is relevant — refresh the deployment row, the
     # release history, and the driving release together.
-    if socket.assigns.deployment do
-      deployment = Deployments.get_deployment!(socket.assigns.deployment.id)
+    deployment = Deployments.get_deployment!(socket.assigns.deployment.id)
 
-      {:noreply,
-       socket
-       |> assign(:deployment, deployment)
-       |> assign_releases()
-       |> assign_derived()}
-    else
-      {:noreply, socket}
-    end
+    {:noreply,
+     socket
+     |> assign(:deployment, deployment)
+     |> assign_releases()
+     |> assign_derived()}
   end
 
   def handle_info(:poll_logs, socket) do
@@ -3491,13 +3493,11 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_datetime(nil), do: "—"
   defp format_datetime(dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M")
 
-  defp format_bytes(bytes) when is_integer(bytes) do
-    if bytes >= 1_073_741_824 do
-      "#{Float.round(bytes / 1_073_741_824, 1)} GB"
-    else
-      "#{Float.round(bytes / 1_048_576, 1)} MB"
-    end
-  end
+  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
+    do: "#{Float.round(bytes / 1_073_741_824, 1)} GB"
+
+  defp format_bytes(bytes) when is_integer(bytes),
+    do: "#{Float.round(bytes / 1_048_576, 1)} MB"
 
   defp format_bytes(_), do: "—"
 

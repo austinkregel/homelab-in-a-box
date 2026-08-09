@@ -62,34 +62,32 @@ defmodule HomelabWeb.WorkbenchLive do
 
   # Auto-upload consumes each entry as it finishes, copying it into the user's
   # disk workspace. A quota rejection surfaces as a flash and the entry is dropped.
+  defp handle_progress(:context_files, %{done?: false}, socket), do: {:noreply, socket}
+
   defp handle_progress(:context_files, entry, socket) do
-    if entry.done? do
-      user_id = socket.assigns.current_user.id
+    user_id = socket.assigns.current_user.id
 
-      result =
-        consume_uploaded_entry(socket, entry, fn %{path: path} ->
-          {:ok, Workbench.add_file(user_id, entry.client_name, path)}
-        end)
+    result =
+      consume_uploaded_entry(socket, entry, fn %{path: path} ->
+        {:ok, Workbench.add_file(user_id, entry.client_name, path)}
+      end)
 
-      socket =
-        case result do
-          {:ok, _file} ->
-            refresh_workspace(socket)
+    socket =
+      case result do
+        {:ok, _file} ->
+          refresh_workspace(socket)
 
-          {:error, :quota_exceeded} ->
-            put_flash(socket, :error, "#{entry.client_name} exceeds the workspace quota.")
+        {:error, :quota_exceeded} ->
+          put_flash(socket, :error, "#{entry.client_name} exceeds the workspace quota.")
 
-          {:error, :invalid_name} ->
-            put_flash(socket, :error, "#{entry.client_name} has an unsafe file name.")
+        {:error, :invalid_name} ->
+          put_flash(socket, :error, "#{entry.client_name} has an unsafe file name.")
 
-          {:error, _reason} ->
-            put_flash(socket, :error, "Could not add #{entry.client_name}.")
-        end
+        {:error, _reason} ->
+          put_flash(socket, :error, "Could not add #{entry.client_name}.")
+      end
 
-      {:noreply, socket}
-    else
-      {:noreply, socket}
-    end
+    {:noreply, socket}
   end
 
   @impl true

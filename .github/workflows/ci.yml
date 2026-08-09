@@ -41,6 +41,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `mix credo diff` resolves the merge base against origin/main, so the
+          # default depth-1 checkout is not enough — it needs real history.
+          fetch-depth: 0
 
       - name: Set up Elixir/OTP
         uses: erlef/setup-beam@v1
@@ -70,9 +74,18 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
-      # Advisory for now: the codebase has a pre-existing credo backlog. Runs and
-      # prints findings, but does not fail the build until the backlog is cleared.
-      - name: Credo (advisory)
+      # BLOCKING. Gates on issues this branch INTRODUCES rather than on the
+      # absolute count, because the codebase carries a ~315-issue backlog that
+      # no single PR should be made to pay off. `credo diff` compares against
+      # the merge base, so a branch fails only for what it added — which is the
+      # signal worth acting on. Clearing the backlog lowers this to a plain
+      # `mix credo --strict`.
+      - name: Credo (new issues fail the build)
+        run: mix credo diff --from-git-merge-base origin/main --strict
+
+      # Advisory: prints the full backlog so it stays visible while it shrinks.
+      - name: Credo backlog (advisory)
+        if: always()
         run: mix credo --strict || true
 
       - name: Run tests
