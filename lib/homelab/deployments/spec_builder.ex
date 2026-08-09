@@ -687,15 +687,15 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
+  @spec covered_by_wildcard?(term(), term()) :: boolean()
   defp covered_by_wildcard?(domain, parent)
        when is_binary(domain) and is_binary(parent) and parent != "" do
-    suffix = "." <> parent
-
-    if String.ends_with?(domain, suffix) do
-      label = binary_part(domain, 0, byte_size(domain) - byte_size(suffix))
-      label != "" and not String.contains?(label, ".")
-    else
-      false
+    # Splitting on the FIRST dot is what enforces the single-label rule structurally:
+    # the head is a label that cannot itself contain a dot, so `a.b.lab.example.com`
+    # yields `"a"` + `"b.lab.example.com"` and simply fails to match the parent.
+    case String.split(domain, ".", parts: 2) do
+      [label, ^parent] -> label != ""
+      _ -> false
     end
   end
 
