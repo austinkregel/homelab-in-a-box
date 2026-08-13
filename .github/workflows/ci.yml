@@ -47,11 +47,12 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Elixir/OTP
+        id: beam
         uses: erlef/setup-beam@v1
         with:
           # Keep in sync with the Dockerfile build stage.
-          otp-version: "27.2.4"
-          elixir-version: "1.17.3"
+          otp-version: "28.3.3"
+          elixir-version: "1.19.5"
 
       - name: Cache deps and _build
         uses: actions/cache@v4
@@ -59,8 +60,11 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          # OTP/Elixir versions are part of the key: _build and Dialyzer PLTs are
+          # compiled per-OTP, so a version bump must never restore stale artifacts
+          # (including via restore-keys) into a run on the new toolchain.
+          key: ${{ runner.os }}-otp${{ steps.beam.outputs.otp-version }}-elixir${{ steps.beam.outputs.elixir-version }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-otp${{ steps.beam.outputs.otp-version }}-elixir${{ steps.beam.outputs.elixir-version }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
