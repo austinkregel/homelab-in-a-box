@@ -2,6 +2,8 @@ defmodule Homelab.Deployments.Deployment do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   alias Homelab.Deployments.GpuSpec
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.RuntimeSpec
