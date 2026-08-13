@@ -319,6 +319,7 @@ defmodule Homelab.Deployments do
     end
   end
 
+  @spec stop_deployment(Deployment.t()) :: {:ok, Deployment.t()} | {:error, Ecto.Changeset.t()}
   def stop_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
 
@@ -329,6 +330,7 @@ defmodule Homelab.Deployments do
     update_deployment(deployment, %{status: :stopped, external_id: nil})
   end
 
+  @spec start_deployment(Deployment.t()) :: {:ok, Deployment.t()} | {:error, term()}
   def start_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
     orchestrator = Homelab.Config.orchestrator()
@@ -366,6 +368,8 @@ defmodule Homelab.Deployments do
     end
   end
 
+  @spec restart_deployment(Deployment.t()) ::
+          {:ok, Deployment.t()} | {:error, :not_deployed | :restart_failed}
   def restart_deployment(%Deployment{external_id: nil}), do: {:error, :not_deployed}
 
   def restart_deployment(%Deployment{} = deployment) do
