@@ -320,7 +320,7 @@ defmodule HomelabWeb.StorageLive do
           <.stat
             label="Disks"
             value={to_string(length(@disks))}
-            hint={"#{format_bytes(Enum.sum(Enum.map(@disks, & &1.used)))} used"}
+            hint={"#{format_bytes(Enum.sum_by(@disks, & &1.used))} used"}
           />
           <.stat label="Volumes" value={volume_count(@volumes)} hint={usage_hint(@usage)} />
           <.stat
@@ -1003,7 +1003,7 @@ defmodule HomelabWeb.StorageLive do
   defp reclaimable(_), do: "—"
 
   defp bind_consumer_count(binds),
-    do: binds |> Enum.map(&length(&1.consumers)) |> Enum.sum() |> to_string()
+    do: binds |> Enum.sum_by(&length(&1.consumers)) |> to_string()
 
   defp binds_on(binds, disk),
     do: Enum.filter(binds, &(&1.disk && &1.disk.mount == disk.mount))
