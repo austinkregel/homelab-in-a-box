@@ -73,6 +73,18 @@ defmodule HomelabWeb.Layouts do
               active={@page_title == "New Deployment"}
             />
             <.sidebar_link
+              path={~p"/containers"}
+              icon="hero-cube"
+              label="Containers"
+              active={@page_title == "Containers"}
+            />
+            <.sidebar_link
+              path={~p"/storage"}
+              icon="hero-circle-stack"
+              label="Storage"
+              active={@page_title == "Storage"}
+            />
+            <.sidebar_link
               path={~p"/domains"}
               icon="hero-globe-alt"
               label="Domains"

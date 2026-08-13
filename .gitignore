@@ -36,3 +36,15 @@ npm-debug.log
 /assets/node_modules/
 
 .env
+
+# Operator bootstrap scripts. These are written against a specific live node and
+# carry real credentials inline (DB root passwords, OAuth client secrets). This
+# repo is public — keep them out of it entirely.
+initialize_production*.iex
+
+# Local agent/editor state. `.claude/worktrees` holds full checkouts and runs to
+# hundreds of megabytes; `.crucible` is a local index. Neither belongs in git.
+.claude/worktrees/
+.claude/settings.local.json
+.crucible/
+.vscode/

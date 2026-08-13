@@ -515,7 +515,16 @@ defmodule Homelab.Deployments.SpecBuilder do
     end)
   end
 
-  defp volume_name(tenant_slug, app_slug, container_path) do
+  @doc """
+  The named volume a blank-`source` volume row resolves to.
+
+  Public because the join is only correct if it is computed the same way twice: the
+  storage view has to match a live Docker volume back to the deployment that mounts it,
+  and a deployment that never named its volume is stored with `source: nil`. Re-deriving
+  the name there from a copy of this rule is how the two drift.
+  """
+  @spec volume_name(String.t(), String.t(), String.t()) :: String.t()
+  def volume_name(tenant_slug, app_slug, container_path) do
     path_slug =
       container_path
       |> String.trim_leading("/")
