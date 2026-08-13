@@ -5,14 +5,22 @@ if File.exists?(".env") do
   Dotenvy.source!([".env", System.get_env()])
 end
 
+# Typed environment readers, used throughout this file. `env_bool` treats
+# "true"/"1" as true and everything else (including unset) as false; `env_int`
+# falls back to `default` when the variable is unset.
+env_bool = fn name -> System.get_env(name) in ~w(true 1) end
+
+env_int = fn name, default ->
+  name |> System.get_env(to_string(default)) |> String.to_integer()
+end
+
 if System.get_env("PHX_SERVER") do
   config :homelab, HomelabWeb.Endpoint, server: true
 end
 
-config :homelab, HomelabWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+config :homelab, HomelabWeb.Endpoint, http: [port: env_int.("PORT", 4000)]
 
-bootstrap? = System.get_env("BOOTSTRAP") in ~w(true 1)
+bootstrap? = env_bool.("BOOTSTRAP")
 config :homelab, bootstrap: bootstrap?
 
 # Storage roots for the adoption/migration flow. `adoption_root` delimits which
@@ -60,8 +68,7 @@ config :homelab, :breakglass,
 if bootstrap? do
   config :homelab, :docker_socket, System.get_env("DOCKER_SOCKET", "/var/run/docker.sock")
 
-  config :homelab, HomelabWeb.Endpoint,
-    http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT", "4000"))]
+  config :homelab, HomelabWeb.Endpoint, http: [ip: {0, 0, 0, 0}, port: env_int.("PORT", 4000)]
 end
 
 if config_env() == :prod do
@@ -73,11 +80,11 @@ if config_env() == :prod do
         For example: ecto://USER:PASS@HOST/DATABASE
         """
 
-    maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
+    maybe_ipv6 = if env_bool.("ECTO_IPV6"), do: [:inet6], else: []
 
     config :homelab, Homelab.Repo,
       url: database_url,
-      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
+      pool_size: env_int.("POOL_SIZE", 10),
       socket_options: maybe_ipv6
 
     # Oban uses its OWN database (separate instance recommended) to keep its job
@@ -92,7 +99,7 @@ if config_env() == :prod do
 
     config :homelab, Homelab.ObanRepo,
       url: oban_database_url,
-      pool_size: String.to_integer(System.get_env("OBAN_POOL_SIZE") || "6"),
+      pool_size: env_int.("OBAN_POOL_SIZE", 6),
       socket_options: maybe_ipv6
   end
 
@@ -148,7 +155,7 @@ if config_env() == :prod do
       """
 
   scheme = System.get_env("PHX_SCHEME", "https")
-  url_port = String.to_integer(System.get_env("PHX_PORT", "443"))
+  url_port = env_int.("PHX_PORT", 443)
 
   config :homelab, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
