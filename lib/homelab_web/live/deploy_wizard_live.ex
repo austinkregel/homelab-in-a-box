@@ -2,11 +2,11 @@ defmodule HomelabWeb.DeployWizardLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Catalog
-  alias Homelab.Catalog.Dedup
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Catalog.Dedup
   alias Homelab.Catalog.MetadataEnricher
   alias Homelab.Catalog.Enrichers.ComposeParser
   alias Homelab.Catalog.Enrichers.DatabaseDetector
