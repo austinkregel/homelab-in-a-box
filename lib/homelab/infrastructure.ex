@@ -125,10 +125,7 @@ defmodule Homelab.Infrastructure do
   end
 
   defp hostname_is_container_id? do
-    case System.get_env("HOSTNAME") do
-      host when is_binary(host) -> String.match?(host, ~r/^[a-f0-9]{12,64}$/)
-      _ -> false
-    end
+    Homelab.ContainerId.hostname?(System.get_env("HOSTNAME"))
   end
 
   @doc "The shared internal Docker network all system services sit on."
