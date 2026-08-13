@@ -532,7 +532,7 @@ defmodule Homelab.Infrastructure do
   def connect_traefik_to_network(network_name) do
     case Client.get("/containers/homelab-traefik/json") do
       {:ok, %{"Id" => traefik_id, "NetworkSettings" => %{"Networks" => networks}}} ->
-        unless Map.has_key?(networks, network_name) do
+        if !Map.has_key?(networks, network_name) do
           Logger.info("Infrastructure: connecting Traefik to network #{network_name}")
           Client.post("/networks/#{network_name}/connect", %{"Container" => traefik_id})
         end
