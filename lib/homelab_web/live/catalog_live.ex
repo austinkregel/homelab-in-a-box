@@ -3,6 +3,7 @@ defmodule HomelabWeb.CatalogLive do
 
   alias Homelab.Catalog
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Catalog.Dedup
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.ConfigForm
   alias Homelab.Deployments.VolumeSpec
@@ -95,7 +96,7 @@ defmodule HomelabWeb.CatalogLive do
   end
 
   def handle_info({:curated_loaded, entries}, socket) do
-    {:noreply, assign(socket, :curated_entries, deduplicate_entries(entries))}
+    {:noreply, assign(socket, :curated_entries, Dedup.deduplicate_entries(entries))}
   end
 
   def handle_info(
@@ -1195,45 +1196,6 @@ defmodule HomelabWeb.CatalogLive do
       </div>
     </Layouts.app>
     """
-  end
-
-  defp deduplicate_entries(entries) do
-    entries
-    |> Enum.group_by(&normalize_name/1)
-    |> Enum.map(fn {_key, group} -> merge_duplicates(group) end)
-  end
-
-  defp normalize_name(entry) do
-    (entry.name || "")
-    |> String.downcase()
-    |> String.replace(~r/[\s_\-]+/, "")
-  end
-
-  defp merge_duplicates([single]), do: single
-
-  defp merge_duplicates(group) do
-    primary =
-      Enum.max_by(group, fn e ->
-        length(e.required_ports) + length(e.required_volumes) + map_size(e.default_env) +
-          if(e.description && e.description != "", do: 1, else: 0) +
-          if(e.logo_url, do: 2, else: 0) +
-          if(e.setup_url, do: 1, else: 0)
-      end)
-
-    alt_sources =
-      group
-      |> Enum.reject(&(&1.source == primary.source))
-      |> Enum.map(fn e -> %{source: e.source, full_ref: e.full_ref} end)
-      |> Enum.uniq_by(& &1.source)
-
-    merged_categories =
-      group
-      |> Enum.flat_map(& &1.categories)
-      |> Enum.uniq()
-
-    primary
-    |> Map.put(:alt_sources, alt_sources)
-    |> Map.put(:categories, merged_categories)
   end
 
   defp compact_source(entry) do
