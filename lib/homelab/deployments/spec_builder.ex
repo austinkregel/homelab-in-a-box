@@ -523,6 +523,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   and a deployment that never named its volume is stored with `source: nil`. Re-deriving
   the name there from a copy of this rule is how the two drift.
   """
+  @spec volume_name(String.t(), String.t(), String.t()) :: String.t()
   def volume_name(tenant_slug, app_slug, container_path) do
     path_slug =
       container_path
