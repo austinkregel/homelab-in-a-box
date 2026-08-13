@@ -283,7 +283,7 @@ defmodule Homelab.Bootstrap do
     hostname = System.get_env("HOSTNAME")
 
     cond do
-      hostname && String.match?(hostname, ~r/^[a-f0-9]{12,64}$/) ->
+      Homelab.ContainerId.hostname?(hostname) ->
         hostname
 
       File.exists?("/proc/self/cgroup") ->

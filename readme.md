@@ -70,7 +70,7 @@ Homelab-in-a-Box is a control plane for your self-hosted infrastructure. It prov
 
 ### Prerequisites
 
-- Elixir 1.15+
+- Elixir 1.19+
 - PostgreSQL (via Docker Compose or local install)
 - Docker (for container management features)
 

@@ -6,6 +6,7 @@ defmodule HomelabWeb.DeployWizardLive do
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Catalog.Dedup
   alias Homelab.Catalog.MetadataEnricher
   alias Homelab.Catalog.Enrichers.ComposeParser
   alias Homelab.Catalog.Enrichers.DatabaseDetector
@@ -1168,7 +1169,7 @@ defmodule HomelabWeb.DeployWizardLive do
         timeout: :infinity
       )
       |> Enum.flat_map(fn {:ok, list} -> list end)
-      |> deduplicate_entries()
+      |> Dedup.deduplicate_entries()
 
     {:noreply, assign(socket, curated_entries: entries, curated_loading: false)}
   end
@@ -4020,20 +4021,6 @@ defmodule HomelabWeb.DeployWizardLive do
       deprecated?: data["deprecated?"] || false,
       auth_required?: data["auth_required?"] || false
     })
-  end
-
-  defp deduplicate_entries(entries) do
-    entries
-    |> Enum.group_by(fn e ->
-      String.downcase(e.name || "") |> String.replace(~r/[\s_\-]+/, "")
-    end)
-    |> Enum.map(fn {_key, group} ->
-      Enum.max_by(group, fn e ->
-        length(e.required_ports) + length(e.required_volumes) + map_size(e.default_env) +
-          if(e.description && e.description != "", do: 1, else: 0) +
-          if(e.logo_url, do: 2, else: 0)
-      end)
-    end)
   end
 
   defp parse_port_params(ports), do: Homelab.Deployments.ConfigForm.parse_ports(ports)
