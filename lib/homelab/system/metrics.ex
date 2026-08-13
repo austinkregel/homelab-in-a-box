@@ -3,6 +3,14 @@ defmodule Homelab.System.Metrics do
   Collects host system metrics: CPU, memory, disk, and Docker info.
   """
 
+  @typedoc "A real host filesystem, as surfaced by `disks/0` and `collect/0`'s `:disk`."
+  @type disk :: %{
+          mount: String.t(),
+          total: non_neg_integer(),
+          used: non_neg_integer(),
+          percent: float()
+        }
+
   @doc """
   Collects host metrics. Returns a map with:
   - cpu_percent: float
@@ -12,6 +20,14 @@ defmodule Homelab.System.Metrics do
   - disk: list of %{mount: str, total: int, used: int, percent: float}
   - docker: map from Docker.Client.get("/info")
   """
+  @spec collect() :: %{
+          cpu_percent: float(),
+          memory_total: non_neg_integer(),
+          memory_used: non_neg_integer(),
+          memory_percent: float(),
+          disk: [disk()],
+          docker: map()
+        }
   def collect do
     cpu_percent = collect_cpu()
     {memory_total, memory_used, memory_percent} = collect_memory()
@@ -120,6 +136,7 @@ defmodule Homelab.System.Metrics do
   sleeps 100ms to sample CPU and calls the daemon for `/info`, neither of which a
   storage view needs.
   """
+  @spec disks() :: [disk()]
   def disks, do: collect_disk()
 
   defp collect_disk do
@@ -137,6 +154,7 @@ defmodule Homelab.System.Metrics do
   zero-capacity rows, then keeps one entry per device (the shortest mount path)
   so a device surfacing under several mounts is counted once.
   """
+  @spec parse_disk_output(String.t()) :: [disk()]
   def parse_disk_output(output) do
     output
     |> String.split("\n", trim: true)
