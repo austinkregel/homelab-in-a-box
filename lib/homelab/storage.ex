@@ -58,6 +58,34 @@ defmodule Homelab.Storage do
           status: atom()
         }
 
+  @typedoc "The consumer index: deployments that mount each `{type, source}`."
+  @type consumers :: %{{String.t(), String.t()} => [consumer()]}
+
+  @typedoc "A named Docker volume annotated with size, ownership, and its consumers."
+  @type volume :: %{
+          name: String.t() | nil,
+          driver: String.t() | nil,
+          labels: map(),
+          size: non_neg_integer() | nil,
+          in_use: boolean() | nil,
+          managed: boolean(),
+          adopted: boolean(),
+          consumers: [consumer()]
+        }
+
+  @typedoc "A distinct host bind source with the disk it lands on and its registered root."
+  @type bind :: %{
+          source: String.t(),
+          consumers: [consumer()],
+          disk: Metrics.disk() | nil,
+          root: root() | nil
+        }
+
+  @typedoc "A named host path root, either operator-registered or a built-in."
+  @type root :: %{name: String.t(), path: String.t(), builtin: boolean()}
+
+  @type usage_result :: {:ok, map()} | {:error, term()}
+
   # ---------------------------------------------------------------------------
   # Inventory
   # ---------------------------------------------------------------------------
@@ -69,6 +97,13 @@ defmodule Homelab.Storage do
   every deployment, and doing that twice to answer two halves of the same question is
   the kind of thing that makes a page feel slow for no reason.
   """
+  @spec inventory() :: %{
+          disks: [Metrics.disk()],
+          usage: usage_result(),
+          volumes: {:ok, [volume()]} | {:error, term()},
+          binds: [bind()],
+          roots: [root()]
+        }
   def inventory do
     consumers = consumer_index()
     usage = docker_usage()
@@ -85,12 +120,14 @@ defmodule Homelab.Storage do
   end
 
   @doc "Host filesystems from `df`, largest-used first is NOT applied — mount order is stable."
+  @spec host_disks() :: [Metrics.disk()]
   def host_disks, do: Metrics.disks()
 
   @doc """
   Docker's own accounting from `GET /system/df`. Slow on a big host (30s timeout), so the
   page loads it asynchronously rather than blocking the first render.
   """
+  @spec docker_usage() :: usage_result()
   def docker_usage do
     case DockerDisk.collect() do
       {:ok, summary} -> {:ok, summary}
@@ -111,6 +148,8 @@ defmodule Homelab.Storage do
   They disagree constantly and both are true — a volume with consumers and no refs is
   a stopped app, not garbage.
   """
+  @spec volumes(consumers() | nil, usage_result() | nil) ::
+          {:ok, [volume()]} | {:error, term()}
   def volumes(consumers \\ nil, usage \\ nil) do
     consumers = consumers || consumer_index()
     usage = usage || docker_usage()
@@ -161,6 +200,7 @@ defmodule Homelab.Storage do
   mount points, the same way the kernel picks a filesystem — so "this app's data is on
   the NAS" is legible without cross-referencing two tables by eye.
   """
+  @spec binds(consumers() | nil, [root()] | nil, [Metrics.disk()] | nil) :: [bind()]
   def binds(consumers \\ nil, roots \\ nil, disks \\ nil) do
     consumers = consumers || consumer_index()
     roots = roots || mount_roots()
@@ -210,6 +250,7 @@ defmodule Homelab.Storage do
   the spec builder performs — so a deployment that never named its volume still shows up
   against the volume it really mounts.
   """
+  @spec consumer_index() :: consumers()
   def consumer_index do
     Deployments.list_deployments()
     |> Enum.flat_map(&deployment_mounts/1)
@@ -265,6 +306,7 @@ defmodule Homelab.Storage do
   and marked `builtin: true`. They are not editable here — Settings → Infrastructure owns
   them, and having two forms write the same key is how they end up disagreeing.
   """
+  @spec mount_roots() :: [root()]
   def mount_roots do
     builtin = [
       %{name: "Adoption root", path: AdoptionPolicy.adoption_root(), builtin: true},
@@ -275,6 +317,7 @@ defmodule Homelab.Storage do
   end
 
   @doc "Only the operator-registered roots, in insertion order."
+  @spec custom_roots() :: [root()]
   def custom_roots do
     case Settings.get(@roots_key) do
       value when is_binary(value) and value != "" ->
@@ -302,6 +345,7 @@ defmodule Homelab.Storage do
   onto it to build a bind source, and a relative one yields a bind Docker reads as a
   named volume — the silent-empty-mount failure `VolumeSpec` exists to prevent.
   """
+  @spec put_mount_root(String.t(), String.t()) :: {:ok, [root()]} | {:error, String.t()}
   def put_mount_root(name, path) do
     name = String.trim(name || "")
     path = path |> to_string() |> String.trim() |> String.trim_trailing("/")
@@ -322,6 +366,7 @@ defmodule Homelab.Storage do
   end
 
   @doc "Forgets a registered root. Metadata only — nothing on disk is touched."
+  @spec delete_mount_root(String.t()) :: {:ok, [root()]} | {:error, String.t()}
   def delete_mount_root(name) do
     save_roots(Enum.reject(custom_roots(), &(&1.name == name)))
   end
@@ -358,6 +403,7 @@ defmodule Homelab.Storage do
   and the adoption scan both key off that label, and an unlabelled volume created by this
   app would read to both of them as somebody else's.
   """
+  @spec create_volume(map()) :: {:ok, String.t()} | {:error, String.t()}
   def create_volume(attrs) do
     name = attrs |> Map.get("name") |> to_string() |> String.trim()
     device = attrs |> Map.get("device") |> to_string() |> String.trim()
@@ -410,6 +456,7 @@ defmodule Homelab.Storage do
   app that happens to be down. Pass `force: true` to override once the operator has seen
   the consumer list.
   """
+  @spec delete_volume(String.t(), keyword()) :: :ok | {:error, String.t()}
   def delete_volume(name, opts \\ []) do
     consumers = Map.get(consumer_index(), {"volume", name}, [])
 
@@ -442,6 +489,7 @@ defmodule Homelab.Storage do
   of a network-namespace group goes round as a group: recreating one member mints a new
   container id the others are pinned to.
   """
+  @spec attach_mount(term(), map()) :: {:ok, Deployments.Deployment.t()} | {:error, String.t()}
   def attach_mount(deployment_id, row) do
     with {:ok, deployment} <- fetch_deployment(deployment_id),
          existing = Access.effective_volumes(deployment),
@@ -487,6 +535,7 @@ defmodule Homelab.Storage do
   Deliberately every deployment rather than only the running ones: adding a volume to a
   stopped app is how you fix the reason it is stopped.
   """
+  @spec attachable_deployments() :: [Deployments.Deployment.t()]
   def attachable_deployments do
     Repo.all(
       from(d in Deployments.Deployment,
