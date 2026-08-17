@@ -36,6 +36,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_auth, "public")
       |> assign(:settings_ports, [])
       |> assign(:settings_routes, [])
+      |> assign(:settings_additional_domains, [])
       |> assign(:volumes_edit_mode, false)
       |> assign(:volumes_rows, [])
       |> assign(:settings_memory_mb, "")
@@ -547,6 +548,10 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_auth, Access.auth_of(exposure))
      |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
      |> assign(:settings_routes, editable_routes(deployment.extra_routes))
+     |> assign(
+       :settings_additional_domains,
+       editable_domains(deployment.additional_domains)
+     )
      |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
      |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
      |> assign_gpu_settings(limits)
@@ -578,6 +583,10 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
      |> assign(:settings_ports, ports_from_params(settings["ports"]))
      |> assign(:settings_routes, routes_from_params(settings["routes"]))
+     |> assign(
+       :settings_additional_domains,
+       domains_from_params(settings["domains"])
+     )
      |> assign(:settings_sticky, settings["sticky"] == "true")
      |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
      |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
@@ -699,6 +708,22 @@ defmodule HomelabWeb.DeploymentLive do
     {:noreply, assign(socket, :settings_routes, routes)}
   end
 
+  def handle_event("settings_add_domain", _params, socket) do
+    blank = %{"host" => "", "path_prefix" => "", "port" => ""}
+
+    {:noreply,
+     assign(
+       socket,
+       :settings_additional_domains,
+       socket.assigns.settings_additional_domains ++ [blank]
+     )}
+  end
+
+  def handle_event("settings_remove_domain", %{"index" => idx}, socket) do
+    domains = List.delete_at(socket.assigns.settings_additional_domains, String.to_integer(idx))
+    {:noreply, assign(socket, :settings_additional_domains, domains)}
+  end
+
   def handle_event("save_settings", %{"settings" => settings}, socket) do
     deployment = socket.assigns.deployment
     access = settings["access"] || socket.assigns.settings_access
@@ -726,6 +751,9 @@ defmodule HomelabWeb.DeploymentLive do
         parse_routed_port(settings["routed_port"] || socket.assigns.settings_routed_port),
       # Only a proxied app has paths to route; in host mode Traefik is not in the way.
       extra_routes: if(access == "proxy", do: parse_routes(settings["routes"]), else: []),
+      # Additional hostnames are proxy-only for the same reason as extra routes.
+      additional_domains:
+        if(access == "proxy", do: parse_additional_domains(settings["domains"]), else: []),
       proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
       health_check_override: health_override(deployment, settings),
@@ -2108,6 +2136,66 @@ defmodule HomelabWeb.DeploymentLive do
                     </div>
                   </div>
 
+                  <div class="space-y-2 rounded-lg bg-base-200/40 p-3">
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs font-medium text-base-content">Additional domains</span>
+                      <button
+                        type="button"
+                        phx-click="settings_add_domain"
+                        class="text-[10px] text-primary hover:underline cursor-pointer"
+                      >
+                        + Add domain
+                      </button>
+                    </div>
+                    <p class="text-[10px] text-base-content/40 leading-snug">
+                      Route another <em>hostname</em>
+                      to this same container. Leave the path blank to send the whole host;
+                      set one to scope it — Synapse answers on <code>matrix.example.com</code>
+                      while <code>example.com/.well-known/matrix</code>
+                      serves only the delegation files, leaving the rest of the apex free.
+                      Leave the port blank to reuse the routed port, or set one to reach a
+                      different backend (a sibling app inside a shared gluetun network).
+                    </p>
+
+                    <div
+                      :for={{domain, idx} <- Enum.with_index(@settings_additional_domains)}
+                      class="flex items-center gap-2"
+                    >
+                      <input
+                        type="text"
+                        name={"settings[domains][#{idx}][host]"}
+                        value={domain["host"]}
+                        placeholder="example.com"
+                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                      />
+                      <input
+                        type="text"
+                        name={"settings[domains][#{idx}][path_prefix]"}
+                        value={domain["path_prefix"]}
+                        placeholder="/.well-known/matrix (optional)"
+                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                      />
+                      <span class="text-[10px] text-base-content/40">→</span>
+                      <input
+                        type="text"
+                        inputmode="numeric"
+                        name={"settings[domains][#{idx}][port]"}
+                        value={domain["port"]}
+                        placeholder="port"
+                        class="w-20 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                      />
+                      <button
+                        type="button"
+                        phx-click="settings_remove_domain"
+                        phx-value-index={idx}
+                        class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
+                        aria-label={"Remove domain #{domain["host"]}"}
+                      >
+                        <.icon name="hero-trash" class="size-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
                   <label class="flex items-start gap-2 cursor-pointer">
                     <input type="hidden" name="settings[sticky]" value="false" />
                     <input
@@ -3356,6 +3444,48 @@ defmodule HomelabWeb.DeploymentLive do
       %{
         "path_prefix" => String.trim(route["path_prefix"]),
         "port" => parse_routed_port(to_string(route["port"]))
+      }
+    end)
+  end
+
+  defp editable_domains(domains) do
+    domains
+    |> List.wrap()
+    |> Enum.map(fn domain ->
+      %{
+        "host" => domain["host"] || "",
+        "path_prefix" => domain["path_prefix"] || "",
+        "port" => to_string(domain["port"] || "")
+      }
+    end)
+  end
+
+  defp domains_from_params(nil), do: []
+
+  defp domains_from_params(params) when is_map(params) do
+    params
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{
+        "host" => row["host"] || "",
+        "path_prefix" => row["path_prefix"] || "",
+        "port" => row["port"] || ""
+      }
+    end)
+  end
+
+  # Only `host` is required. A row with a blank host is dropped (the operator added it and
+  # walked away); a blank path or port on a real host means "the whole host to the routed
+  # port", so they collapse to nil rather than being rejected.
+  defp parse_additional_domains(params) do
+    params
+    |> domains_from_params()
+    |> Enum.reject(fn domain -> String.trim(domain["host"]) == "" end)
+    |> Enum.map(fn domain ->
+      %{
+        "host" => String.trim(domain["host"]),
+        "path_prefix" => blank_to_nil(String.trim(domain["path_prefix"])),
+        "port" => parse_routed_port(to_string(domain["port"]))
       }
     end)
   end

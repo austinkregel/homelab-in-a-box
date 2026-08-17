@@ -657,6 +657,7 @@ defmodule Homelab.Deployments.SpecBuilder do
     |> Map.merge(exposure_middleware_labels(router, exposure))
     |> Map.merge(sticky_labels(router, deployment))
     |> Map.merge(extra_route_labels(deployment, router, domain))
+    |> Map.merge(additional_domain_labels(deployment, router))
   end
 
   # The plane already provisions exactly one wildcard: `Infrastructure.self_ingress_yaml/2`
@@ -697,6 +698,17 @@ defmodule Homelab.Deployments.SpecBuilder do
   end
 
   @spec covered_by_wildcard?(term(), term()) :: boolean()
+  defp covered_by_wildcard?(parent, parent)
+       when is_binary(parent) and parent != "" do
+    # The APEX is not one-label-under itself, but it IS the `main` name on the plane's
+    # wildcard cert (`self_ingress_yaml/2` asks for `main: <base_domain>` + `*.<base>`).
+    # An apex router (Synapse's `example.com/.well-known/matrix/*`) must reuse that cert,
+    # not order a fresh single-name one. Because `wildcard_domains/0` is sorted
+    # longest-first, this exact match is found before any shorter suffix, so the invariant
+    # that at most one parent matches a host still holds.
+    true
+  end
+
   defp covered_by_wildcard?(domain, parent)
        when is_binary(domain) and is_binary(parent) and parent != "" do
     # Splitting on the FIRST dot is what enforces the single-label rule structurally:
@@ -765,6 +777,90 @@ defmodule Homelab.Deployments.SpecBuilder do
     end)
     |> Map.new()
   end
+
+  @doc """
+  Routers + services for a deployment's `additional_domains` — a SECOND host, optionally
+  scoped to a path, that must reach this same container.
+
+  `extra_route_labels/3` is the mirror of this: a second PATH on the same host reaching a
+  second port. This is a second HOST. Synapse is why routing needed both — the homeserver
+  answers on `matrix.example.com`, but the delegation files that make user ids read
+  `@you:example.com` have to be served from the APEX, `example.com/.well-known/matrix/*`,
+  without handing the rest of the apex to Synapse. So each entry carries an optional
+  `path_prefix` (scope the host to a path, leaving the rest of it free) and an optional
+  `port` (a distinct backend — a sibling app inside a shared gluetun netns); `port` falls
+  back to the deployment's routed port.
+
+  The two invariants extra routes are built on hold here for the same reasons, and the
+  shared test "no router the spec emits escapes the protection the base router carries"
+  enforces the second across BOTH features:
+
+    * Every router names its own service. Traefik auto-links a router to a same-named
+      service only while the workload defines exactly one; the moment a second host
+      appears, an unnamed base service would be rejected and take the working route down.
+
+    * Every router carries the deployment's exposure middleware. Traefik applies
+      middleware per ROUTER, so a host alias without it serves the container with no
+      forwardAuth and no ip allowlist. Exposure is read from the deployment here rather
+      than passed in — there is no way to call this and get an unguarded host.
+  """
+  def additional_domain_labels(deployment, base_router) do
+    exposure = to_string(Access.effective_exposure(deployment))
+    default_port = routed_port(deployment)
+
+    deployment
+    |> Map.get(:additional_domains)
+    |> List.wrap()
+    |> Enum.flat_map(fn entry ->
+      host = entry["host"]
+      path = entry["path_prefix"]
+      port = entry["port"]
+
+      if is_binary(host) and host != "" do
+        name = additional_router_name(host, path)
+        backend = additional_backend_port(port, default_port)
+
+        # The middleware DEFINITIONS live on the base router; this alias only references
+        # them (owner = base_router), exactly as an extra path route does. And its cert
+        # comes off the wildcard the host is covered by — including the apex, which is the
+        # `main` name on the plane's own wildcard rather than a child of it.
+        [
+          {"traefik.http.routers.#{name}.rule", additional_rule(host, path)},
+          {"traefik.http.routers.#{name}.entrypoints", "web,websecure"},
+          {"traefik.http.routers.#{name}.tls", "true"},
+          {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
+          {"traefik.http.routers.#{name}.service", name},
+          {"traefik.http.services.#{name}.loadbalancer.server.port", backend}
+        ] ++
+          Map.to_list(router_middleware_labels(name, base_router, exposure)) ++
+          Map.to_list(wildcard_cert_labels(name, host))
+      else
+        []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # An explicit port on the entry is the gluetun case -- a sibling app behind the shared
+  # netns. Absent, the alias reaches the same backend the base router does.
+  defp additional_backend_port(port, _default) when is_integer(port), do: to_string(port)
+  defp additional_backend_port(_port, default), do: default
+
+  # A path-scoped host gets a name that includes the path, so the same host listed with
+  # two different paths yields two distinct routers rather than one clobbering the other.
+  defp additional_router_name(host, path) when is_binary(path) and path not in ["", "/"] do
+    "#{sanitize_domain(host)}-#{sanitize_path(path)}"
+  end
+
+  defp additional_router_name(host, _path), do: sanitize_domain(host)
+
+  # A path-scoped host rule is `Host && PathPrefix` — the same shape (and the same
+  # length-based priority win over a bare `Host`) an extra path route relies on.
+  defp additional_rule(host, path) when is_binary(path) and path not in ["", "/"] do
+    "Host(`#{host}`) && PathPrefix(`#{path}`)"
+  end
+
+  defp additional_rule(host, _path), do: "Host(`#{host}`)"
 
   # A router name is part of a label KEY, so it has to be a plain token: "/app" ->
   # "app", "/apps/events" -> "apps-events".

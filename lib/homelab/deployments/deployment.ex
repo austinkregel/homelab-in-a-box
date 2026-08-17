@@ -60,6 +60,14 @@ defmodule Homelab.Deployments.Deployment do
     # second port (aut.hair: Laravel on 8000, Reverb websockets on 6001 at /app).
     # Each: %{"path_prefix" => "/app", "port" => 6001}.
     field :extra_routes, {:array, :map}, default: []
+    # Additional HOST routes -- a second hostname (optionally path-scoped) reaching this
+    # same container. The mirror of extra_routes: that is a second PATH to a second port,
+    # this is a second HOST. Synapse needs it -- the homeserver answers on
+    # matrix.example.com while example.com/.well-known/matrix/* serves the delegation
+    # files that keep user ids as @you:example.com. Each: %{"host" => "example.com",
+    # "path_prefix" => "/.well-known/matrix", "port" => nil}; path_prefix and port are
+    # optional (port falls back to routed_port, e.g. a sibling app in a shared netns).
+    field :additional_domains, {:array, :map}, default: []
     # The donor CONTAINER id this child was last created against. Diverges from the
     # donor's current `external_id` the moment the donor is re-created, which is the
     # only signal that a child is unstartable — see Netns.stale?/2.
@@ -96,7 +104,8 @@ defmodule Homelab.Deployments.Deployment do
                       command_override entrypoint_override network_aliases_override
                       capabilities_add_override capabilities_drop_override
                       devices_override sysctls_override
-                      proxy_options routed_port extra_routes network_parent_id
+                      proxy_options routed_port extra_routes additional_domains
+                      network_parent_id
                       netns_parent_external_id
                       computed_spec last_reconciled_at error_message)a
 
@@ -112,6 +121,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_inclusion(:restart_policy_override, @restart_policies)
     |> validate_replicas()
     |> validate_extra_routes()
+    |> validate_additional_domains()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
     |> RuntimeSpec.validate_capabilities(:capabilities_add_override)
@@ -249,6 +259,68 @@ defmodule Homelab.Deployments.Deployment do
 
   defp valid_port?(port) when is_integer(port), do: port > 0 and port < 65_536
   defp valid_port?(_port), do: false
+
+  # An additional domain becomes its own Traefik router. A malformed one fails the same
+  # silent way an extra route does -- Traefik declines it and the second hostname 404s
+  # with nothing in the logs -- so reject it here, at the form. Only `host` is required;
+  # `path_prefix` (scope the host to a path) and `port` (a distinct backend) are optional.
+  defp validate_additional_domains(changeset) do
+    case get_change(changeset, :additional_domains) do
+      nil ->
+        changeset
+
+      domains when is_list(domains) ->
+        Enum.reduce(domains, changeset, fn entry, acc ->
+          cond do
+            not valid_host?(entry["host"]) ->
+              add_error(
+                acc,
+                :additional_domains,
+                "host is required and must be a domain (got #{inspect(entry["host"])})"
+              )
+
+            not optional_path_prefix?(entry["path_prefix"]) ->
+              add_error(
+                acc,
+                :additional_domains,
+                "path must start with / (got #{inspect(entry["path_prefix"])})"
+              )
+
+            not optional_port?(entry["port"]) ->
+              add_error(
+                acc,
+                :additional_domains,
+                "port must be 1-65535 (got #{inspect(entry["port"])})"
+              )
+
+            true ->
+              acc
+          end
+        end)
+
+      _ ->
+        add_error(changeset, :additional_domains, "must be a list")
+    end
+  end
+
+  # A Host rule needs an FQDN. Requiring a dot also catches the common typo of typing a
+  # path into the host field, which would otherwise become an unroutable `Host(/foo)`.
+  defp valid_host?(host) when is_binary(host) do
+    trimmed = String.trim(host)
+
+    trimmed != "" and String.contains?(trimmed, ".") and
+      not String.contains?(trimmed, "/") and not String.contains?(trimmed, " ")
+  end
+
+  defp valid_host?(_host), do: false
+
+  # path_prefix and port are optional on an additional domain -- absent means "the whole
+  # host to the routed port". A PRESENT value still has to be well-formed.
+  defp optional_path_prefix?(path) when path in [nil, ""], do: true
+  defp optional_path_prefix?(path), do: valid_path_prefix?(path)
+
+  defp optional_port?(port) when port in [nil, ""], do: true
+  defp optional_port?(port), do: valid_port?(port)
 
   @doc "All valid exposure-mode override values (strings)."
   def exposure_modes, do: @exposure_modes

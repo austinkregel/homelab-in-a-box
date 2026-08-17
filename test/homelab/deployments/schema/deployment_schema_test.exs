@@ -81,6 +81,70 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
     end
   end
 
+  describe "changeset/2 additional_domains validation" do
+    setup do
+      %{tenant: insert(:tenant), template: insert(:app_template)}
+    end
+
+    defp domains_changeset(tenant, template, domains) do
+      Deployment.changeset(%Deployment{}, %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        additional_domains: domains
+      })
+    end
+
+    test "a host-only entry is valid (whole host to the routed port)", %{
+      tenant: tenant,
+      template: template
+    } do
+      changeset = domains_changeset(tenant, template, [%{"host" => "chat.example.com"}])
+      assert changeset.valid?
+    end
+
+    test "a path- and port-scoped entry is valid", %{tenant: tenant, template: template} do
+      changeset =
+        domains_changeset(tenant, template, [
+          %{"host" => "example.com", "path_prefix" => "/.well-known/matrix", "port" => 8008}
+        ])
+
+      assert changeset.valid?
+    end
+
+    test "a blank/missing host is rejected", %{tenant: tenant, template: template} do
+      changeset = domains_changeset(tenant, template, [%{"path_prefix" => "/x"}])
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "host is required"))
+    end
+
+    test "a host without a dot is rejected (catches a path typed into the host field)", %{
+      tenant: tenant,
+      template: template
+    } do
+      changeset = domains_changeset(tenant, template, [%{"host" => "notafqdn"}])
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "must be a domain"))
+    end
+
+    test "a present but malformed path is rejected", %{tenant: tenant, template: template} do
+      changeset =
+        domains_changeset(tenant, template, [%{"host" => "example.com", "path_prefix" => "x"}])
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "path must start with /"))
+    end
+
+    test "a present but out-of-range port is rejected", %{tenant: tenant, template: template} do
+      changeset =
+        domains_changeset(tenant, template, [%{"host" => "example.com", "port" => 70_000}])
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "port must be 1-65535"))
+    end
+  end
+
   describe "changeset/2 status inclusion" do
     test "accepts every valid status" do
       tenant = insert(:tenant)

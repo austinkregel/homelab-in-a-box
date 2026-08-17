@@ -962,6 +962,12 @@ defmodule Homelab.Deployments.SpecBuilderTest do
             extra_routes: [
               %{"path_prefix" => "/app", "port" => 6001},
               %{"path_prefix" => "/apps/events", "port" => 6002}
+            ],
+            # A host alias is another router too, so the same invariant must hold for it —
+            # this is the "www alias" the comment above anticipated.
+            additional_domains: [
+              %{"host" => "chat.example.com"},
+              %{"host" => "example.com", "path_prefix" => "/.well-known/matrix"}
             ]
           })
 
@@ -976,6 +982,164 @@ defmodule Homelab.Deployments.SpecBuilderTest do
                    "while the base router requires #{Enum.join(base, ",")}"
         end
       end
+    end
+  end
+
+  describe "additional domains (a second host on one container)" do
+    # base_domain drives wildcard-cert reuse; pinned via app-env so these DB-free specs
+    # never fall through Config.base_domain/0 to a Settings DB read. Same setup, same
+    # reason, as the "wildcard certificate reuse" describe.
+    setup do
+      previous = Application.get_env(:homelab, :base_domain)
+      Application.put_env(:homelab, :base_domain, "example.com")
+      on_exit(fn -> Application.put_env(:homelab, :base_domain, previous) end)
+    end
+
+    # Synapse is the motivating case: the homeserver answers on matrix.example.com. A second
+    # host with no path reaches the whole container on the deployment's routed port.
+    test "a second host routes to the same container on the routed port" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          routed_port: 8008,
+          additional_domains: [%{"host" => "chat.example.com"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.routers.chat-example-com.rule"] ==
+               "Host(`chat.example.com`)"
+
+      # No explicit port on the entry, so it reuses the deployment's routed port.
+      assert spec.labels["traefik.http.services.chat-example-com.loadbalancer.server.port"] ==
+               "8008"
+    end
+
+    # THE Synapse shape: the apex serves ONLY /.well-known/matrix/*, so the rest of
+    # example.com stays free for a website. Host && PathPrefix, exactly like an extra route.
+    test "a path-scoped host serves only that path, leaving the rest of the host free" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          routed_port: 8008,
+          additional_domains: [
+            %{"host" => "example.com", "path_prefix" => "/.well-known/matrix"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      r = "example-com-well-known-matrix"
+
+      assert spec.labels["traefik.http.routers.#{r}.rule"] ==
+               "Host(`example.com`) && PathPrefix(`/.well-known/matrix`)"
+
+      assert spec.labels["traefik.http.services.#{r}.loadbalancer.server.port"] == "8008"
+    end
+
+    # The gluetun case: an alias can name a DISTINCT backend port -- a sibling app sharing
+    # the donor's network namespace -- rather than the deployment's routed port.
+    test "a host can target a distinct backend port" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          routed_port: 8008,
+          additional_domains: [%{"host" => "sonarr.example.com", "port" => 8989}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.services.sonarr-example-com.loadbalancer.server.port"] ==
+               "8989"
+    end
+
+    # The same trap extra routes hit: a second router with no explicit service makes Traefik
+    # reject the whole workload, taking the base route down with it.
+    test "every additional-domain router names its own service" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          additional_domains: [%{"host" => "chat.example.com"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.labels["traefik.http.routers.chat-example-com.service"] == "chat-example-com"
+    end
+
+    # The same host listed with two paths must not collapse to one router -- the path is
+    # part of the router name, so both survive.
+    test "the same host with two paths yields two distinct routers" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          additional_domains: [
+            %{"host" => "example.com", "path_prefix" => "/.well-known/matrix"},
+            %{"host" => "example.com", "path_prefix" => "/.well-known/openid-configuration"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.routers.example-com-well-known-matrix.rule"] ==
+               "Host(`example.com`) && PathPrefix(`/.well-known/matrix`)"
+
+      assert spec.labels[
+               "traefik.http.routers.example-com-well-known-openid-configuration.rule"
+             ] ==
+               "Host(`example.com`) && PathPrefix(`/.well-known/openid-configuration`)"
+    end
+
+    # The apex is the `main` name on the plane's wildcard cert, NOT a child of it. Without
+    # the apex branch in covered_by_wildcard?/2, an apex router carries certresolver with no
+    # tls.domains and orders a redundant single-name cert for a name the wildcard authenticates.
+    test "the apex host reuses the wildcard cert instead of ordering its own" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          additional_domains: [
+            %{"host" => "example.com", "path_prefix" => "/.well-known/matrix"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      r = "example-com-well-known-matrix"
+
+      assert spec.labels["traefik.http.routers.#{r}.tls.domains[0].main"] == "example.com"
+      assert spec.labels["traefik.http.routers.#{r}.tls.domains[0].sans"] == "*.example.com"
+    end
+
+    # A blank host is dropped, not turned into an unroutable `Host()` -- the mirror of a
+    # half-filled extra route being ignored.
+    test "an entry with a blank host emits no router" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "matrix.example.com",
+          additional_domains: [%{"host" => "", "path_prefix" => "/x"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      refute Enum.any?(Map.values(spec.labels), &String.contains?(&1, "/x"))
     end
   end
 
