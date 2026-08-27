@@ -184,9 +184,26 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       # one as a :host deployment produced a replacement on a private bridge, reachable on
       # nothing, and the discovery traffic it existed for (mDNS/SSDP) silently stopped.
       host_network: Map.get(host_config, "NetworkMode") == "host",
+      # A container that lives in ANOTHER container's namespace — `network_mode:
+      # service:gluetun` in the compose file it came from. Captured as the donor's
+      # container id, which the planner resolves to whichever deployment is adopting
+      # that container.
+      #
+      # Not capturing it is silent and severe: the replacement comes up on the tenant
+      # network instead, which for the apps people put behind a VPN means every packet
+      # that used to go through the tunnel now goes straight out. It adopts "successfully"
+      # and leaks from the first second.
+      netns_parent_container_id: netns_parent_id(host_config),
       in_scope: in_scope,
       mounts: classified
     }
+  end
+
+  defp netns_parent_id(host_config) do
+    case Map.get(host_config, "NetworkMode") do
+      "container:" <> id when id != "" -> id
+      _ -> nil
+    end
   end
 
   # Every name this container answers to on its current networks, so the managed
