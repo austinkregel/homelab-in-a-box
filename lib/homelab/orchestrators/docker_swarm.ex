@@ -33,6 +33,8 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     # Swarm, it hangs `pending` forever with an empty error field, and we would otherwise
     # spend a multi-gigabyte image pull on a task that can never be placed.
     with :ok <- preflight_gpu(spec),
+         :ok <- preflight_devices(spec),
+         :ok <- preflight_netns(spec),
          # Pull FIRST, then ensure the networks immediately before create — same race
          # DockerEngine.deploy/1 documents: a long image pull leaves a wide window in
          # which a freshly-created (empty) network can be swept by a racing cleanup or
@@ -54,6 +56,35 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     case GpuFacts.preflight_swarm(Map.get(spec, :gpu)) do
       :ok -> :ok
       {:error, message} -> {:error, {:gpu_unschedulable, message}}
+    end
+  end
+
+  # `ServiceSpec.ContainerSpec` has NO device field -- the same swarmkit gap that forces
+  # a GPU through generic resources (see build_resources/1), and there is no generic-
+  # resource equivalent for an arbitrary /dev node. Refuse rather than drop: a service
+  # created without the device it asked for STARTS, and only fails later from inside the
+  # app ("cannot open /dev/net/tun"), which reads as an app bug rather than a platform
+  # one. Capabilities and sysctls, by contrast, Swarm does support (API >= 1.41).
+  defp preflight_devices(spec) do
+    case Map.get(spec, :devices) do
+      devices when is_list(devices) and devices != [] ->
+        paths = Enum.map_join(devices, ", ", & &1["host_path"])
+        {:error, {:unsupported_on_swarm, :devices, paths}}
+
+      _ ->
+        :ok
+    end
+  end
+
+  # A Swarm task cannot join another container's network namespace: there is no
+  # `NetworkMode` on `ContainerSpec` and no `container:<id>` target a task network
+  # accepts. `Netns` already refuses to SAVE the setting under Swarm; this catches a
+  # deployment configured while the orchestrator was Engine and deployed after a switch.
+  defp preflight_netns(spec) do
+    if Map.get(spec, :netns_child, false) do
+      {:error, {:unsupported_on_swarm, :netns_sharing, spec.network}}
+    else
+      :ok
     end
   end
 
@@ -460,7 +491,19 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     # entrypoint as an argument to itself.
     |> maybe_put_list("Command", Map.get(spec, :entrypoint))
     |> maybe_put_list("Args", Map.get(spec, :command))
+    # Capabilities and sysctls ARE expressible here, unlike devices — but under
+    # different names than the Engine's (`CapabilityAdd`, not `CapAdd`), and only from
+    # API 1.41. ReqClient negotiates the version and floors at v1.45, so the fields are
+    # always available on a daemon new enough to be running swarm mode at all.
+    |> maybe_put_list("CapabilityAdd", Map.get(spec, :capabilities_add))
+    |> maybe_put_list("CapabilityDrop", Map.get(spec, :capabilities_drop))
+    |> maybe_put_sysctls(Map.get(spec, :sysctls))
   end
+
+  defp maybe_put_sysctls(spec, sysctls) when is_map(sysctls) and map_size(sysctls) > 0,
+    do: Map.put(spec, "Sysctls", sysctls)
+
+  defp maybe_put_sysctls(spec, _sysctls), do: spec
 
   defp maybe_put_list(spec, _key, nil), do: spec
   defp maybe_put_list(spec, _key, []), do: spec
@@ -512,7 +555,8 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     port_configs =
       Enum.map(ports, fn p ->
         %{
-          "Protocol" => "tcp",
+          # Specs built before UDP support carry no :protocol key at all; those are TCP.
+          "Protocol" => Map.get(p, :protocol) || "tcp",
           "TargetPort" => String.to_integer(to_string(p.internal)),
           "PublishedPort" => String.to_integer(to_string(p.external)),
           "PublishMode" => "ingress"
