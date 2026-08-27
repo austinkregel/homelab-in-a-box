@@ -118,7 +118,11 @@ defmodule Homelab.Deployments.AdoptionPlanner do
         name: name,
         template_attrs: template_attrs,
         deployment_attrs: deployment_attrs(review),
-        targets: targets
+        targets: targets,
+        # The container id whose network namespace the original lived in, when it lived
+        # in one (`network_mode: service:x`). Carried so `Adoption` can refuse rather
+        # than adopt it onto the tenant network — see apply_service/2.
+        netns_parent_container_id: Map.get(review, :netns_parent_container_id)
       },
       phase1: phase1,
       phase2: phase2
