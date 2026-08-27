@@ -9,6 +9,7 @@ defmodule Homelab.Deployments do
   import Ecto.Query
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.Netns
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
   alias Homelab.Services.ActivityLog
@@ -48,6 +49,17 @@ defmodule Homelab.Deployments do
 
   def get_deployment!(id) do
     Repo.get!(Deployment, id) |> Repo.preload([:tenant, :app_template])
+  end
+
+  @doc """
+  Re-reads which deployments live in this one's network namespace, with their templates.
+
+  A fresh read rather than a cached association: the set changes when a SIBLING is
+  edited, so a page holding a stale copy would show — and derive a donor's firewall env
+  from — a group that no longer matches reality.
+  """
+  def reload_network_children(%Deployment{} = deployment) do
+    Repo.preload(deployment, [network_children: [:app_template, :tenant]], force: true)
   end
 
   def get_deployment_for_tenant(tenant_id, id) do
@@ -252,8 +264,25 @@ defmodule Homelab.Deployments do
     |> Repo.update_all(set: [status: :failed])
   end
 
+  @doc """
+  Deletes a deployment row.
+
+  Refused while anything is living in its network namespace. A child cannot survive
+  losing its donor — its `NetworkMode` names a container id that would no longer exist,
+  so the daemon refuses to start it — and the alternative to refusing is worse than a
+  broken child: silently reattaching a tunneled app to the tenant network puts its
+  traffic OUTSIDE the VPN, which for the apps people put behind gluetun is the one
+  outcome the whole arrangement exists to prevent. The database enforces this too
+  (`on_delete: :restrict`); this is the version that can explain itself.
+  """
   def delete_deployment(%Deployment{} = deployment) do
-    Repo.delete(deployment)
+    case Netns.children(Repo.preload(deployment, :network_children)) do
+      [] ->
+        Repo.delete(deployment)
+
+      children ->
+        {:error, {:netns_donor_in_use, Enum.map(children, & &1.id)}}
+    end
   end
 
   def stop_deployment(%Deployment{} = deployment) do
@@ -323,10 +352,23 @@ defmodule Homelab.Deployments do
   labeled container with no deployment record (which the orphan sweep would then
   reap). On failure the row is kept and marked `:failed` with the error, so the
   user sees it and can retry the delete once Docker is reachable.
+
+  Refused outright while anything lives in this deployment's network namespace — see
+  `delete_deployment/1` for why detaching the children silently is the worse option.
   """
   def destroy_deployment(%Deployment{} = deployment) do
-    deployment = Repo.preload(deployment, [:tenant, :app_template])
+    deployment = Repo.preload(deployment, [:tenant, :app_template, :network_children])
 
+    case Netns.children(deployment) do
+      [] ->
+        do_destroy(deployment)
+
+      children ->
+        {:error, {:netns_donor_in_use, Enum.map(children, & &1.id)}}
+    end
+  end
+
+  defp do_destroy(deployment) do
     case undeploy_container(deployment) do
       :ok ->
         Repo.delete(deployment)
@@ -395,7 +437,7 @@ defmodule Homelab.Deployments do
   def deploy_release(%Deployment{} = app, companions \\ [], _opts \\ [])
       when is_list(companions) do
     steps =
-      Enum.flat_map(companions, fn companion ->
+      Enum.flat_map(netns_donor_companions(app) ++ companions, fn companion ->
         [
           %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
           %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
@@ -416,6 +458,71 @@ defmodule Homelab.Deployments do
     do: [%{type: :publish_ingress, resource_handle: %{}}]
 
   defp ingress_steps(_app), do: []
+
+  # A netns child's donor is a dependency in the strictest sense: the child's create
+  # payload contains the donor's CONTAINER ID, so the donor must exist and be running
+  # first. The saga already expresses exactly this — companions are deployed and awaited
+  # healthy before the app — so the donor is prepended to the companion list rather than
+  # needing an ordering mechanism of its own.
+  #
+  # De-duplicated: the donor may also be a companion for another reason (a compose
+  # bundle where gluetun is both), and planning it twice would deploy it twice.
+  defp netns_donor_companions(%Deployment{network_parent_id: nil}), do: []
+
+  defp netns_donor_companions(%Deployment{} = app) do
+    case Netns.donor(app) do
+      nil -> []
+      donor -> [donor]
+    end
+  end
+
+  @doc """
+  Re-drives a whole network-namespace stack: the donor first, then every container
+  living in its namespace.
+
+  This is the cascade sharing a namespace costs. Re-creating the donor mints a NEW
+  container id, and each child's `NetworkMode` still names the old one — Docker will not
+  start such a container at all ("cannot join network of a non running container"), so
+  the children are not merely stale, they are dead until re-created against the new id.
+
+  So: any change that re-creates the donor — including a change to a CHILD's route,
+  since a child's Traefik labels live on the donor — has to re-create the children too.
+  Callers pass any member of the stack; the donor is resolved from it.
+
+  A plain config change on a child (env, volumes) does not go through here: it does not
+  touch the donor, so `recreate_deployment/1` is both sufficient and much cheaper.
+  """
+  def redeploy_netns_stack(%Deployment{} = deployment) do
+    donor =
+      case Netns.donor(deployment) do
+        nil -> deployment
+        parent -> parent
+      end
+
+    donor = Repo.preload(donor, [:tenant, :app_template, :network_children])
+    children = Netns.children(donor)
+
+    child_steps =
+      Enum.flat_map(children, fn child ->
+        [
+          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}},
+          %{type: :await_health, resource_handle: %{"deployment_id" => child.id}}
+        ]
+      end)
+
+    steps =
+      [
+        %{type: :app_container, resource_handle: %{}},
+        %{type: :await_health, resource_handle: %{}}
+      ] ++ ingress_steps(donor) ++ child_steps
+
+    with {:ok, donor} <- reset_to_pending(donor),
+         {:ok, _children} <- reset_all_to_pending(children),
+         {:ok, release} <- Releases.plan_release(donor, steps) do
+      {:ok, _job} = ReleaseRunner.enqueue(release)
+      {:ok, release}
+    end
+  end
 
   @doc """
   Re-drives the stack that governs `deployment` by planning a FRESH release and
