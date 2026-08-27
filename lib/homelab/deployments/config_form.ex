@@ -5,6 +5,7 @@ defmodule Homelab.Deployments.ConfigForm do
   """
 
   alias Homelab.Catalog.Enrichers.PortRoles
+  alias Homelab.Deployments.Access
 
   @doc """
   Normalizes indexed port form params (`%{"0" => %{...}, "1" => %{...}}`) into an
@@ -32,6 +33,10 @@ defmodule Homelab.Deployments.ConfigForm do
       "description" => port["description"] || "",
       "optional" => port["optional"] == "true",
       "role" => role,
+      # Normalized through Access so a form that posts no protocol field at all — an
+      # older cached page, or a submit path that hasn't grown the input yet — yields
+      # "tcp" rather than nil, and the stored map always answers the question.
+      "protocol" => Access.port_protocol(port),
       "published" => port["published"] == "true"
     }
   end
