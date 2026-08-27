@@ -37,6 +37,8 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
             external_id: external_id
           )
 
+          record_netns_parent(deployment, spec)
+
           Logger.info("[deploy_container] deployed #{deployment.id} -> #{external_id}")
 
           {:ok,
@@ -72,6 +74,16 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
         :ok
     end
   end
+
+  # Which donor CONTAINER this child was actually created against. The child's create
+  # payload embeds that id, so once the donor is re-created the child cannot be started
+  # again — recording it here is what lets the reconciler notice, since nothing about
+  # the child's own row changes when the donor moves.
+  defp record_netns_parent(deployment, %{netns_child: true, network: "container:" <> parent_id}) do
+    Deployments.update_deployment(deployment, %{netns_parent_external_id: parent_id})
+  end
+
+  defp record_netns_parent(_deployment, _spec), do: :ok
 
   defp load_target(step, ctx) do
     case Map.get(step.resource_handle, "deployment_id") do
