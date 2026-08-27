@@ -65,6 +65,10 @@ defmodule Homelab.Deployments.ConfigOverridesTest do
     Map.merge(
       %Deployment{
         id: 1,
+        # Explicitly childless: SpecBuilder asks a donor for its children (their routes
+        # go on ITS labels) and looks them up when the association is not loaded, which
+        # these sandbox-free struct-in/spec-out tests cannot do.
+        network_children: [],
         tenant: tenant(),
         tenant_id: 1,
         app_template: t,
