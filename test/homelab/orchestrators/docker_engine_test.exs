@@ -216,6 +216,53 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       assert body["Healthcheck"] == %{"Test" => ["CMD", "true"]}
     end
 
+    test "publishes a UDP port under /udp, and both transports of one port side by side" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "id1"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      spec =
+        base_spec(%{
+          ports: [
+            # The GameSpy master probe: UDP-only, and unreachable when published as tcp.
+            %{internal: 27900, external: 27900, protocol: "udp"},
+            %{internal: 18710, external: 18710, protocol: "tcp"},
+            # One port, both transports — must not collapse to a single key.
+            %{internal: 53, external: 53, protocol: "udp"},
+            %{internal: 53, external: 53, protocol: "tcp"}
+          ]
+        })
+
+      assert {:ok, "id1"} = DockerEngine.deploy(spec)
+      assert_received {:create_body, body}
+
+      assert body["ExposedPorts"] == %{
+               "27900/udp" => %{},
+               "18710/tcp" => %{},
+               "53/udp" => %{},
+               "53/tcp" => %{}
+             }
+
+      # ExposedPorts and PortBindings must agree on the protocol suffix, or the daemon
+      # accepts the spec and the socket is simply never reachable.
+      assert body["HostConfig"]["PortBindings"] == %{
+               "27900/udp" => [%{"HostPort" => "27900"}],
+               "18710/tcp" => [%{"HostPort" => "18710"}],
+               "53/udp" => [%{"HostPort" => "53"}],
+               "53/tcp" => [%{"HostPort" => "53"}]
+             }
+    end
+
     test "creates the deployment network when it does not yet exist" do
       test_pid = self()
 
@@ -466,6 +513,127 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     end
   end
 
+  # A container in ANOTHER container's namespace is defined by what it OMITS, exactly
+  # like host networking: the daemon REJECTS port bindings, a NetworkingConfig and a
+  # network connect alongside a container network mode rather than ignoring them, so
+  # emitting one fails the deploy outright.
+  describe "deploy/1 — shared network namespace" do
+    defp netns_spec(overrides \\ %{}) do
+      base_spec(
+        Map.merge(%{network: "container:gluetun-abc", netns_child: true, ports: []}, overrides)
+      )
+    end
+
+    test "sets NetworkMode to the donor container and never tries to CREATE that network" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        send(test_pid, {:get, path})
+        {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        send(test_pid, {:post, path, body})
+
+        if String.starts_with?(path, "/containers/create"),
+          do: {:ok, %{"Id" => "cid"}},
+          else: {:ok, %{}}
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(netns_spec())
+
+      assert_received {:post, "/containers/create?name=myapp", create_body}
+      assert create_body["HostConfig"]["NetworkMode"] == "container:gluetun-abc"
+
+      # `container:<id>` is not a network name. Inspecting it 404s, which reads as "does
+      # not exist" — and the next thing that happens is a network being created by that
+      # literal name.
+      refute_received {:get, "/networks/container:gluetun-abc"}
+    end
+
+    test "attaches to nothing else, even carrying a routing label" do
+      # Its route is served by the DONOR's labels; `/networks/<n>/connect` on a container
+      # in another's namespace fails with the same error host networking gets.
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "cid"}}
+
+          String.ends_with?(path, "/connect") ->
+            send(test_pid, {:connect, path, body})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec = netns_spec(%{labels: %{"traefik.enable" => "true"}})
+
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+      refute_received {:connect, _path, _body}
+    end
+
+    test "never sends a NetworkingConfig, which the daemon rejects as a conflicting option" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "cid"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(netns_spec(%{network_aliases: ["sonarr"]}))
+
+      assert_received {:create_body, body}
+      refute Map.has_key?(body, "NetworkingConfig")
+      assert body["HostConfig"]["PortBindings"] == %{}
+      refute Map.has_key?(body, "ExposedPorts")
+    end
+
+    test "a DONOR is attached to ingress via its bridge networks" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "donor-cid"}}
+
+          String.ends_with?(path, "/connect") ->
+            send(test_pid, {:connect, path, body})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec = base_spec(%{bridge_networks: ["homelab-iab-internal"]})
+      assert {:ok, "donor-cid"} = DockerEngine.deploy(spec)
+
+      assert_received {:connect, "/networks/homelab-iab-internal/connect",
+                       %{
+                         "Container" => "donor-cid"
+                       }}
+    end
+  end
+
   describe "restart policy" do
     defp create_body_for(spec) do
       test_pid = self()
@@ -502,6 +670,110 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         policy = create_body_for(base_spec(%{restart_policy: name}))
         assert policy == %{"Name" => name}
       end
+    end
+  end
+
+  describe "kernel privileges" do
+    defp host_config_for(spec) do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn
+        "/containers/create?name=" <> _rest, body, _opts ->
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "c123"}}
+
+        _path, _body, _opts ->
+          {:ok, %{}}
+      end)
+
+      assert {:ok, "c123"} = DockerEngine.deploy(spec)
+      assert_received {:create_body, body}
+      body["HostConfig"]
+    end
+
+    test "capabilities land on CapAdd/CapDrop" do
+      host_config =
+        host_config_for(base_spec(%{capabilities_add: ["NET_ADMIN"], capabilities_drop: ["ALL"]}))
+
+      assert host_config["CapAdd"] == ["NET_ADMIN"]
+      assert host_config["CapDrop"] == ["ALL"]
+    end
+
+    test "an empty capability list is omitted rather than sent as []" do
+      host_config = host_config_for(base_spec(%{capabilities_add: [], capabilities_drop: []}))
+
+      refute Map.has_key?(host_config, "CapAdd")
+      refute Map.has_key?(host_config, "CapDrop")
+    end
+
+    test "devices land on Devices in the daemon's shape" do
+      spec =
+        base_spec(%{
+          devices: [
+            %{
+              "host_path" => "/dev/net/tun",
+              "container_path" => "/dev/net/tun",
+              "permissions" => "rwm"
+            }
+          ]
+        })
+
+      assert host_config_for(spec)["Devices"] == [
+               %{
+                 "PathOnHost" => "/dev/net/tun",
+                 "PathInContainer" => "/dev/net/tun",
+                 "CgroupPermissions" => "rwm"
+               }
+             ]
+    end
+
+    test "sysctls land on Sysctls" do
+      spec = base_spec(%{sysctls: %{"net.ipv4.conf.all.src_valid_mark" => "1"}})
+
+      assert host_config_for(spec)["Sysctls"] == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+    end
+
+    test "an empty sysctl map is omitted" do
+      refute Map.has_key?(host_config_for(base_spec(%{sysctls: %{}})), "Sysctls")
+    end
+
+    test "operator devices and an AMD GPU's device nodes COEXIST" do
+      # `HostConfig.Devices` has two producers and is a single API key. A plain put
+      # meant whichever ran second erased the other: a ROCm workload that also passes a
+      # USB dongle would lose /dev/kfd and fail as what looks like a driver bug.
+      spec =
+        base_spec(%{
+          gpu: %{vendor: "amd", count: 1, devices: "all", kind: "AMD-GPU"},
+          devices: [
+            %{
+              "host_path" => "/dev/ttyUSB0",
+              "container_path" => "/dev/ttyUSB0",
+              "permissions" => "rw"
+            }
+          ]
+        })
+
+      paths = Enum.map(host_config_for(spec)["Devices"], & &1["PathInContainer"])
+
+      assert "/dev/kfd" in paths
+      assert "/dev/dri" in paths
+      assert "/dev/ttyUSB0" in paths
+    end
+
+    test "a device requested by BOTH the operator and the GPU branch appears once" do
+      spec =
+        base_spec(%{
+          gpu: %{vendor: "amd", count: 1, devices: "all", kind: "AMD-GPU"},
+          devices: [
+            %{"host_path" => "/dev/dri", "container_path" => "/dev/dri", "permissions" => "rwm"}
+          ]
+        })
+
+      paths = Enum.map(host_config_for(spec)["Devices"], & &1["PathInContainer"])
+
+      assert Enum.count(paths, &(&1 == "/dev/dri")) == 1
     end
   end
 
