@@ -135,4 +135,74 @@ defmodule HomelabWeb.DeployWizardAdvancedTest do
     assert deployment.resource_limits_override == nil
     assert deployment.routed_port == nil
   end
+
+  # An app that needs NET_ADMIN or a device to function at all cannot be deployed first
+  # and fixed afterwards: it fails its healthcheck, the release rolls back, and the
+  # Runtime card that would have fixed it never becomes reachable.
+  describe "kernel privileges at create" do
+    test "the panel offers all three", %{conn: conn, template: template} do
+      {:ok, _view, html} = live(conn, ~p"/deploy/new?step=review&template_id=#{template.id}")
+
+      assert html =~ "advanced[capabilities_add]"
+      assert html =~ "advanced[devices]"
+      assert html =~ "advanced[sysctls]"
+    end
+
+    test "capabilities are normalized on the way in", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
+      deployment =
+        deploy_with(conn, template, tenant, %{"capabilities_add" => "cap_net_admin\nNET_ADMIN"})
+
+      assert deployment.capabilities_add_override == ["NET_ADMIN"]
+    end
+
+    test "devices accept the compose spelling, so a line can be pasted straight over", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
+      deployment =
+        deploy_with(conn, template, tenant, %{
+          "devices" => "/dev/net/tun\n/dev/ttyUSB0:/dev/ttyUSB0:rw"
+        })
+
+      assert [tun, usb] = deployment.devices_override
+      assert tun["container_path"] == "/dev/net/tun"
+      assert tun["permissions"] == "rwm"
+      assert usb["permissions"] == "rw"
+    end
+
+    test "sysctls are read as key=value lines", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
+      deployment =
+        deploy_with(conn, template, tenant, %{
+          "sysctls" => "net.ipv4.conf.all.src_valid_mark=1"
+        })
+
+      assert deployment.sysctls_override == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+    end
+
+    test "blanks stay absent so the template still wins", %{
+      conn: conn,
+      template: template,
+      tenant: tenant
+    } do
+      deployment =
+        deploy_with(conn, template, tenant, %{
+          "capabilities_add" => "",
+          "devices" => "\n  \n",
+          "sysctls" => ""
+        })
+
+      assert deployment.capabilities_add_override == nil
+      assert deployment.devices_override == nil
+      assert deployment.sysctls_override == nil
+    end
+  end
 end
