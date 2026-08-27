@@ -54,6 +54,7 @@ defmodule Homelab.Deployments.SpecBuilderPropertyTest do
   defp deployment_gen(tenant, template) do
     constant(%Homelab.Deployments.Deployment{
       id: System.unique_integer([:positive]),
+      network_children: [],
       tenant: tenant,
       tenant_id: tenant.id,
       app_template: template,
@@ -163,6 +164,7 @@ defmodule Homelab.Deployments.SpecBuilderPropertyTest do
 
       deployment = %Homelab.Deployments.Deployment{
         id: 1,
+        network_children: [],
         tenant: tenant,
         tenant_id: tenant.id,
         app_template: template,
