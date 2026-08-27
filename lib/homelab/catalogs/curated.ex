@@ -9,6 +9,7 @@ defmodule Homelab.Catalogs.Curated do
   @behaviour Homelab.Behaviours.ApplicationCatalog
 
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Deployments.RuntimeSpec
 
   @cache_key {__MODULE__, :entries}
 
@@ -90,6 +91,13 @@ defmodule Homelab.Catalogs.Curated do
       required_volumes: parse_volumes(item["volumes"] || []),
       default_env: item["env"] || %{},
       required_env: item["required_env"] || [],
+      # Normalized through RuntimeSpec so the JSON can use whichever spelling reads
+      # best — `NET_ADMIN` or `CAP_NET_ADMIN`, `"/dev/net/tun"` or the long form.
+      capabilities_add: RuntimeSpec.parse_capabilities(item["cap_add"]),
+      capabilities_drop: RuntimeSpec.parse_capabilities(item["cap_drop"]),
+      devices: RuntimeSpec.parse_devices(item["devices"] || []),
+      sysctls: RuntimeSpec.parse_sysctls(item["sysctls"]),
+      netns_donor_kind: item["netns_donor_kind"],
       official?: true
     }
   end
@@ -100,6 +108,8 @@ defmodule Homelab.Catalogs.Curated do
         "internal" => p["internal"],
         "external" => p["external"],
         "role" => p["role"] || "other",
+        # Catalog JSON may declare "udp"; entries that omit it are tcp, as they always were.
+        "protocol" => if(p["protocol"] == "udp", do: "udp", else: "tcp"),
         "description" => p["description"] || "",
         "optional" => p["optional"] || false,
         # Don't force a host-port binding. Catalog apps default to reverse-proxy
