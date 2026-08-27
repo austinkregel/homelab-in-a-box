@@ -52,6 +52,7 @@ defmodule Homelab.Deployments.SpecBuilderRoutingTest do
       struct(
         %Homelab.Deployments.Deployment{
           id: 1,
+          network_children: [],
           tenant: tenant,
           tenant_id: tenant.id,
           app_template: template,
