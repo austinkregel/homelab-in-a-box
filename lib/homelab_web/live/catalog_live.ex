@@ -3,6 +3,7 @@ defmodule HomelabWeb.CatalogLive do
 
   alias Homelab.Catalog
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Deployments.Access
   alias Homelab.Catalog.MetadataEnricher
 
   alias Homelab.Tenants
@@ -261,6 +262,7 @@ defmodule HomelabWeb.CatalogLive do
             "description" => "",
             "optional" => "true",
             "role" => "other",
+            "protocol" => "tcp",
             "published" => false
           }
         ]
@@ -1428,6 +1430,7 @@ defmodule HomelabWeb.CatalogLive do
         "description" => port["description"],
         "optional" => port["optional"] == "true",
         "role" => port["role"] || "other",
+        "protocol" => Access.port_protocol(port),
         "published" => port["published"] == "true"
       }
     end)
