@@ -112,6 +112,7 @@ defmodule Homelab.Catalogs.LinuxServer do
             "internal" => port["internal"],
             "external" => port["external"],
             "description" => port["desc"],
+            "protocol" => if(port["protocol"] == "udp", do: "udp", else: "tcp"),
             "optional" => port["optional"] == true
           }
         end)
