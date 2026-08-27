@@ -233,6 +233,12 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # no route to publish for it either, so there is nothing this would accomplish.
   defp maybe_connect_routing_network(_container_id, %{host_network: true}), do: :ok
 
+  # Nor is a container in ANOTHER container's namespace: the daemon rejects
+  # `/networks/<n>/connect` on it with the identical error, for the identical reason.
+  # Its route is carried by its donor, which IS attached to ingress — see
+  # Homelab.Deployments.Netns.
+  defp maybe_connect_routing_network(_container_id, %{netns_child: true}), do: :ok
+
   defp maybe_connect_routing_network(container_id, spec) do
     bridge_networks = Map.get(spec, :bridge_networks, [])
 
@@ -337,9 +343,69 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_healthcheck(Map.get(spec, :health_check))
     |> maybe_put_user(Map.get(spec, :user))
     |> maybe_put_gpu(Map.get(spec, :gpu))
+    |> maybe_put_devices(Map.get(spec, :devices))
+    |> maybe_put_capabilities(spec)
+    |> maybe_put_sysctls(Map.get(spec, :sysctls))
     |> maybe_put_aliases(spec)
     |> maybe_put_list("Cmd", Map.get(spec, :command))
     |> maybe_put_list("Entrypoint", Map.get(spec, :entrypoint))
+  end
+
+  # What the container may ask the kernel for. Both lists are sent as-is; RuntimeSpec
+  # has already normalized the spelling, so the daemon never sees `NET_ADMIN` and
+  # `CAP_NET_ADMIN` as two separate grants of the same permission.
+  defp maybe_put_capabilities(payload, spec) do
+    payload
+    |> put_capability_list("CapAdd", Map.get(spec, :capabilities_add))
+    |> put_capability_list("CapDrop", Map.get(spec, :capabilities_drop))
+  end
+
+  defp put_capability_list(payload, _key, nil), do: payload
+  defp put_capability_list(payload, _key, []), do: payload
+
+  defp put_capability_list(payload, key, caps) when is_list(caps),
+    do: put_in_host_config(payload, key, caps)
+
+  defp put_capability_list(payload, _key, _caps), do: payload
+
+  # Docker takes sysctl VALUES as strings and rejects an integer outright, which is
+  # why RuntimeSpec stringifies rather than trusting whatever the form posted.
+  defp maybe_put_sysctls(payload, sysctls) when is_map(sysctls) and map_size(sysctls) > 0,
+    do: put_in_host_config(payload, "Sysctls", sysctls)
+
+  defp maybe_put_sysctls(payload, _sysctls), do: payload
+
+  # Operator-requested device passthrough (/dev/net/tun for a VPN client, a USB dongle
+  # for a Zigbee coordinator).
+  defp maybe_put_devices(payload, devices) when is_list(devices) and devices != [] do
+    append_devices(
+      payload,
+      Enum.map(devices, fn device ->
+        %{
+          "PathOnHost" => device["host_path"],
+          "PathInContainer" => device["container_path"],
+          "CgroupPermissions" => device["permissions"]
+        }
+      end)
+    )
+  end
+
+  defp maybe_put_devices(payload, _devices), do: payload
+
+  # `HostConfig.Devices` has TWO producers -- the operator's list and the AMD GPU
+  # branch -- and it is a single API key. Writing it with put_in_host_config/3 means
+  # whichever runs second silently erases the other: a ROCm workload that also passes
+  # a USB dongle would lose /dev/kfd and fail as what looks like a driver bug. Both
+  # producers append instead, deduped on the path INSIDE the container (the one Docker
+  # actually keys a device on).
+  defp append_devices(payload, new_devices) do
+    existing = get_in(payload, ["HostConfig", "Devices"]) || []
+
+    put_in_host_config(
+      payload,
+      "Devices",
+      Enum.uniq_by(existing ++ new_devices, & &1["PathInContainer"])
+    )
   end
 
   # nil = let the image's own default apply. Adoption sets these to what the ORIGINAL
@@ -360,6 +426,12 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # supported only for containers in user defined networks"). SpecBuilder already drops
   # them for that mode; this makes it unrepresentable rather than merely unbuilt.
   defp maybe_put_aliases(payload, %{host_network: true}), do: payload
+
+  # Same for a container network mode: the daemon rejects a create carrying
+  # `NetworkingConfig` alongside it ("conflicting options"), and there is no endpoint to
+  # register an alias on anyway. Siblings in one namespace reach each other on
+  # `localhost`, not by name.
+  defp maybe_put_aliases(payload, %{netns_child: true}), do: payload
 
   defp maybe_put_aliases(payload, spec) do
     case Map.get(spec, :network_aliases, []) do
@@ -411,7 +483,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
       end)
 
     payload
-    |> put_in_host_config("Devices", devices)
+    # Appends rather than sets: the operator's own devices land in the same API key,
+    # and a plain put would silently drop whichever list was written first.
+    |> append_devices(devices)
     # Without membership of the video/render groups the device nodes are present but
     # unreadable, and ROCm reports "no permission" rather than "no device".
     |> put_in_host_config("GroupAdd", ["video", "render"])
@@ -442,16 +516,20 @@ defmodule Homelab.Orchestrators.DockerEngine do
     Map.put(payload, "Healthcheck", healthcheck)
   end
 
+  # The `/<proto>` suffix is part of the KEY the daemon matches on, so ExposedPorts and
+  # PortBindings must agree on it. A binding under `27900/tcp` for a container listening
+  # on 27900/udp is not a partial success — the daemon accepts it, the container starts,
+  # and the UDP socket is simply never reachable from off-box. Nothing errors.
   defp build_port_config(ports) when is_list(ports) and length(ports) > 0 do
     exposed =
       ports
-      |> Enum.map(fn p -> {"#{p.internal}/tcp", %{}} end)
+      |> Enum.map(fn p -> {port_key(p), %{}} end)
       |> Map.new()
 
     bindings =
       ports
       |> Enum.map(fn p ->
-        {"#{p.internal}/tcp", [%{"HostPort" => to_string(p.external)}]}
+        {port_key(p), [%{"HostPort" => to_string(p.external)}]}
       end)
       |> Map.new()
 
@@ -459,6 +537,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
   end
 
   defp build_port_config(_), do: {%{}, %{}}
+
+  # Specs built before UDP support carry no :protocol key at all; those ports are TCP.
+  defp port_key(p), do: "#{p.internal}/#{Map.get(p, :protocol) || "tcp"}"
 
   defp build_mounts(volumes) do
     Enum.map(volumes, fn vol ->
