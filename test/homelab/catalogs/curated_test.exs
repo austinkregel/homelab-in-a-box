@@ -66,4 +66,45 @@ defmodule Homelab.Catalogs.CuratedTest do
       assert {:error, :not_found} = Curated.app_details("nonexistent_app")
     end
   end
+
+  # The catalog listed Gluetun long before anything could express what it needs, so it
+  # was offered as deployable and could never open a tunnel: no NET_ADMIN, no
+  # /dev/net/tun, no src_valid_mark. A VPN client without those is not degraded, it is
+  # broken — and it fails from inside itself, so it reads as an app bug.
+  describe "kernel privileges" do
+    test "Gluetun carries everything it needs to actually work" do
+      assert {:ok, entry} = Curated.app_details("Gluetun")
+
+      assert entry.capabilities_add == ["NET_ADMIN"]
+
+      assert entry.devices == [
+               %{
+                 "host_path" => "/dev/net/tun",
+                 "container_path" => "/dev/net/tun",
+                 "permissions" => "rwm"
+               }
+             ]
+
+      # WireGuard's packets are dropped by reverse-path filtering without this.
+      assert entry.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+
+      # And the keys without which it cannot connect at all are marked required, so the
+      # wizard asks for them rather than deploying something that will fail.
+      assert "WIREGUARD_PRIVATE_KEY" in entry.required_env
+    end
+
+    test "Gluetun is declared as a network donor, which is what derives its firewall rules" do
+      assert {:ok, entry} = Curated.app_details("Gluetun")
+      assert entry.netns_donor_kind == "gluetun"
+    end
+
+    test "an ordinary app declares none of it" do
+      assert {:ok, entry} = Curated.app_details("Gitea")
+
+      assert entry.capabilities_add == []
+      assert entry.devices == []
+      assert entry.sysctls == %{}
+      assert entry.netns_donor_kind == nil
+    end
+  end
 end
