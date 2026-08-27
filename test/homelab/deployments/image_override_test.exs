@@ -63,6 +63,7 @@ defmodule Homelab.Deployments.ImageOverrideTest do
     Map.merge(
       %Deployment{
         id: 1,
+        network_children: [],
         tenant: tenant(),
         tenant_id: 1,
         app_template: t,
