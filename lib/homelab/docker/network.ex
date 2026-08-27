@@ -53,6 +53,7 @@ defmodule Homelab.Docker.Network do
   """
   @spec ensure(String.t()) :: :ok | {:error, term()}
   def ensure(name) when name in @predefined, do: :ok
+  def ensure("container:" <> _id), do: :ok
 
   def ensure(name) do
     case inspect_network(name) do
@@ -74,9 +75,15 @@ defmodule Homelab.Docker.Network do
 
   Docker's predefined networks (`host`, `none`, `bridge`) short-circuit: a host-network
   workload names `host` here, and that network is neither creatable nor removable.
+
+  So does `container:<id>`, which is not a network name at all — it is a workload
+  saying "put me in that container's namespace". Treating it as one would have the
+  daemon 404 on `/networks/container:abc`, read that as "does not exist", and try to
+  CREATE a network by that name.
   """
   @spec ensure_for_workload(String.t()) :: :ok | {:error, term()}
   def ensure_for_workload(name) when name in @predefined, do: :ok
+  def ensure_for_workload("container:" <> _id), do: :ok
 
   def ensure_for_workload(name) do
     case inspect_network(name) do
@@ -178,6 +185,35 @@ defmodule Homelab.Docker.Network do
     |> Map.values()
     |> Enum.map(&(&1["Name"] || ""))
     |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
+  The CIDRs a network hands out, from its IPAM config. `[]` when it does not exist.
+
+  Needed by a firewalled network donor (gluetun): its kill-switch drops any reply that
+  is not headed for the tunnel, so the subnets Traefik reaches it from have to be named
+  explicitly in `FIREWALL_OUTBOUND_SUBNETS`. Read from the daemon rather than assumed,
+  because Docker picks these from its address pool and they differ per host.
+
+  Best-effort by design: a donor whose subnets could not be read should still deploy,
+  and the readiness check is what tells the operator the route will not work.
+  """
+  @spec subnets(String.t()) :: [String.t()]
+  def subnets(name) when name in @predefined, do: []
+  def subnets("container:" <> _id), do: []
+
+  def subnets(name) do
+    case inspect_network(name) do
+      {:ok, network} ->
+        network
+        |> get_in(["IPAM", "Config"])
+        |> List.wrap()
+        |> Enum.map(&(is_map(&1) && &1["Subnet"]))
+        |> Enum.filter(&is_binary/1)
+
+      _ ->
+        []
+    end
   end
 
   defp inspect_network(name) do
