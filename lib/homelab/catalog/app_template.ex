@@ -31,6 +31,22 @@ defmodule Homelab.Catalog.AppTemplate do
     # adopted -- silently, if the default happens to stay up.
     field :command, {:array, :string}
     field :entrypoint, {:array, :string}
+
+    # What the container may ask the KERNEL for. A VPN client needs NET_ADMIN and
+    # /dev/net/tun, a Zigbee coordinator needs its USB dongle, WireGuard needs
+    # net.ipv4.conf.all.src_valid_mark. Without these an app of that shape can be
+    # described here but never actually work. See Deployments.RuntimeSpec.
+    field :capabilities_add, {:array, :string}
+    field :capabilities_drop, {:array, :string}
+    field :devices, {:array, :map}
+    field :sysctls, :map
+
+    # What kind of network DONOR this image is, when it is one (nil = not a donor).
+    # Sharing a namespace is generic; making the shared namespace usable is not —
+    # gluetun's firewall drops a child's traffic unless its ports and the Docker subnets
+    # are named in its env. See SpecBuilder's donor-env derivation.
+    field :netns_donor_kind, :string
+
     field :ports, {:array, :map}, default: []
     field :resource_limits, :map, default: %{}
     field :backup_policy, :map, default: %{}
@@ -56,7 +72,9 @@ defmodule Homelab.Catalog.AppTemplate do
 
   @required_fields ~w(slug name version image)a
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
-                      volumes network_aliases command entrypoint ports resource_limits backup_policy health_check depends_on
+                      volumes network_aliases command entrypoint
+                      capabilities_add capabilities_drop devices sysctls netns_donor_kind
+                      ports resource_limits backup_policy health_check depends_on
                       source source_id logo_url category auth_mode user)a
 
   def changeset(app_template, attrs) do
@@ -72,6 +90,13 @@ defmodule Homelab.Catalog.AppTemplate do
     # that loses its host `source` here mounts an empty volume for all of them at once.
     |> Homelab.Deployments.VolumeSpec.validate_changeset(:volumes)
     |> Homelab.Deployments.GpuSpec.validate_changeset(:resource_limits)
+    # A template's privileges are inherited by every deployment of it, so a typo'd
+    # capability or a device path that does not exist is wrong everywhere at once —
+    # and each of the three fails quietly rather than loudly. See RuntimeSpec.
+    |> Homelab.Deployments.RuntimeSpec.validate_capabilities(:capabilities_add)
+    |> Homelab.Deployments.RuntimeSpec.validate_capabilities(:capabilities_drop, allow_all: true)
+    |> Homelab.Deployments.RuntimeSpec.validate_devices(:devices)
+    |> Homelab.Deployments.RuntimeSpec.validate_sysctls(:sysctls)
     |> unique_constraint(:slug)
   end
 end
