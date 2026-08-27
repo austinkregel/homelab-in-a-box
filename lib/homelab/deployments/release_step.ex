@@ -17,6 +17,10 @@ defmodule Homelab.Deployments.ReleaseStep do
     :dependency_container,
     :await_health,
     :app_container,
+    # A container that joins another deployment's network namespace, and so must be
+    # (re)created AFTER the container that owns it — the donor's id is part of the
+    # child's create payload. Same handler as the others; the ORDER is the point.
+    :netns_child_container,
     :publish_ingress,
     # Adoption steps (taking over an existing stack in place). `:backup_verify`
     # is the fail-closed gate; `:adopt_credentials` imports existing secrets
