@@ -21,13 +21,24 @@ defmodule Homelab.Catalog.Enrichers.DockerfileParser do
       args
       |> String.split(~r/\s+/, trim: true)
       |> Enum.map(fn port_str ->
-        port_num = port_str |> String.replace(~r|/\w+$|, "") |> String.trim()
+        # `EXPOSE 27900/udp` is valid Dockerfile syntax, and the transport is kept
+        # rather than regex-stripped: dropping it leaves a port map that reads correctly
+        # and publishes the wrong socket. Bare `EXPOSE 80` is tcp, per Docker's default.
+        {port_num, protocol} =
+          case port_str |> String.trim() |> String.split("/", parts: 2) do
+            [num, proto] ->
+              {String.trim(num), if(String.downcase(String.trim(proto)) == "udp", do: "udp")}
+
+            [num] ->
+              {num, nil}
+          end
 
         %{
           "internal" => port_num,
           "external" => port_num,
           "description" => nil,
           "optional" => false,
+          "protocol" => protocol || "tcp",
           "role" => Homelab.Catalog.Enrichers.PortRoles.infer(port_num)
         }
       end)
