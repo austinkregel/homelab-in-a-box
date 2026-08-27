@@ -288,6 +288,7 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
                :dependency_container,
                :await_health,
                :app_container,
+               :netns_child_container,
                :publish_ingress,
                :backup_verify,
                :adopt_credentials,
