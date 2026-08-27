@@ -3,6 +3,8 @@ defmodule Homelab.Deployments.Deployment do
   import Ecto.Changeset
 
   alias Homelab.Deployments.GpuSpec
+  alias Homelab.Deployments.Netns
+  alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
 
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
@@ -39,6 +41,14 @@ defmodule Homelab.Deployments.Deployment do
     field :command_override, {:array, :string}
     field :entrypoint_override, {:array, :string}
     field :network_aliases_override, {:array, :string}
+    # Kernel privileges, per deployment (nil = inherit the template). Per-deployment
+    # rather than template-only because a shared catalog template cannot know that
+    # THIS instance is the one wired to the dongle on THIS host. Same nil-vs-[]
+    # distinction as command/entrypoint: [] explicitly clears what the template adds.
+    field :capabilities_add_override, {:array, :string}
+    field :capabilities_drop_override, {:array, :string}
+    field :devices_override, {:array, :map}
+    field :sysctls_override, :map
     # Reverse-proxy options (sticky sessions, &c).
     field :proxy_options, :map, default: %{}
     # The container port the proxy forwards to. An explicit DECISION, never
@@ -48,12 +58,22 @@ defmodule Homelab.Deployments.Deployment do
     # second port (aut.hair: Laravel on 8000, Reverb websockets on 6001 at /app).
     # Each: %{"path_prefix" => "/app", "port" => 6001}.
     field :extra_routes, {:array, :map}, default: []
+    # The donor CONTAINER id this child was last created against. Diverges from the
+    # donor's current `external_id` the moment the donor is re-created, which is the
+    # only signal that a child is unstartable — see Netns.stale?/2.
+    field :netns_parent_external_id, :string
     field :computed_spec, :map
     field :last_reconciled_at, :utc_datetime
     field :error_message, :string
 
     belongs_to :tenant, Homelab.Tenants.Tenant
     belongs_to :app_template, Homelab.Catalog.AppTemplate
+
+    # Whose network namespace this container lives in (nil = its own). This is the
+    # `network_mode: service:gluetun` shape: the child has no network stack, no ports
+    # and no DNS name of its own — see Homelab.Deployments.Netns.
+    belongs_to :network_parent, __MODULE__
+    has_many :network_children, __MODULE__, foreign_key: :network_parent_id
 
     has_many :domains, Homelab.Networking.Domain
     has_many :dns_records, Homelab.Networking.DnsRecord
@@ -67,7 +87,10 @@ defmodule Homelab.Deployments.Deployment do
                       volumes_override exposure_mode_override resource_limits_override
                       health_check_override restart_policy_override replicas_override
                       command_override entrypoint_override network_aliases_override
-                      proxy_options routed_port extra_routes
+                      capabilities_add_override capabilities_drop_override
+                      devices_override sysctls_override
+                      proxy_options routed_port extra_routes network_parent_id
+                      netns_parent_external_id
                       computed_spec last_reconciled_at error_message)a
 
   def changeset(deployment, attrs) do
@@ -84,8 +107,14 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_extra_routes()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
+    |> RuntimeSpec.validate_capabilities(:capabilities_add_override)
+    |> RuntimeSpec.validate_capabilities(:capabilities_drop_override, allow_all: true)
+    |> RuntimeSpec.validate_devices(:devices_override)
+    |> RuntimeSpec.validate_sysctls(:sysctls_override)
+    |> Netns.validate_changeset()
     |> foreign_key_constraint(:tenant_id)
     |> foreign_key_constraint(:app_template_id)
+    |> foreign_key_constraint(:network_parent_id)
     |> unique_constraint([:tenant_id, :app_template_id])
   end
 
