@@ -27,6 +27,7 @@ defmodule Homelab.Deployments.Access do
   """
 
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.RuntimeSpec
 
   @proxy_modes [:public, :sso_protected, :private]
 
@@ -81,6 +82,36 @@ defmodule Homelab.Deployments.Access do
     do: template.ports || []
 
   def effective_ports(%Deployment{ports_override: ports}), do: ports
+
+  @doc """
+  The transport protocol of a single port map, normalized to `"tcp"` or `"udp"`.
+
+  Every port map in the system is read through here rather than by reaching for
+  `p["protocol"]` directly, because the key is genuinely absent on most of them: it
+  postdates every template seeded, imported, or adopted before UDP support existed.
+  An absent protocol is TCP — that is what those ports have always been published as,
+  so defaulting anywhere else would silently re-point live deployments at a socket
+  nothing is listening on.
+
+  Anything unrecognized also falls back to TCP. A port map is operator-editable JSON
+  with no schema behind it, and a typo'd protocol should publish the port the way it
+  always was rather than fail the deploy.
+  """
+  def port_protocol(port) when is_map(port) do
+    case port["protocol"] || port[:protocol] do
+      p when is_binary(p) ->
+        case String.downcase(String.trim(p)) do
+          "udp" -> "udp"
+          _ -> "tcp"
+        end
+
+      _ ->
+        "tcp"
+    end
+  end
+
+  @doc "True when a port map is UDP. Convenience over `port_protocol/1`."
+  def udp?(port) when is_map(port), do: port_protocol(port) == "udp"
 
   @doc """
   Effective volumes (override wins; nil = inherit the template).
@@ -143,10 +174,54 @@ defmodule Homelab.Deployments.Access do
 
   def effective_network_aliases(%Deployment{network_aliases_override: aliases}), do: aliases
 
+  @doc """
+  Effective added capabilities (override wins; nil = inherit the template).
+
+  Normalized on the way out so the drivers never see two spellings of one permission —
+  a template carrying `CAP_NET_ADMIN` and an override carrying `net_admin` are the same
+  capability, and the daemon would be handed both.
+  """
+  def effective_capabilities_add(%Deployment{capabilities_add_override: nil, app_template: t}),
+    do: RuntimeSpec.parse_capabilities(t.capabilities_add)
+
+  def effective_capabilities_add(%Deployment{capabilities_add_override: caps}),
+    do: RuntimeSpec.parse_capabilities(caps)
+
+  @doc "Effective dropped capabilities (override wins; nil = inherit the template)."
+  def effective_capabilities_drop(%Deployment{capabilities_drop_override: nil, app_template: t}),
+    do: RuntimeSpec.parse_capabilities(t.capabilities_drop)
+
+  def effective_capabilities_drop(%Deployment{capabilities_drop_override: caps}),
+    do: RuntimeSpec.parse_capabilities(caps)
+
+  @doc "Effective device passthrough (override wins; nil = inherit the template)."
+  def effective_devices(%Deployment{devices_override: nil, app_template: t}),
+    do: RuntimeSpec.parse_devices(t.devices)
+
+  def effective_devices(%Deployment{devices_override: devices}),
+    do: RuntimeSpec.parse_devices(devices)
+
+  @doc "Effective sysctls (override wins; nil = inherit the template)."
+  def effective_sysctls(%Deployment{sysctls_override: nil, app_template: t}),
+    do: RuntimeSpec.parse_sysctls(t.sysctls)
+
+  def effective_sysctls(%Deployment{sysctls_override: sysctls}),
+    do: RuntimeSpec.parse_sysctls(sysctls)
+
   def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
   def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
   def host_network_mode?(%Deployment{} = d), do: effective_exposure(d) == :host_network
   def internal_mode?(%Deployment{} = d), do: effective_exposure(d) == :service
+
+  @doc """
+  True when this deployment lives in ANOTHER deployment's network namespace.
+
+  Not an exposure mode: a tunneled app is still reached the normal way (a Traefik route
+  at a domain, or not at all) — the labels for that route are just emitted onto its
+  donor, which is the thing with an IP. What it does rule out is host ports and host
+  networking, which `Netns` refuses at save time. See `Homelab.Deployments.Netns`.
+  """
+  defdelegate netns_child?(deployment), to: Homelab.Deployments.Netns, as: :child?
 
   def proxy_modes, do: @proxy_modes
   def access_choices, do: @access_choices
