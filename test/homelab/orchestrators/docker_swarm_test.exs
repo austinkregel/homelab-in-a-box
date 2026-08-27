@@ -347,6 +347,94 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert get_in(body, ["TaskTemplate", "ContainerSpec", "User"]) == "999:999"
     end
 
+    test "publishes each port under its own transport, defaulting a protocol-less port to tcp" do
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc1"}}
+      end)
+
+      spec =
+        Map.put(build_spec(), :ports, [
+          %{internal: 27900, external: 27900, protocol: "udp"},
+          %{internal: 18710, external: 18710, protocol: "tcp"},
+          # Specs built before UDP support carry no :protocol at all.
+          %{internal: 18715, external: 18715}
+        ])
+
+      assert {:ok, "svc1"} = DockerSwarm.deploy(spec)
+      assert_received {:create_body, body}
+
+      assert get_in(body, ["EndpointSpec", "Ports"]) == [
+               %{
+                 "Protocol" => "udp",
+                 "TargetPort" => 27900,
+                 "PublishedPort" => 27900,
+                 "PublishMode" => "ingress"
+               },
+               %{
+                 "Protocol" => "tcp",
+                 "TargetPort" => 18710,
+                 "PublishedPort" => 18710,
+                 "PublishMode" => "ingress"
+               },
+               %{
+                 "Protocol" => "tcp",
+                 "TargetPort" => 18715,
+                 "PublishedPort" => 18715,
+                 "PublishMode" => "ingress"
+               }
+             ]
+    end
+
+    test "capabilities and sysctls use Swarm's OWN ContainerSpec names, not the Engine's" do
+      # `CapabilityAdd`/`CapabilityDrop`, not `CapAdd`/`CapDrop`. Swarm silently ignores
+      # an unrecognised ContainerSpec key, so the wrong name is a service that starts
+      # without the permission it asked for.
+      test_pid = self()
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      expect(Homelab.Mocks.DockerClient, :post, fn "/services/create", body, _opts ->
+        send(test_pid, {:create_body, body})
+        {:ok, %{"ID" => "svc1"}}
+      end)
+
+      spec =
+        build_spec()
+        |> Map.put(:capabilities_add, ["NET_ADMIN"])
+        |> Map.put(:capabilities_drop, ["ALL"])
+        |> Map.put(:sysctls, %{"net.ipv4.conf.all.src_valid_mark" => "1"})
+
+      assert {:ok, "svc1"} = DockerSwarm.deploy(spec)
+
+      assert_received {:create_body, body}
+      container_spec = get_in(body, ["TaskTemplate", "ContainerSpec"])
+
+      assert container_spec["CapabilityAdd"] == ["NET_ADMIN"]
+      assert container_spec["CapabilityDrop"] == ["ALL"]
+      assert container_spec["Sysctls"] == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
+      refute Map.has_key?(container_spec, "CapAdd")
+    end
+
+    test "a device request is REFUSED before the pull, not dropped" do
+      # ServiceSpec has no device field at all. A service created without the device it
+      # asked for STARTS and only fails later from inside the app ("cannot open
+      # /dev/net/tun"), which reads as an app bug rather than a platform one.
+      spec =
+        Map.put(build_spec(), :devices, [
+          %{
+            "host_path" => "/dev/net/tun",
+            "container_path" => "/dev/net/tun",
+            "permissions" => "rwm"
+          }
+        ])
+
+      assert {:error, {:unsupported_on_swarm, :devices, paths}} = DockerSwarm.deploy(spec)
+      assert paths =~ "/dev/net/tun"
+    end
+
     test "falls back to a lowercase id key when ID is absent" do
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
