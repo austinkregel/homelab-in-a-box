@@ -11,6 +11,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Catalog.ImageRef
   alias Homelab.Catalog.Tags
   alias Homelab.Backups
+  alias Homelab.Networking.Hostname
   alias Homelab.Services.BackupScheduler
 
   @log_poll_interval 3_000
@@ -730,8 +731,18 @@ defmodule HomelabWeb.DeploymentLive do
     auth = settings["auth"] || socket.assigns.settings_auth
 
     exposure = Access.exposure_for(access, auth)
+
     # Domain only matters for proxy access; in Host mode every listed port binds.
-    domain = if access == "proxy", do: blank_to_nil(settings["domain"]), else: nil
+    #
+    # The primary field takes a LIST, exactly as the wizard's does: first host wins the
+    # `domain` slot, the rest join the Additional domains rows below. This page has an
+    # explicit alias editor, so the split is a convenience here rather than the only way
+    # to express a second host -- but the two inputs must agree on what a comma means,
+    # or pasting the same value into each gives different results.
+    {domain, extra_hosts} =
+      if access == "proxy",
+        do: Hostname.split_primary(settings["domain"]),
+        else: {nil, []}
 
     # Proxy mode used to hard-code `[]` here, which is NOT "inherit the template" —
     # `Access.effective_ports/1` only inherits on nil, so an empty override won, and
@@ -753,7 +764,10 @@ defmodule HomelabWeb.DeploymentLive do
       extra_routes: if(access == "proxy", do: parse_routes(settings["routes"]), else: []),
       # Additional hostnames are proxy-only for the same reason as extra routes.
       additional_domains:
-        if(access == "proxy", do: parse_additional_domains(settings["domains"]), else: []),
+        if(access == "proxy",
+          do: merge_alias_hosts(parse_additional_domains(settings["domains"]), extra_hosts),
+          else: []
+        ),
       proxy_options: proxy_options(settings, access),
       resource_limits_override: limits_override(settings),
       health_check_override: health_override(deployment, settings),
@@ -3472,6 +3486,20 @@ defmodule HomelabWeb.DeploymentLive do
         "port" => row["port"] || ""
       }
     end)
+  end
+
+  # Alias rows the operator typed, plus any host the primary field carried beyond the
+  # first. Explicit rows come FIRST and win on collision: a row can carry a path_prefix
+  # and a port, and a bare name lifted out of the domain field carries neither -- so
+  # letting the bare one through would silently strip the `/.well-known/matrix` scoping
+  # off an alias the operator had already configured.
+  defp merge_alias_hosts(rows, extra_hosts) do
+    known = MapSet.new(rows, & &1["host"])
+
+    rows ++
+      for host <- extra_hosts, not MapSet.member?(known, host) do
+        %{"host" => host, "path_prefix" => nil, "port" => nil}
+      end
   end
 
   # Only `host` is required. A row with a blank host is dropped (the operator added it and

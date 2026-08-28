@@ -8,6 +8,7 @@ defmodule Homelab.Deployments.Deployment do
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
+  alias Homelab.Networking.Hostname
 
   @statuses [:pending, :deploying, :running, :failed, :stopped, :removing]
   # Same set as AppTemplate.exposure_mode; stored as a string override here so a
@@ -115,12 +116,15 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_required(@required_fields)
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:exposure_mode_override, @exposure_modes)
+    |> normalize_domain()
+    |> validate_domain()
     |> validate_number(:routed_port, greater_than: 0, less_than: 65_536)
     |> normalize_image_override()
     |> validate_image_override()
     |> validate_inclusion(:restart_policy_override, @restart_policies)
     |> validate_replicas()
     |> validate_extra_routes()
+    |> normalize_additional_domains()
     |> validate_additional_domains()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
@@ -260,6 +264,100 @@ defmodule Homelab.Deployments.Deployment do
   defp valid_port?(port) when is_integer(port), do: port > 0 and port < 65_536
   defp valid_port?(_port), do: false
 
+  # The primary domain is interpolated straight into a Traefik `Host(...)` rule and
+  # handed to Let's Encrypt as an ACME identifier, and until now it was cast as a bare
+  # string with nothing checking it -- so whatever was typed became a router rule.
+  #
+  # Normalizing first is what makes the validation below fair: a host pasted out of a
+  # browser bar (`https://matrix.example.com/`) is a hostname an operator has every
+  # reason to expect to work, and rejecting it for punctuation they cannot see is worse
+  # than accepting it. What is STORED is the canonical form, so the label the driver
+  # emits and the identifier ACME orders are the same string.
+  defp normalize_domain(changeset) do
+    case get_change(changeset, :domain) do
+      value when is_binary(value) -> put_change(changeset, :domain, Hostname.normalize(value))
+      _ -> changeset
+    end
+  end
+
+  # `communication.ventures,matrix.communication.ventures` is the value that made this
+  # necessary. It reached the driver whole, became one router whose rule was
+  # ``Host(`communication.ventures,matrix.communication.ventures`)``, and cost an ACME
+  # order rejected for an identifier that cannot exist -- while the app simply never came
+  # up on either name. Traefik reports that once, at startup, as a rule it declined to
+  # build; nothing surfaces it to the operator who typed it.
+  #
+  # A multi-host value is called out BY NAME rather than folded into a generic format
+  # error, because the operator's intent was correct and only the field was wrong: they
+  # have two hostnames and want both routed. The message names the field that takes the
+  # rest, so the fix is a step rather than a guess. The forms split such a value before
+  # it ever gets here (see `Hostname.split_primary/1`); this is the backstop for the API
+  # and for anything that writes a changeset directly.
+  #
+  # That branch requires EVERY piece to be a hostname, not merely more than one piece.
+  # Splitting on whitespace means any typed sentence yields several -- and telling
+  # someone who typed `not a host!` to "list the rest under additional domains" sends
+  # them looking for a second hostname they never had.
+  defp validate_domain(changeset) do
+    case get_field(changeset, :domain) do
+      nil ->
+        changeset
+
+      domain when is_binary(domain) ->
+        cond do
+          Hostname.valid?(domain) ->
+            changeset
+
+          multi_host?(domain) ->
+            add_error(
+              changeset,
+              :domain,
+              "must be a single hostname -- list the rest under additional domains"
+            )
+
+          true ->
+            add_error(changeset, :domain, "is not a valid hostname")
+        end
+
+      _ ->
+        add_error(changeset, :domain, "is not a valid hostname")
+    end
+  end
+
+  defp multi_host?(domain) do
+    case Hostname.split(domain) do
+      [_one_or_none] -> false
+      [] -> false
+      hosts -> Enum.all?(hosts, &Hostname.valid?/1)
+    end
+  end
+
+  # Aliases are canonicalized on write for the same reason the primary domain is: the
+  # stored string is what becomes a router name (`sanitize_domain/1`) and an ACME
+  # identifier, and two spellings of one host would otherwise be two routers racing for
+  # one certificate. Runs BEFORE validation so the check below sees what will be stored.
+  #
+  # A host that normalizes to nothing is left as-is rather than nulled -- validation is
+  # about to reject it, and it should name what the operator typed.
+  defp normalize_additional_domains(changeset) do
+    case get_change(changeset, :additional_domains) do
+      domains when is_list(domains) ->
+        put_change(changeset, :additional_domains, Enum.map(domains, &normalize_domain_entry/1))
+
+      _ ->
+        changeset
+    end
+  end
+
+  defp normalize_domain_entry(%{"host" => host} = entry) when is_binary(host) do
+    case Hostname.normalize(host) do
+      nil -> entry
+      normalized -> Map.put(entry, "host", normalized)
+    end
+  end
+
+  defp normalize_domain_entry(entry), do: entry
+
   # An additional domain becomes its own Traefik router. A malformed one fails the same
   # silent way an extra route does -- Traefik declines it and the second hostname 404s
   # with nothing in the logs -- so reject it here, at the form. Only `host` is required;
@@ -303,16 +401,12 @@ defmodule Homelab.Deployments.Deployment do
     end
   end
 
-  # A Host rule needs an FQDN. Requiring a dot also catches the common typo of typing a
-  # path into the host field, which would otherwise become an unroutable `Host(/foo)`.
-  defp valid_host?(host) when is_binary(host) do
-    trimmed = String.trim(host)
-
-    trimmed != "" and String.contains?(trimmed, ".") and
-      not String.contains?(trimmed, "/") and not String.contains?(trimmed, " ")
-  end
-
-  defp valid_host?(_host), do: false
+  # Through the same module the primary domain goes through, so "what is a hostname" has
+  # exactly one answer. The hand-rolled check this replaced excluded spaces and slashes
+  # but not COMMAS -- which is to say an alias row could carry the very multi-host value
+  # the primary field is now guarded against, and land the same unbuildable rule one
+  # router over.
+  defp valid_host?(host), do: Hostname.valid?(host)
 
   # path_prefix and port are optional on an additional domain -- absent means "the whole
   # host to the routed port". A PRESENT value still has to be well-formed.

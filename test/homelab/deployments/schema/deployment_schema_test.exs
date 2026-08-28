@@ -81,6 +81,96 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
     end
   end
 
+  describe "changeset/2 domain validation" do
+    setup do
+      %{tenant: insert(:tenant), template: insert(:app_template)}
+    end
+
+    defp domain_changeset(tenant, template, domain) do
+      Deployment.changeset(%Deployment{}, %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        domain: domain
+      })
+    end
+
+    test "accepts an ordinary hostname", %{tenant: tenant, template: template} do
+      changeset = domain_changeset(tenant, template, "matrix.communication.ventures")
+
+      assert changeset.valid?
+      assert Ecto.Changeset.apply_changes(changeset).domain == "matrix.communication.ventures"
+    end
+
+    test "stores the canonical form of what was typed", %{tenant: tenant, template: template} do
+      # The stored string becomes a Traefik router name and an ACME identifier, so two
+      # spellings of one host must not become two of either.
+      changeset = domain_changeset(tenant, template, " HTTPS://Matrix.Example.COM/ ")
+
+      assert changeset.valid?
+      assert Ecto.Changeset.apply_changes(changeset).domain == "matrix.example.com"
+    end
+
+    test "rejects the comma-joined value, naming where the rest belongs", %{
+      tenant: tenant,
+      template: template
+    } do
+      # This exact value reached Traefik whole and became one router with the rule
+      # ``Host(`communication.ventures,matrix.communication.ventures`)``, which Traefik
+      # could not build and Let's Encrypt would not issue for.
+      changeset =
+        domain_changeset(tenant, template, "communication.ventures,matrix.communication.ventures")
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "single hostname"))
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "additional domains"))
+    end
+
+    test "rejects a value that is not a hostname at all", %{tenant: tenant, template: template} do
+      changeset = domain_changeset(tenant, template, "not_a_host")
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "not a valid hostname"))
+    end
+
+    test "typed prose gets the format error, not the split-it-up one", %{
+      tenant: tenant,
+      template: template
+    } do
+      # Splitting on whitespace means any sentence yields several pieces. Telling someone
+      # who typed this to "list the rest under additional domains" sends them looking for
+      # a second hostname they never had.
+      changeset = domain_changeset(tenant, template, "not a host!")
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "not a valid hostname"))
+    end
+
+    test "rejects a single label", %{tenant: tenant, template: template} do
+      changeset = domain_changeset(tenant, template, "synapse")
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "not a valid hostname"))
+    end
+
+    test "a blank domain is nil, not an error -- routing is optional", %{
+      tenant: tenant,
+      template: template
+    } do
+      changeset = domain_changeset(tenant, template, "")
+
+      assert changeset.valid?
+      assert Ecto.Changeset.apply_changes(changeset).domain == nil
+    end
+
+    test "an absent domain is left alone", %{tenant: tenant, template: template} do
+      changeset =
+        Deployment.changeset(%Deployment{}, %{tenant_id: tenant.id, app_template_id: template.id})
+
+      assert changeset.valid?
+      assert Ecto.Changeset.apply_changes(changeset).domain == nil
+    end
+  end
+
   describe "changeset/2 additional_domains validation" do
     setup do
       %{tenant: insert(:tenant), template: insert(:app_template)}
@@ -142,6 +232,28 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
 
       refute changeset.valid?
       assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "port must be 1-65535"))
+    end
+
+    test "a comma-joined host is rejected here too", %{tenant: tenant, template: template} do
+      # The hand-rolled check this replaced excluded spaces and slashes but not commas,
+      # so an alias row could carry the very value the primary field now rejects and land
+      # the same unbuildable rule one router over.
+      changeset =
+        domains_changeset(tenant, template, [
+          %{"host" => "communication.ventures,matrix.communication.ventures"}
+        ])
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).additional_domains, &(&1 =~ "must be a domain"))
+    end
+
+    test "an alias host is stored canonically", %{tenant: tenant, template: template} do
+      changeset = domains_changeset(tenant, template, [%{"host" => "https://Chat.Example.COM/"}])
+
+      assert changeset.valid?
+
+      assert [%{"host" => "chat.example.com"}] =
+               Ecto.Changeset.apply_changes(changeset).additional_domains
     end
   end
 

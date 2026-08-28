@@ -238,66 +238,90 @@ defmodule Homelab.Networking do
   end
 
   @doc """
-  Ensures DNS records exist for a deployment's domain across all
+  Ensures DNS records exist for every hostname a deployment answers on, across all
   configured DNS providers (public + internal).
+
+  That is the primary `domain` AND each host in `additional_domains`. Aliases used to be
+  skipped, which made a host alias only half a route: Traefik would match
+  `matrix.example.com` and Let's Encrypt would issue for it, but nothing resolved the
+  name, so it was reachable only for whoever had already put the record in by hand. The
+  routing layer and the DNS layer disagreeing about which names exist is exactly the
+  class of bug that only shows up from the outside.
+
+  Each host is resolved to its own zone rather than the primary's, so an alias on a
+  different apex lands in the right place. A host that fails is reported without stopping
+  the others — a bad alias must not cost the primary domain its record.
   """
   def ensure_deployment_dns_records(deployment, ip_config \\ %{}) do
-    domain = deployment.domain
+    case deployment_hostnames(deployment) do
+      [] ->
+        {:ok, []}
 
-    if domain && domain != "" do
-      zone_name = extract_zone_name(domain)
+      hosts ->
+        {oks, errors} =
+          hosts
+          |> Enum.map(&ensure_host_dns_records(deployment, &1, ip_config))
+          |> Enum.split_with(&match?({:ok, _}, &1))
 
-      case get_or_create_zone(zone_name) do
-        {:ok, zone} ->
-          public_ip = Map.get(ip_config, :public_ip)
-          internal_ip = Map.get(ip_config, :internal_ip)
-          record_name = extract_record_name(domain, zone_name)
+        case errors do
+          [] -> {:ok, Enum.flat_map(oks, fn {:ok, results} -> results end)}
+          [{:error, reason} | _] -> {:error, reason}
+        end
+    end
+  end
 
-          results = []
+  @doc """
+  Every hostname a deployment answers on: the primary `domain` first, then each
+  `additional_domains` host, deduped.
 
-          results =
-            if public_ip do
-              result =
-                upsert_dns_record(zone, %{
-                  name: record_name,
-                  type: "A",
-                  value: public_ip,
-                  scope: :public,
-                  managed: true,
-                  deployment_id: deployment.id,
-                  dns_zone_id: zone.id
-                })
+  Public because `PublishDns` has to scope its rollback to exactly the records it
+  created, and it can only do that by reading which names it is about to publish BEFORE
+  publishing them. Deriving that list separately there is how the two would drift into
+  disagreeing about which names a deployment owns.
 
-              [result | results]
-            else
-              results
-            end
+  An alias is a host the deployment ANSWERS on; a `path_prefix` on it scopes which
+  requests that host serves and has no bearing on whether the name has to resolve, so
+  path-scoped aliases are included like any other.
+  """
+  @spec deployment_hostnames(map()) :: [String.t()]
+  def deployment_hostnames(deployment) do
+    aliases =
+      deployment
+      |> Map.get(:additional_domains)
+      |> List.wrap()
+      |> Enum.map(& &1["host"])
 
-          results =
-            if internal_ip do
-              result =
-                upsert_dns_record(zone, %{
-                  name: record_name,
-                  type: "A",
-                  value: internal_ip,
-                  scope: :internal,
-                  managed: true,
-                  deployment_id: deployment.id,
-                  dns_zone_id: zone.id
-                })
+    [deployment.domain | aliases]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
 
-              [result | results]
-            else
-              results
-            end
+  defp ensure_host_dns_records(deployment, host, ip_config) do
+    zone_name = extract_zone_name(host)
 
-          {:ok, results}
+    case get_or_create_zone(zone_name) do
+      {:ok, zone} ->
+        record_name = extract_record_name(host, zone_name)
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    else
-      {:ok, []}
+        results =
+          [public: Map.get(ip_config, :public_ip), internal: Map.get(ip_config, :internal_ip)]
+          |> Enum.filter(fn {_scope, ip} -> ip end)
+          |> Enum.map(fn {scope, ip} ->
+            upsert_dns_record(zone, %{
+              name: record_name,
+              type: "A",
+              value: ip,
+              scope: scope,
+              managed: true,
+              deployment_id: deployment.id,
+              dns_zone_id: zone.id
+            })
+          end)
+
+        {:ok, results}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

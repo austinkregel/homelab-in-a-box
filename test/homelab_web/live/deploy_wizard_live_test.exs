@@ -932,6 +932,77 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert flash["info"] =~ "deployment started"
     end
 
+    test "a comma-separated domain becomes a primary plus aliases", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      # The original failure, from the operator's side: one input, two hostnames, a comma
+      # between them. That value used to be stored whole and emitted as a single
+      # ``Host(`a,b`)`` rule -- unbuildable by Traefik, unissuable by Let's Encrypt, and
+      # reported by neither anywhere the operator would look.
+      simple_template =
+        insert(:app_template,
+          name: "Synapse",
+          slug: "synapse",
+          image: "synapse:latest",
+          default_env: %{},
+          required_env: [],
+          ports: [],
+          volumes: []
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:deploy, fn _spec -> {:ok, "svc_matrix"} end)
+      |> stub(:stats, fn _id -> {:error, :not_found} end)
+      |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
+      |> stub(:list_services, fn -> {:ok, []} end)
+      |> stub(:get_service, fn _id -> {:error, :not_found} end)
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:list_records, fn _zone -> {:ok, []} end)
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_1"}} end)
+      |> stub(:update_record, fn _zone, _id, _record -> {:ok, %{id: "rec_1"}} end)
+      |> stub(:delete_record, fn _zone, _id -> :ok end)
+
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=review&template_id=#{simple_template.id}")
+
+      render_click(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "communication.ventures,matrix.communication.ventures",
+        "exposure_mode" => "public"
+      })
+
+      assert_redirect(view, "/")
+
+      deployment =
+        Homelab.Deployments.Deployment
+        |> Homelab.Repo.get_by!(app_template_id: simple_template.id)
+
+      assert deployment.domain == "communication.ventures"
+
+      assert [%{"host" => "matrix.communication.ventures"}] = deployment.additional_domains
+    end
+
+    test "the domain field echoes back the hosts it parsed", %{conn: conn, template: template} do
+      # The split has to be VISIBLE before deploying. Doing it silently trades one
+      # invisible behaviour for another.
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
+
+      html =
+        view
+        |> form("#network-form", %{
+          "network" => %{
+            "domain" => "communication.ventures, matrix.communication.ventures"
+          }
+        })
+        |> render_change()
+
+      assert html =~ "communication.ventures"
+      assert html =~ "matrix.communication.ventures"
+      assert html =~ "main"
+    end
+
     test "successful deploy with domain redirects to home", %{conn: conn, tenant: tenant} do
       simple_template =
         insert(:app_template,

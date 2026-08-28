@@ -11,6 +11,7 @@ defmodule HomelabWeb.DeployWizardLive do
   alias Homelab.Catalog.Enrichers.ComposeParser
   alias Homelab.Catalog.Enrichers.DatabaseDetector
   alias Homelab.Catalog.Enrichers.InfraDetector
+  alias Homelab.Networking.Hostname
   alias Homelab.Tenants
 
   @steps ~w(type app network config review)
@@ -77,7 +78,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:companion_query, "")
       |> assign(:companion_results, [])
       |> assign(:companion_loading, false)
-      |> assign(:domain, "")
+      |> put_domain("")
       |> assign(:exposure_mode, "public")
       # Access model: top-level access ("proxy"/"host"/"internal") + proxy auth.
       |> assign(:access, "proxy")
@@ -802,7 +803,7 @@ defmodule HomelabWeb.DeployWizardLive do
   def handle_event("update_network", %{"network" => network_params} = _params, socket) do
     socket =
       socket
-      |> assign(:domain, network_params["domain"] || socket.assigns.domain)
+      |> put_domain(network_params["domain"] || socket.assigns.domain)
       |> assign(:tenant_id, non_blank(network_params["tenant_id"]) || socket.assigns.tenant_id)
       # `""` is a real value — the operator choosing "its own network" — so it must not
       # fall through to the previous choice the way a blank domain does.
@@ -862,10 +863,10 @@ defmodule HomelabWeb.DeployWizardLive do
     tenant_id = params["tenant_id"] || socket.assigns.tenant_id
     exposure_mode = params["exposure_mode"] || socket.assigns.exposure_mode
     # A domain only applies to reverse-proxy access; host/internal ignore it.
-    domain =
+    domain_attrs =
       if Access.access_of(exposure_mode) == "proxy",
-        do: params["domain"] || socket.assigns.domain,
-        else: nil
+        do: domain_attrs(params["domain"] || socket.assigns.domain),
+        else: %{domain: nil, additional_domains: []}
 
     if tenant_id == nil or tenant_id == "" do
       {:noreply, put_flash(socket, :error, "Please select a space.")}
@@ -890,11 +891,11 @@ defmodule HomelabWeb.DeployWizardLive do
       attrs =
         %{
           tenant_id: String.to_integer(tenant_id),
-          app_template_id: template.id,
-          domain: domain,
           env_overrides: env_overrides,
           image_override: socket.assigns[:image_override]
         }
+        |> Map.put(:app_template_id, template.id)
+        |> Map.merge(domain_attrs)
         |> Map.merge(advanced_attrs(socket))
         |> Map.merge(netns_attrs(socket))
 
@@ -919,7 +920,7 @@ defmodule HomelabWeb.DeployWizardLive do
 
   def handle_event("deploy_compose", params, socket) do
     tenant_id = params["tenant_id"] || socket.assigns.tenant_id
-    domain = params["domain"] || socket.assigns.domain
+    domain_attrs = domain_attrs(params["domain"] || socket.assigns.domain)
     exposure_mode = params["exposure_mode"] || socket.assigns.exposure_mode
 
     if tenant_id == nil or tenant_id == "" do
@@ -963,9 +964,9 @@ defmodule HomelabWeb.DeployWizardLive do
             %{
               tenant_id: String.to_integer(tenant_id),
               app_template_id: main_template.id,
-              domain: domain,
               env_overrides: env_overrides
             }
+            |> Map.merge(domain_attrs)
             # The Advanced panel is rendered on the review step for BOTH paths, but only
             # the plain "deploy" handler ever read it — a compose import silently threw
             # away every limit, routed port and restart policy the operator had just
@@ -1046,7 +1047,6 @@ defmodule HomelabWeb.DeployWizardLive do
               %{
                 tenant_id: String.to_integer(tenant_id),
                 app_template_id: template.id,
-                domain: if(primary?, do: domain, else: nil),
                 env_overrides: svc_env_overrides,
                 # This compose service's shape belongs to THIS deployment, not to a
                 # template other deployments inherit from.
@@ -1059,9 +1059,13 @@ defmodule HomelabWeb.DeployWizardLive do
               }
               # The Advanced panel describes ONE workload, so it applies to the app and
               # not to its companions — a routed port or memory ceiling copied onto five
-              # services is not what the operator asked for.
+              # services is not what the operator asked for. The domain and its aliases
+              # ride along for the same reason: companions are internal, and a hostname
+              # copied onto five of them is five routers fighting over one name.
               |> then(fn attrs ->
-                if primary?, do: Map.merge(attrs, advanced_attrs(socket)), else: attrs
+                if primary?,
+                  do: attrs |> Map.merge(advanced_attrs(socket)) |> Map.merge(domain_attrs),
+                  else: attrs
               end)
 
             case Homelab.Deployments.create_deployment(attrs) do
@@ -1410,6 +1414,7 @@ defmodule HomelabWeb.DeployWizardLive do
               deploy_type={@deploy_type}
               selected_template={@selected_template}
               domain={@domain}
+              domain_preview={@domain_preview}
               access={@access}
               auth={@auth}
               exposure_mode={@exposure_mode}
@@ -2578,8 +2583,25 @@ defmodule HomelabWeb.DeployWizardLive do
             class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
           />
           <p class="text-[10px] text-base-content/30 mt-1.5">
-            Enables reverse proxy routing on ports 80/443.
+            Enables reverse proxy routing on ports 80/443. List several, separated by
+            commas or spaces, to reach this app on more than one name.
           </p>
+          <%!-- Echo back what the field PARSED, not what was typed. A comma-separated
+                value used to be stored whole and became one unbuildable Traefik rule;
+                now it splits, and the operator should be able to see that it did
+                before deploying rather than infer it from a log afterwards. --%>
+          <div :if={@domain_preview != []} class="mt-2 flex flex-wrap items-center gap-1.5">
+            <span
+              :for={{host, idx} <- Enum.with_index(@domain_preview)}
+              class={[
+                "rounded px-1.5 py-0.5 text-[10px] font-mono",
+                idx == 0 && "bg-info/15 text-info",
+                idx > 0 && "bg-base-200 text-base-content/50"
+              ]}
+            >
+              {host}<span :if={idx == 0} class="ml-1 opacity-50">main</span>
+            </span>
+          </div>
         </div>
 
         <%!-- Whose network stack this container uses. Offered here rather than only
@@ -3675,6 +3697,48 @@ defmodule HomelabWeb.DeployWizardLive do
     |> List.last()
     |> String.split(":")
     |> List.first()
+  end
+
+  # `:domain` is the raw field and `:domain_preview` is what `domain_attrs/1` would make
+  # of it, kept together so they cannot disagree. The preview is derived rather than
+  # stored because it is a READING of the field -- the moment it were assigned anywhere
+  # separately it would be one edit behind, which for a field whose whole purpose is now
+  # to show that it split correctly is worse than not showing it.
+  defp put_domain(socket, value) do
+    socket
+    |> assign(:domain, value)
+    |> assign(:domain_preview, Hostname.split(value))
+  end
+
+  # The domain field is ONE input that may name several hosts, so this is where "what
+  # the operator typed" becomes "what the schema stores": the first hostname is the
+  # deployment's `domain`, every other one an entry in `additional_domains` reaching the
+  # same container on the same port.
+  #
+  # Splitting here rather than rejecting is the whole point. An operator standing up a
+  # Matrix homeserver has two names -- `communication.ventures` and
+  # `matrix.communication.ventures` -- and one box to put them in, and comma-separating
+  # them is the obvious move. Before this, that value was stored whole and emitted whole:
+  # one Traefik router with an unbuildable rule, one ACME order Let's Encrypt refused,
+  # and an app reachable at neither name. The comma was never the mistake; the single
+  # input was.
+  #
+  # Aliases are created bare -- no `path_prefix`, no `port` -- because that is the only
+  # reading of a plain list of names: all of them, whole, to this app. Scoping one to a
+  # path (Synapse's `/.well-known/matrix` delegation) is a deliberate act and belongs to
+  # the Additional domains editor in deployment settings, which can express it.
+  defp domain_attrs(value) do
+    case Hostname.split_primary(value) do
+      {nil, _aliases} ->
+        %{domain: nil, additional_domains: []}
+
+      {primary, aliases} ->
+        %{
+          domain: primary,
+          additional_domains:
+            Enum.map(aliases, &%{"host" => &1, "path_prefix" => nil, "port" => nil})
+        }
+    end
   end
 
   # Only the fields the operator actually filled in. A blank stays absent rather than

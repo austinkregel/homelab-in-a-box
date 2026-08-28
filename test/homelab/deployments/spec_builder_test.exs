@@ -2,6 +2,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   use ExUnit.Case, async: true
 
   alias Homelab.Deployments.SpecBuilder
+  alias Homelab.Networking.Hostname
 
   defp build_tenant(overrides \\ %{}) do
     Map.merge(
@@ -985,6 +986,102 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  describe "one host per router" do
+    setup do
+      previous = Application.get_env(:homelab, :base_domain)
+      Application.put_env(:homelab, :base_domain, "communication.ventures")
+      on_exit(fn -> Application.put_env(:homelab, :base_domain, previous) end)
+    end
+
+    # The shape of the original failure, rebuilt from the far side: a root domain and a
+    # matrix subdomain, stored the way the schema now stores them, must reach Traefik as
+    # TWO routers with one host each -- never as one router naming both.
+    test "a root domain and its subdomain become two routers, one host each" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "communication.ventures",
+          routed_port: 8008,
+          additional_domains: [%{"host" => "matrix.communication.ventures"}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      rules = host_rules(spec.labels)
+
+      assert "Host(`communication.ventures`)" in rules
+      assert "Host(`matrix.communication.ventures`)" in rules
+    end
+
+    # The invariant, over every routing feature at once. Any future path route, host
+    # alias or redirect that lets a multi-host value through fails here.
+    test "no rule the spec emits ever names more than one host" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :sso_protected})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "communication.ventures",
+          routed_port: 8008,
+          extra_routes: [%{"path_prefix" => "/app", "port" => 6001}],
+          additional_domains: [
+            %{"host" => "matrix.communication.ventures"},
+            %{"host" => "ntfy.communication.ventures", "port" => 80},
+            %{"host" => "communication.ventures", "path_prefix" => "/.well-known/matrix"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      for rule <- host_rules(spec.labels) do
+        [_, hosts] = Regex.run(~r/Host\(`([^`]*)`\)/, rule)
+
+        refute String.contains?(hosts, ","),
+               "rule #{rule} names several hosts in one Host() -- Traefik cannot build it " <>
+                 "and Let's Encrypt will not issue for it"
+
+        assert Hostname.valid?(hosts), "rule #{rule} does not name a routable host"
+      end
+    end
+
+    # Each host must get its OWN router, or the second one is silently unrouted rather
+    # than merely misrouted.
+    test "each distinct host contributes a router" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "communication.ventures",
+          routed_port: 8008,
+          additional_domains: [
+            %{"host" => "matrix.communication.ventures"},
+            %{"host" => "ntfy.communication.ventures"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      hosts =
+        spec.labels
+        |> host_rules()
+        |> Enum.map(fn rule ->
+          [_, host] = Regex.run(~r/Host\(`([^`]*)`\)/, rule)
+          host
+        end)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert hosts == [
+               "communication.ventures",
+               "matrix.communication.ventures",
+               "ntfy.communication.ventures"
+             ]
+    end
+  end
+
   describe "additional domains (a second host on one container)" do
     # base_domain drives wildcard-cert reuse; pinned via app-env so these DB-free specs
     # never fall through Config.base_domain/0 to a Settings DB read. Same setup, same
@@ -1603,6 +1700,22 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   # Every router NAME the label map mentions, discovered rather than listed, so an
   # assertion can be written about routers a test never named.
   # "traefik.http.routers.aut-hair-app.rule" -> "aut-hair-app".
+  # A regression guard on the SHAPE of every rule the spec emits, not on one known-bad
+  # value. `communication.ventures,matrix.communication.ventures` reached Traefik as a
+  # single ``Host(`a,b`)`` and cost a router that would not build and an ACME order
+  # Let's Encrypt refused -- and nothing in this file would have noticed, because every
+  # test asserted on the rules it expected rather than on the rules that exist.
+  defp host_rules(labels) do
+    labels
+    |> Enum.flat_map(fn
+      {"traefik.http.routers." <> rest, rule} ->
+        if String.ends_with?(rest, ".rule"), do: [rule], else: []
+
+      _ ->
+        []
+    end)
+  end
+
   defp router_names(labels) do
     labels
     |> Map.keys()

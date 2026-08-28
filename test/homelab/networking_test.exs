@@ -587,6 +587,93 @@ defmodule Homelab.NetworkingTest do
       assert {:ok, []} = Networking.ensure_deployment_dns_records(deployment, %{})
     end
 
+    test "creates records for additional_domains, not only the primary" do
+      # A host alias used to be half a route: Traefik matched it and Let's Encrypt issued
+      # for it, but nothing resolved the name. Reachable only for whoever had already
+      # added the record by hand.
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      deployment =
+        insert(:deployment,
+          domain: "communication.ventures",
+          additional_domains: [
+            %{"host" => "matrix.communication.ventures"},
+            %{"host" => "ntfy.communication.ventures"}
+          ]
+        )
+
+      assert {:ok, results} =
+               Networking.ensure_deployment_dns_records(deployment, %{public_ip: "203.0.113.1"})
+
+      assert length(results) == 3
+
+      assert {:ok, zone} = Networking.get_dns_zone_by_name("communication.ventures")
+
+      names =
+        zone.id
+        |> Networking.list_dns_records_for_zone()
+        |> Enum.map(& &1.name)
+        |> Enum.sort()
+
+      assert names == ["@", "matrix", "ntfy"]
+    end
+
+    test "a path-scoped alias still gets its record" do
+      # The path scopes which REQUESTS that host serves; the name still has to resolve.
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      deployment =
+        insert(:deployment,
+          domain: "matrix.example.com",
+          additional_domains: [
+            %{"host" => "example.com", "path_prefix" => "/.well-known/matrix"}
+          ]
+        )
+
+      assert {:ok, results} =
+               Networking.ensure_deployment_dns_records(deployment, %{public_ip: "203.0.113.1"})
+
+      assert length(results) == 2
+    end
+
+    test "an alias on a different apex lands in its own zone" do
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      deployment =
+        insert(:deployment,
+          domain: "app.example.com",
+          additional_domains: [%{"host" => "www.example.org"}]
+        )
+
+      assert {:ok, _} =
+               Networking.ensure_deployment_dns_records(deployment, %{public_ip: "203.0.113.1"})
+
+      assert {:ok, com} = Networking.get_dns_zone_by_name("example.com")
+      assert {:ok, org} = Networking.get_dns_zone_by_name("example.org")
+
+      assert [%{name: "app"}] = Networking.list_dns_records_for_zone(com.id)
+      assert [%{name: "www"}] = Networking.list_dns_records_for_zone(org.id)
+    end
+
+    test "a host listed twice yields one record" do
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      deployment =
+        insert(:deployment,
+          domain: "app.example.com",
+          additional_domains: [%{"host" => "app.example.com"}]
+        )
+
+      assert {:ok, results} =
+               Networking.ensure_deployment_dns_records(deployment, %{public_ip: "203.0.113.1"})
+
+      assert length(results) == 1
+    end
+
     test "reuses existing zone if one matches the domain" do
       Homelab.Mocks.DnsProvider
       |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)

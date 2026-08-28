@@ -84,7 +84,7 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
     # Read BEFORE the upsert: the rows that already resolve this name are the ones
     # `ensure_deployment_dns_records/2` is about to take over rather than create, and
     # after it has run there is nothing left to tell them apart by. See the moduledoc.
-    took_over = preexisting_ids(deployment.domain)
+    took_over = preexisting_ids(deployment)
 
     case Networking.ensure_deployment_dns_records(deployment, Deployments.detect_ip_config()) do
       {:ok, results} ->
@@ -158,10 +158,18 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
 
   defp written_ids(written), do: Enum.map(written, fn {:ok, record} -> record.id end)
 
-  defp preexisting_ids(domain) when is_binary(domain) and domain != "",
-    do: domain |> Networking.list_dns_records_for_fqdn() |> Enum.map(& &1.id)
-
-  defp preexisting_ids(_domain), do: []
+  # Across EVERY name this step is about to publish, not just the primary domain.
+  # `ensure_deployment_dns_records/2` now also writes an A record for each additional
+  # domain, and a record it merely took over on an alias is no more this step's to delete
+  # than one on the primary -- rolling back would strip the name off whatever published
+  # it, exactly the failure the moduledoc describes one host over.
+  defp preexisting_ids(deployment) do
+    deployment
+    |> Networking.deployment_hostnames()
+    |> Enum.flat_map(&Networking.list_dns_records_for_fqdn/1)
+    |> Enum.map(& &1.id)
+    |> Enum.uniq()
+  end
 
   defp recorded_ids(step) do
     case (step.resource_handle || %{})["record_ids"] do

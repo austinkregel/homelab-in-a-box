@@ -21,9 +21,15 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
-  defp routed_deployment(fqdn) do
+  defp routed_deployment(fqdn, aliases \\ []) do
     template = insert(:app_template, required_env: [], default_env: %{}, volumes: [], ports: [])
-    insert(:deployment, app_template: template, domain: fqdn, external_id: nil)
+
+    insert(:deployment,
+      app_template: template,
+      domain: fqdn,
+      external_id: nil,
+      additional_domains: Enum.map(aliases, &%{"host" => &1})
+    )
   end
 
   defp ctx(deployment), do: %{release: nil, deployment: deployment}
@@ -437,6 +443,43 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert existing != []
 
       # Release 2 republishes the SAME name, then rolls back.
+      {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
+      assert :ok = PublishDns.compensate(step(handle), ctx(app))
+
+      surviving = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert Enum.sort(surviving) == Enum.sort(existing)
+    end
+
+    # A host alias is a name the deployment ANSWERS on, so it needs a record like any
+    # other. Without one the alias is half a route: Traefik matches it and Let's Encrypt
+    # issues for it, but nothing resolves the name.
+    test "publishes a record for every additional domain, not just the primary" do
+      stub_dns_provider()
+      app = routed_deployment("primary.example.test", ["alias.example.test"])
+
+      assert {:ok, _handle} = PublishDns.run(step(%{}), ctx(app))
+
+      names =
+        app.id
+        |> Networking.list_dns_records_for_deployment()
+        |> Enum.map(& &1.name)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert names == ["alias", "primary"]
+    end
+
+    # The same rule the primary domain gets, one host over. A record this step only took
+    # over on an ALIAS is no more its to delete than one on the primary -- and scoping
+    # the "took over" read to `deployment.domain` alone would have missed exactly that.
+    test "compensate leaves an alias record it only took over" do
+      stub_dns_provider()
+      app = routed_deployment("kept-primary.example.test", ["kept-alias.example.test"])
+
+      {:ok, _first} = PublishDns.run(step(%{}), ctx(app))
+      existing = app.id |> Networking.list_dns_records_for_deployment() |> Enum.map(& &1.id)
+      assert length(existing) >= 2
+
       {:ok, handle} = PublishDns.run(step(%{}), ctx(app))
       assert :ok = PublishDns.compensate(step(handle), ctx(app))
 
