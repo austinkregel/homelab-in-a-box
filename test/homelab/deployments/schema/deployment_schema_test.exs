@@ -5,6 +5,7 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
 
   alias Homelab.Repo
   alias Homelab.Deployments.Deployment
+  alias Homelab.Networking.Hostname
 
   describe "changeset/2 required & optional fields" do
     test "valid with only required fields, status defaults to :pending" do
@@ -169,6 +170,83 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
       assert changeset.valid?
       assert Ecto.Changeset.apply_changes(changeset).domain == nil
     end
+
+    # Validation is scoped to what is being WRITTEN. Reading the persisted value instead
+    # would run this check on every update, including the overwhelming majority that
+    # never mention the field -- and any row stored before the validation existed would
+    # become permanently un-updatable. The paths that break are the hot ones:
+    # `update_deployment/2` setting `status: :pending` on redeploy, the container and
+    # reclaim steps, storage.
+    test "a legacy row with an invalid stored domain still accepts unrelated updates", %{
+      tenant: tenant,
+      template: template
+    } do
+      for stored <- ["nextcloud", "under_score.example.com", ""] do
+        # Inserted around the changeset, which is how such a row got into a database
+        # before there was anything to reject it.
+        legacy = insert(:deployment, tenant: tenant, app_template: template, domain: stored)
+
+        changeset = Deployment.changeset(legacy, %{status: :running})
+
+        assert changeset.valid?,
+               "a #{inspect(stored)} domain blocked an unrelated update: " <>
+                 inspect(changeset.errors)
+
+        assert changeset.changes == %{status: :running}
+      end
+    end
+
+    test "but EDITING the domain to an invalid value is still rejected", %{
+      tenant: tenant,
+      template: template
+    } do
+      legacy = insert(:deployment, tenant: tenant, app_template: template, domain: "nextcloud")
+
+      changeset = Deployment.changeset(legacy, %{domain: "still_not_valid"})
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).domain, &(&1 =~ "not a valid hostname"))
+    end
+
+    # The composition the FORMS perform: split the field, then hand both halves to the
+    # changeset. `validate_domain/1` reasons carefully that a value must be wholly
+    # hostnames before it is called several -- and that reasoning is worthless if the form
+    # has already split it before the changeset ever sees it.
+    #
+    # Under a naive split this exact value yields THREE errors across two fields: a
+    # `domain` of "not", plus aliases "a" and "host!" the operator never typed.
+    test "a typo stays one error on one field through the form's split", %{
+      tenant: tenant,
+      template: template
+    } do
+      {primary, aliases} = Hostname.split_primary("not a host!")
+
+      changeset =
+        Deployment.changeset(%Deployment{}, %{
+          tenant_id: tenant.id,
+          app_template_id: template.id,
+          domain: primary,
+          additional_domains:
+            Enum.map(aliases, &%{"host" => &1, "path_prefix" => nil, "port" => nil})
+        })
+
+      refute changeset.valid?
+
+      assert Map.keys(errors_on(changeset)) == [:domain]
+      assert errors_on(changeset).domain == ["is not a valid hostname"]
+    end
+
+    test "a legacy row can be repaired through the changeset", %{
+      tenant: tenant,
+      template: template
+    } do
+      legacy = insert(:deployment, tenant: tenant, app_template: template, domain: "nextcloud")
+
+      changeset = Deployment.changeset(legacy, %{domain: "nextcloud.example.com"})
+
+      assert changeset.valid?
+      assert Ecto.Changeset.apply_changes(changeset).domain == "nextcloud.example.com"
+    end
   end
 
   describe "changeset/2 additional_domains validation" do
@@ -254,6 +332,61 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
 
       assert [%{"host" => "chat.example.com"}] =
                Ecto.Changeset.apply_changes(changeset).additional_domains
+    end
+
+    # A bare alias naming the deployment's own domain is not a second host -- it derives
+    # the SAME router name, so its labels overwrite the base router's in the merged map.
+    # With a `port` on it, that silently repoints the PRIMARY route's backend away from
+    # `routed_port`, which presents as the app serving the wrong thing with nothing in
+    # the logs.
+    test "a bare alias duplicating the primary domain is rejected", %{
+      tenant: tenant,
+      template: template
+    } do
+      changeset =
+        Deployment.changeset(%Deployment{}, %{
+          tenant_id: tenant.id,
+          app_template_id: template.id,
+          domain: "app.example.com",
+          routed_port: 8000,
+          additional_domains: [%{"host" => "app.example.com", "port" => 9999}]
+        })
+
+      refute changeset.valid?
+
+      assert Enum.any?(
+               errors_on(changeset).additional_domains,
+               &(&1 =~ "already this deployment's domain")
+             )
+    end
+
+    test "the duplicate check compares normalized hosts", %{tenant: tenant, template: template} do
+      changeset =
+        Deployment.changeset(%Deployment{}, %{
+          tenant_id: tenant.id,
+          app_template_id: template.id,
+          domain: "app.example.com",
+          additional_domains: [%{"host" => "APP.Example.com."}]
+        })
+
+      refute changeset.valid?
+    end
+
+    # A path-scoped duplicate gets a router name including the path, so it IS a distinct
+    # router -- the same shape an extra path route takes. It stays allowed.
+    test "a path-scoped duplicate of the primary domain is allowed", %{
+      tenant: tenant,
+      template: template
+    } do
+      changeset =
+        Deployment.changeset(%Deployment{}, %{
+          tenant_id: tenant.id,
+          app_template_id: template.id,
+          domain: "matrix.example.com",
+          additional_domains: [%{"host" => "matrix.example.com", "path_prefix" => "/api"}]
+        })
+
+      assert changeset.valid?
     end
   end
 

@@ -984,6 +984,24 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert [%{"host" => "matrix.communication.ventures"}] = deployment.additional_domains
     end
 
+    test "a typo in the domain field does not create a deployment", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=review&template_id=#{template.id}")
+
+      render_click(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "not a host!",
+        "exposure_mode" => "public"
+      })
+
+      assert render(view) =~ "Deployment failed"
+      assert Homelab.Repo.all(Homelab.Deployments.Deployment) == []
+    end
+
     test "the domain field echoes back the hosts it parsed", %{conn: conn, template: template} do
       # The split has to be VISIBLE before deploying. Doing it silently trades one
       # invisible behaviour for another.

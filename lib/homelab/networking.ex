@@ -251,6 +251,25 @@ defmodule Homelab.Networking do
   Each host is resolved to its own zone rather than the primary's, so an alias on a
   different apex lands in the right place. A host that fails is reported without stopping
   the others — a bad alias must not cost the primary domain its record.
+
+  ## The return shape, and why a partial write is `{:ok, _}`
+
+  Returns `{:ok, results}` where `results` is a flat list of per-record `{:ok, record}`
+  and `{:error, reason}` tuples — a host whose ZONE could not be resolved contributes one
+  error entry per address it would have written, so a caller sees every failure in the
+  same shape whatever layer it happened at.
+
+  A partial write is `{:ok, _}` on purpose, even though the caller will treat it as a
+  failed step. `PublishDns` can only undo records whose ids it was told about, and
+  collapsing to a bare `{:error, reason}` threw away the ids of everything that HAD been
+  written: the primary's record was live, the step failed, and compensation saw nothing
+  to delete. On the retry those rows read as pre-existing and land in `took_over`, so
+  they stay permanently outside the step's ownership — an A record pointing at a
+  container nobody will ever clean up. The rule is that this function never reports a
+  failure in a way that loses a durable side effect.
+
+  `{:error, reasons}` is therefore reserved for "nothing was written", where there is
+  nothing to lose. It carries EVERY reason, not just the first.
   """
   def ensure_deployment_dns_records(deployment, ip_config \\ %{}) do
     case deployment_hostnames(deployment) do
@@ -258,14 +277,12 @@ defmodule Homelab.Networking do
         {:ok, []}
 
       hosts ->
-        {oks, errors} =
-          hosts
-          |> Enum.map(&ensure_host_dns_records(deployment, &1, ip_config))
-          |> Enum.split_with(&match?({:ok, _}, &1))
+        results = Enum.flat_map(hosts, &ensure_host_dns_records(deployment, &1, ip_config))
 
-        case errors do
-          [] -> {:ok, Enum.flat_map(oks, fn {:ok, results} -> results end)}
-          [{:error, reason} | _] -> {:error, reason}
+        if Enum.any?(results, &match?({:ok, _}, &1)) do
+          {:ok, results}
+        else
+          {:error, Enum.map(results, fn {:error, reason} -> reason end)}
         end
     end
   end
@@ -296,33 +313,38 @@ defmodule Homelab.Networking do
     |> Enum.uniq()
   end
 
+  # One flat list of per-record results for a single host. A zone failure is reported as
+  # one error PER ADDRESS this host would have written rather than a single host-level
+  # error, so the caller's accounting ("how many records did this step write, and how
+  # many did it fail to?") stays a straight count over one list.
   defp ensure_host_dns_records(deployment, host, ip_config) do
     zone_name = extract_zone_name(host)
+    addresses = requested_addresses(ip_config)
 
     case get_or_create_zone(zone_name) do
       {:ok, zone} ->
         record_name = extract_record_name(host, zone_name)
 
-        results =
-          [public: Map.get(ip_config, :public_ip), internal: Map.get(ip_config, :internal_ip)]
-          |> Enum.filter(fn {_scope, ip} -> ip end)
-          |> Enum.map(fn {scope, ip} ->
-            upsert_dns_record(zone, %{
-              name: record_name,
-              type: "A",
-              value: ip,
-              scope: scope,
-              managed: true,
-              deployment_id: deployment.id,
-              dns_zone_id: zone.id
-            })
-          end)
-
-        {:ok, results}
+        Enum.map(addresses, fn {scope, ip} ->
+          upsert_dns_record(zone, %{
+            name: record_name,
+            type: "A",
+            value: ip,
+            scope: scope,
+            managed: true,
+            deployment_id: deployment.id,
+            dns_zone_id: zone.id
+          })
+        end)
 
       {:error, reason} ->
-        {:error, reason}
+        Enum.map(addresses, fn _address -> {:error, reason} end)
     end
+  end
+
+  defp requested_addresses(ip_config) do
+    [public: Map.get(ip_config, :public_ip), internal: Map.get(ip_config, :internal_ip)]
+    |> Enum.filter(fn {_scope, ip} -> ip end)
   end
 
   @doc """

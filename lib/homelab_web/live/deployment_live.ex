@@ -3493,11 +3493,18 @@ defmodule HomelabWeb.DeploymentLive do
   # and a port, and a bare name lifted out of the domain field carries neither -- so
   # letting the bare one through would silently strip the `/.well-known/matrix` scoping
   # off an alias the operator had already configured.
+  #
+  # Compared on the NORMALIZED host on both sides. `parse_additional_domains/1` only
+  # trims (canonicalization happens later, in the changeset) while `extra_hosts` arrives
+  # already normalized out of `Hostname.split/1`, so a row reading `Matrix.Example.com`
+  # would not have matched `matrix.example.com` -- and the two would become separate
+  # entries that normalize to the same host, which is two routers racing for one
+  # certificate.
   defp merge_alias_hosts(rows, extra_hosts) do
-    known = MapSet.new(rows, & &1["host"])
+    known = MapSet.new(rows, &Hostname.normalize(&1["host"]))
 
     rows ++
-      for host <- extra_hosts, not MapSet.member?(known, host) do
+      for host <- extra_hosts, not MapSet.member?(known, Hostname.normalize(host)) do
         %{"host" => host, "path_prefix" => nil, "port" => nil}
       end
   end

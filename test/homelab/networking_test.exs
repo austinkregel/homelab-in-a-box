@@ -674,6 +674,48 @@ defmodule Homelab.NetworkingTest do
       assert length(results) == 1
     end
 
+    # A partial write must not be reported in a way that loses the ids of what WAS
+    # written. `PublishDns` can only undo records it was told about, so collapsing to a
+    # bare {:error, _} left the primary's live record owned by nothing.
+    #
+    # The alias's zone fails because `x_y.com` cannot pass DnsZone's name format -- the
+    # deployment is inserted around the changeset, as a row adopted or written before the
+    # alias validation existed would be.
+    test "a host whose zone fails does not cost the other hosts their records" do
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
+
+      deployment =
+        insert(:deployment,
+          domain: "good.example.com",
+          additional_domains: [%{"host" => "bad.x_y.com"}]
+        )
+
+      assert {:ok, results} =
+               Networking.ensure_deployment_dns_records(deployment, %{public_ip: "203.0.113.1"})
+
+      {written, failed} = Enum.split_with(results, &match?({:ok, _}, &1))
+
+      assert length(written) == 1, "the primary's record should still have been written"
+      assert length(failed) == 1, "the alias's zone failure should still be reported"
+
+      assert [%{name: "good"}] = Networking.list_dns_records_for_deployment(deployment.id)
+    end
+
+    test "reports one error per address a failed host would have written" do
+      deployment = insert(:deployment, domain: "bad.x_y.com", additional_domains: [])
+
+      # Nothing could be written at all, so there is nothing to lose -- this is the one
+      # case that stays a top-level error.
+      assert {:error, reasons} =
+               Networking.ensure_deployment_dns_records(deployment, %{
+                 public_ip: "203.0.113.1",
+                 internal_ip: "192.168.1.10"
+               })
+
+      assert length(reasons) == 2
+    end
+
     test "reuses existing zone if one matches the domain" do
       Homelab.Mocks.DnsProvider
       |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)

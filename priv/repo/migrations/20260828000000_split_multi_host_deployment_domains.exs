@@ -27,7 +27,9 @@ defmodule Homelab.Repo.Migrations.SplitMultiHostDeploymentDomains do
   operator actually asked for. Aliases are appended, never replacing entries that are
   already there.
 
-  Rows whose domain is a single valid hostname are left completely alone.
+  Rows whose domain is a single canonical hostname are left completely alone, as is any
+  value this cannot split — repair here means recovering a meaning that is still there,
+  never discarding one that is not.
   """
 
   def up do
@@ -65,11 +67,19 @@ defmodule Homelab.Repo.Migrations.SplitMultiHostDeploymentDomains do
       [primary | aliases] ->
         write_row(id, primary, merge_aliases(row.additional_domains, aliases))
 
-      # Nothing survives normalization -- the field held punctuation. Leaving it would
-      # keep emitting a broken rule, so clear it; the deployment stops being routed,
-      # which is what it already effectively was.
+      # A field holding only separators. Left exactly as it is, like any other value this
+      # migration cannot SPLIT.
+      #
+      # Clearing it was the first instinct and it is the wrong one. This migration
+      # repairs a value whose meaning is recoverable -- two hostnames written as one --
+      # and nulling an unrecoverable one is not the same act: the operator loses the
+      # record of what they typed, and the app quietly changes from broken-and-routed to
+      # working-and-unrouted, which is harder to notice and harder to explain. A value
+      # that is merely invalid stays visible in Settings, where it can now be corrected
+      # (the changeset validates what is being WRITTEN, so a bad legacy value no longer
+      # blocks the edit that would fix it).
       [] ->
-        write_row(id, nil, row.additional_domains)
+        :ok
     end
   end
 
@@ -80,12 +90,17 @@ defmodule Homelab.Repo.Migrations.SplitMultiHostDeploymentDomains do
     )
   end
 
+  # Normalized on both sides. `existing` comes straight out of the database and may hold
+  # any spelling an operator typed before there was anything to canonicalize it; `hosts`
+  # is already normalized by `Hostname.split/1`. Comparing raw would let a row reading
+  # `Matrix.Example.com` sit alongside a lifted `matrix.example.com` -- one host, two
+  # routers, two ACME orders.
   defp merge_aliases(existing, hosts) do
     existing = List.wrap(existing)
-    known = MapSet.new(existing, & &1["host"])
+    known = MapSet.new(existing, &Hostname.normalize(&1["host"]))
 
     existing ++
-      for host <- hosts, not MapSet.member?(known, host) do
+      for host <- hosts, not MapSet.member?(known, Hostname.normalize(host)) do
         %{"host" => host, "path_prefix" => nil, "port" => nil}
       end
   end

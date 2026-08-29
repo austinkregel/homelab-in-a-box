@@ -128,6 +128,24 @@ defmodule Homelab.Networking.Hostname do
   def split(_value), do: []
 
   @doc """
+  True when `value` names SEVERAL hostnames — more than one piece, and every piece a
+  hostname in its own right.
+
+  The second half is what stops this being "contains a separator". `split/1` breaks on
+  whitespace, so any typed sentence yields several pieces; `not a host!` is one mistake,
+  not three hostnames, and every caller that treats it as a list makes that one mistake
+  worse. Callers use this to decide whether a field is a LIST before acting like it is.
+  """
+  @spec multi_host?(term()) :: boolean()
+  def multi_host?(value) do
+    case split(value) do
+      [] -> false
+      [_single] -> false
+      hosts -> Enum.all?(hosts, &valid?/1)
+    end
+  end
+
+  @doc """
   Split a host field into `{primary, aliases}` — the main domain and everything else.
 
   This is the shape the platform stores: `Deployment.domain` carries one name and
@@ -135,14 +153,22 @@ defmodule Homelab.Networking.Hostname do
   still express the root + subdomain pair that made this necessary. The FIRST name wins
   the primary slot, which matches how the field reads left to right.
 
+  A value that is not WHOLLY hostnames comes back unsplit, in the primary slot. Splitting
+  it would turn one typo into several: `not a host!` becomes a `domain` of `not` plus
+  aliases `a` and `host!`, and the operator gets three errors about fields they never
+  filled in instead of one about the field they did. Handing the value back whole is what
+  lets the changeset say a single true thing about it.
+
   Returns `{nil, []}` for an empty field, so a caller can pass the result straight to a
   changeset without checking for the blank case.
   """
   @spec split_primary(term()) :: {String.t() | nil, [String.t()]}
   def split_primary(value) do
-    case split(value) do
-      [] -> {nil, []}
-      [primary | aliases] -> {primary, aliases}
+    if multi_host?(value) do
+      [primary | aliases] = split(value)
+      {primary, aliases}
+    else
+      {normalize(value), []}
     end
   end
 end

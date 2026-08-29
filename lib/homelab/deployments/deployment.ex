@@ -294,12 +294,20 @@ defmodule Homelab.Deployments.Deployment do
   # it ever gets here (see `Hostname.split_primary/1`); this is the backstop for the API
   # and for anything that writes a changeset directly.
   #
-  # That branch requires EVERY piece to be a hostname, not merely more than one piece.
-  # Splitting on whitespace means any typed sentence yields several -- and telling
-  # someone who typed `not a host!` to "list the rest under additional domains" sends
-  # them looking for a second hostname they never had.
+  # Scoped to `get_change/2`, NOT `get_field/2`. A validation that reads the persisted
+  # value runs on every update, including the overwhelming majority that never mention
+  # the field -- so a row stored before this validation existed (a single-label
+  # `nextcloud`, an underscore host, an IDN) would become permanently un-updatable, and
+  # the paths that would break are the hot ones: `update_deployment/2` setting
+  # `status: :pending` on redeploy, the container and reclaim steps, storage. A legacy
+  # value stays readable and deployable until someone edits the field; validating what
+  # is being WRITTEN is the whole job, and it is how `normalize_domain/1` above already
+  # scopes itself.
+  #
+  # `nil` covers both "not changed" and "explicitly cleared", and neither needs checking:
+  # a deployment without a domain is simply not routed.
   defp validate_domain(changeset) do
-    case get_field(changeset, :domain) do
+    case get_change(changeset, :domain) do
       nil ->
         changeset
 
@@ -308,7 +316,7 @@ defmodule Homelab.Deployments.Deployment do
           Hostname.valid?(domain) ->
             changeset
 
-          multi_host?(domain) ->
+          Hostname.multi_host?(domain) ->
             add_error(
               changeset,
               :domain,
@@ -321,14 +329,6 @@ defmodule Homelab.Deployments.Deployment do
 
       _ ->
         add_error(changeset, :domain, "is not a valid hostname")
-    end
-  end
-
-  defp multi_host?(domain) do
-    case Hostname.split(domain) do
-      [_one_or_none] -> false
-      [] -> false
-      hosts -> Enum.all?(hosts, &Hostname.valid?/1)
     end
   end
 
@@ -368,6 +368,8 @@ defmodule Homelab.Deployments.Deployment do
         changeset
 
       domains when is_list(domains) ->
+        primary = Hostname.normalize(get_field(changeset, :domain))
+
         Enum.reduce(domains, changeset, fn entry, acc ->
           cond do
             not valid_host?(entry["host"]) ->
@@ -391,6 +393,13 @@ defmodule Homelab.Deployments.Deployment do
                 "port must be 1-65535 (got #{inspect(entry["port"])})"
               )
 
+            duplicates_primary?(entry, primary) ->
+              add_error(
+                acc,
+                :additional_domains,
+                "#{entry["host"]} is already this deployment's domain"
+              )
+
             true ->
               acc
           end
@@ -407,6 +416,23 @@ defmodule Homelab.Deployments.Deployment do
   # the primary field is now guarded against, and land the same unbuildable rule one
   # router over.
   defp valid_host?(host), do: Hostname.valid?(host)
+
+  # A bare alias naming the deployment's own domain is not a second host -- it is the
+  # SAME router. `additional_router_name/2` derives a router name from the host, so an
+  # unscoped duplicate produces the base router's own name and its labels overwrite the
+  # base's in the merged map. That is silent and it is not harmless: an alias carrying a
+  # `port` rewrites `traefik.http.services.<base>.loadbalancer.server.port`, so the
+  # PRIMARY route quietly starts serving a different backend than `routed_port` says.
+  #
+  # A path-scoped duplicate is fine and stays allowed: it gets a name including the path,
+  # so it is a genuinely distinct router (the same shape an extra path route takes).
+  defp duplicates_primary?(entry, primary) when is_binary(primary) do
+    blank?(entry["path_prefix"]) and Hostname.normalize(entry["host"]) == primary
+  end
+
+  defp duplicates_primary?(_entry, _primary), do: false
+
+  defp blank?(value), do: value in [nil, ""]
 
   # path_prefix and port are optional on an additional domain -- absent means "the whole
   # host to the routed port". A PRESENT value still has to be well-formed.

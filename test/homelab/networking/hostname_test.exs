@@ -123,6 +123,33 @@ defmodule Homelab.Networking.HostnameTest do
     end
   end
 
+  describe "multi_host?/1" do
+    test "true for several genuine hostnames" do
+      assert Hostname.multi_host?("communication.ventures,matrix.communication.ventures")
+      assert Hostname.multi_host?("a.example.com b.example.com c.example.com")
+    end
+
+    test "false for a single hostname" do
+      refute Hostname.multi_host?("example.com")
+    end
+
+    test "false for typed prose, however many pieces it splits into" do
+      # This is the whole point of the predicate: `split/1` breaks on whitespace, so any
+      # sentence yields several pieces. "Contains a separator" is not "is a list".
+      refute Hostname.multi_host?("not a host!")
+      refute Hostname.multi_host?("my app domain")
+    end
+
+    test "false when only SOME pieces are hostnames" do
+      refute Hostname.multi_host?("example.com, not_a_host")
+    end
+
+    test "false for blank and non-binary values" do
+      refute Hostname.multi_host?("")
+      refute Hostname.multi_host?(nil)
+    end
+  end
+
   describe "split_primary/1" do
     test "the first host is the primary, the rest are aliases" do
       assert Hostname.split_primary("communication.ventures,matrix.communication.ventures") ==
@@ -136,6 +163,19 @@ defmodule Homelab.Networking.HostnameTest do
     test "an empty field is {nil, []} so it can go straight to a changeset" do
       assert Hostname.split_primary("") == {nil, []}
       assert Hostname.split_primary(nil) == {nil, []}
+    end
+
+    test "a value that is not wholly hostnames comes back UNSPLIT" do
+      # Splitting a typo turns one mistake into three: a `domain` of "not", plus aliases
+      # "a" and "host!" -- three errors about fields the operator never filled in. Handed
+      # back whole, the changeset can say one true thing about it.
+      assert Hostname.split_primary("not a host!") == {"not a host!", []}
+      assert Hostname.split_primary("my app domain") == {"my app domain", []}
+    end
+
+    test "a partly-valid list is not split either" do
+      assert Hostname.split_primary("example.com, not_a_host") ==
+               {"example.com, not_a_host", []}
     end
   end
 end

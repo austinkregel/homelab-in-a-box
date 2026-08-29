@@ -487,6 +487,36 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert Enum.sort(surviving) == Enum.sort(existing)
     end
 
+    # A partial write is still a write. With several hostnames per deployment, "the
+    # primary went in, an alias's zone could not be created" is an ordinary failure --
+    # and returning the error without recording left those live rows owned by nothing:
+    # compensation read `record_ids: nil` and deleted none of them, while the retry saw
+    # them as pre-existing and filed them under `took_over` forever.
+    #
+    # The step must still FAIL. What it must not do is fail having forgotten what it did.
+    test "a partial write is recorded, so compensation can still undo it" do
+      stub_dns_provider()
+
+      # `x_y.com` cannot pass DnsZone's name format, so the alias's zone creation fails
+      # while the primary's succeeds.
+      app = routed_deployment("partial.example.test", ["orphan.x_y.com"])
+
+      {_release, s} = persisted_step(app, :publish_dns)
+
+      assert {:error, {:publish_dns_failed, _id, _reason}} = PublishDns.run(s, ctx(app))
+
+      # The primary's record is live...
+      assert Networking.list_dns_records_for_deployment(app.id) != []
+
+      # ...and the step recorded it, rather than leaving it owned by nothing.
+      handle = reread(s).resource_handle
+      assert handle["record_ids"] != []
+
+      # So the rollback actually removes it.
+      assert :ok = PublishDns.compensate(step(handle), ctx(app))
+      assert Networking.list_dns_records_for_deployment(app.id) == []
+    end
+
     # A compensation that could not reach the provider has undone nothing externally.
     # Reporting `:ok` there is exactly the "orphan nothing can ever clean up" this
     # module's own moduledoc claims the design prevents: the release settles

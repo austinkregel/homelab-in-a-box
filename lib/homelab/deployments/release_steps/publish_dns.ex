@@ -90,35 +90,20 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
       {:ok, results} ->
         {written, failed} = Enum.split_with(results, &match?({:ok, _}, &1))
 
+        # Recorded BEFORE the outcome is decided, because a partial write is still a
+        # write. With several hostnames per deployment, "the primary's record went in and
+        # an alias's zone could not be created" is an ordinary failure — and returning
+        # the error without recording left those live rows owned by nothing: compensation
+        # read `record_ids: nil` and deleted none of them, and the retry saw them as
+        # pre-existing and filed them under `took_over` forever.
+        #
+        # The step still FAILS below. What it must not do is fail having forgotten what
+        # it did.
+        handle = build_handle(step, deployment, written, took_over)
+        _ = Releases.record_step_handle(step, handle)
+
         if failed == [] do
           log_written(deployment, written)
-
-          handle = %{
-            "deployment_id" => deployment.id,
-            "fqdn" => deployment.domain,
-            # UNION with whatever a previous attempt of this same step recorded, not a
-            # replacement. A reclaimed step re-runs from scratch and can publish a
-            # different name than it did the first time — the operator moved the domain
-            # in between, and `ensure_deployment_dns_records/2` writes the current name
-            # without retiring the previous one. Both sets are this step's to undo.
-            # (`record_count` stays this attempt's count: it describes what was just
-            # written, which is what the Activity line reports.)
-            #
-            # Minus the rows that already existed. Those were taken over, not created,
-            # and are not this step's to delete — see the moduledoc. The union above is
-            # what keeps that correct across a reclaim: a row THIS step created on an
-            # earlier attempt is "pre-existing" by the time the re-run reads, and is
-            # carried back in from the handle rather than re-derived.
-            "record_ids" => Enum.uniq(recorded_ids(step) ++ (written_ids(written) -- took_over)),
-            "took_over_record_ids" => took_over,
-            "record_count" => length(written)
-          }
-
-          # Durable before the runner's completion CAS. See the moduledoc: the returned
-          # handle is exactly what a crash between the side effect and that CAS
-          # discards, and without the ids compensation has nothing to scope to.
-          _ = Releases.record_step_handle(step, handle)
-
           {:ok, handle}
         else
           reason = Enum.map(failed, fn {:error, r} -> r end)
@@ -126,10 +111,34 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
           {:error, {:publish_dns_failed, deployment.id, reason}}
         end
 
+      # Nothing was written, so there is nothing to record and nothing to undo.
       {:error, reason} ->
         activity_error(deployment, reason)
         {:error, {:publish_dns_failed, deployment.id, reason}}
     end
+  end
+
+  defp build_handle(step, deployment, written, took_over) do
+    %{
+      "deployment_id" => deployment.id,
+      "fqdn" => deployment.domain,
+      # UNION with whatever a previous attempt of this same step recorded, not a
+      # replacement. A reclaimed step re-runs from scratch and can publish a
+      # different name than it did the first time — the operator moved the domain
+      # in between, and `ensure_deployment_dns_records/2` writes the current name
+      # without retiring the previous one. Both sets are this step's to undo.
+      # (`record_count` stays this attempt's count: it describes what was just
+      # written, which is what the Activity line reports.)
+      #
+      # Minus the rows that already existed. Those were taken over, not created,
+      # and are not this step's to delete — see the moduledoc. The union above is
+      # what keeps that correct across a reclaim: a row THIS step created on an
+      # earlier attempt is "pre-existing" by the time the re-run reads, and is
+      # carried back in from the handle rather than re-derived.
+      "record_ids" => Enum.uniq(recorded_ids(step) ++ (written_ids(written) -- took_over)),
+      "took_over_record_ids" => took_over,
+      "record_count" => length(written)
+    }
   end
 
   @impl true
