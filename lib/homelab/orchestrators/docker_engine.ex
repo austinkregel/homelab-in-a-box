@@ -38,34 +38,73 @@ defmodule Homelab.Orchestrators.DockerEngine do
     # attached, surfacing as "network <name> not found" at create time. Ensuring the
     # network right before the create closes that window.
     with :ok <- pull_image(spec.image, image_source(spec)),
-         :ok <- ensure_network(spec.network) do
-      body = build_container_payload(spec)
+         :ok <- ensure_network(spec.network),
+         {:ok, id} <- create_container(spec) do
+      attach_then_start(id, spec)
+    end
+  end
 
-      case Client.post("/containers/create?name=#{spec.service_name}", body) do
-        {:ok, %{"Id" => id}} ->
-          with {:ok, _} <- Client.post("/containers/#{id}/start"),
-               :ok <- maybe_connect_routing_network(id, spec) do
-            {:ok, id}
-          end
+  # Creates the container, replacing one of the same name if it is already there.
+  #
+  # A name conflict is not an edge case: it is what EVERY redeploy hits, since the
+  # previous container for this deployment still holds the name. Both outcomes have to
+  # hand back an id the caller treats identically, or the common path and the first-ever
+  # deploy drift — which is how the ingress attach came to be correct on one branch and
+  # not the other.
+  defp create_container(spec) do
+    body = build_container_payload(spec)
 
-        {:error, {:conflict, _}} ->
-          _ = Client.post("/containers/#{spec.service_name}/stop")
-          _ = Client.delete("/containers/#{spec.service_name}?force=true")
+    case Client.post("/containers/create?name=#{spec.service_name}", body) do
+      {:ok, %{"Id" => id}} ->
+        {:ok, id}
 
-          case Client.post("/containers/create?name=#{spec.service_name}", body) do
-            {:ok, %{"Id" => id}} ->
-              with {:ok, _} <- Client.post("/containers/#{id}/start"),
-                   :ok <- maybe_connect_routing_network(id, spec) do
-                {:ok, id}
-              end
+      {:error, {:conflict, _}} ->
+        _ = Client.post("/containers/#{spec.service_name}/stop")
+        _ = Client.delete("/containers/#{spec.service_name}?force=true")
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+        case Client.post("/containers/create?name=#{spec.service_name}", body) do
+          {:ok, %{"Id" => id}} -> {:ok, id}
+          {:error, reason} -> {:error, reason}
+        end
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Every network is joined BEFORE the container starts. The order is the whole point.
+  #
+  # `/containers/create` attaches exactly one network — the `NetworkMode` one — so a
+  # multi-homed workload has to join the rest through `/networks/<n>/connect`. Those
+  # calls used to come AFTER `/containers/<id>/start`, which put a routed container on
+  # the network Traefik reads it on only after it was already running.
+  #
+  # That window is not theoretical and it is not brief enough to ignore. Traefik's docker
+  # provider builds its configuration from the container START event: it inspects the
+  # container, looks for the network named in `traefik.docker.network`, and when that
+  # network is not among the container's yet it falls back to "first available" — the
+  # tenant network, which Traefik has no interface on. The later `/connect` is not a
+  # container event, so nothing rebuilds the configuration, and the backend address stays
+  # wrong until some unrelated container event happens to trigger a rebuild. The symptom
+  # is a gateway timeout on an app whose container is healthy and correctly attached, with
+  # only a warning in Traefik's log to say so:
+  #
+  #     Could not find network named "homelab-iab-internal" for container "/<name>".
+  #     Defaulting to first available network ("homelab_tenant_<tenant>").
+  #
+  # A created-but-unstarted container can be connected to a network — the endpoint is
+  # recorded and applied when it starts — and Traefik's provider lists RUNNING containers,
+  # so it cannot observe the container until every attach is already done. Doing the work
+  # here rather than one call later is what makes the race unrepresentable instead of
+  # merely unlikely.
+  #
+  # This is also what the Swarm driver has always done: `build_networks/1` declares the
+  # primary, the bridges and ingress together in the service spec, so a Swarm service was
+  # never exposed to this. The two drivers now agree.
+  defp attach_then_start(id, spec) do
+    with :ok <- maybe_connect_routing_network(id, spec),
+         {:ok, _} <- Client.post("/containers/#{id}/start") do
+      {:ok, id}
     end
   end
 
@@ -236,6 +275,9 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # all: a routed app that failed to join ingress deployed "successfully", went `:running`,
   # and served 502s with nothing in any log. Same for a gluetun donor that must be
   # multi-homed so its children's routes resolve.
+  #
+  # Called on a CREATED, not-yet-started container -- see `attach_then_start/2` for why
+  # that ordering is load-bearing rather than incidental.
   defp maybe_connect_routing_network(container_id, spec) do
     networks =
       Map.get(spec, :bridge_networks, []) ++

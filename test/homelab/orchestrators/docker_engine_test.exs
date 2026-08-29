@@ -381,6 +381,119 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                        %{"Container" => "cid"}}
     end
 
+    # THE ordering invariant, and the reason aut.hair served gateway timeouts off a
+    # perfectly healthy container.
+    #
+    # Traefik's docker provider builds its config from the container START event. If the
+    # ingress network is attached after the start, Traefik inspects a container that is
+    # not on `homelab-iab-internal` yet, warns "Could not find network named ...", and
+    # falls back to the tenant network -- an address it has no interface on. The later
+    # `/connect` is not a container event, so nothing rebuilds the config and the backend
+    # stays wrong indefinitely.
+    #
+    # Asserted as a SEQUENCE rather than "both calls happened", because both calls always
+    # happened; it was only ever their order that was wrong.
+    test "joins every network BEFORE starting, so Traefik cannot observe it unattached" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            send(test_pid, {:seq, :create})
+            {:ok, %{"Id" => "cid"}}
+
+          path == "/networks/shared_net/connect" ->
+            send(test_pid, {:seq, :connect_bridge})
+            {:ok, %{}}
+
+          path == "/networks/homelab-iab-internal/connect" ->
+            send(test_pid, {:seq, :connect_ingress})
+            {:ok, %{}}
+
+          String.ends_with?(path, "/start") ->
+            send(test_pid, {:seq, :start})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec =
+        base_spec(%{
+          bridge_networks: ["shared_net"],
+          labels: %{"traefik.enable" => "true"}
+        })
+
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+
+      seq =
+        for _ <- 1..4 do
+          receive do
+            {:seq, step} -> step
+          after
+            200 -> :none
+          end
+        end
+
+      assert seq == [:create, :connect_bridge, :connect_ingress, :start]
+    end
+
+    # The recreate path is a second copy of create-and-start, and it carried the same
+    # bug. A redeploy over an existing container is the COMMON case -- it is how every
+    # image update lands -- so the invariant has to hold on the branch that actually
+    # runs in production, not only on the first-ever deploy.
+    test "joins before starting on the conflict/recreate path too" do
+      test_pid = self()
+      {:ok, seen} = Agent.start_link(fn -> false end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+      stub(Homelab.Mocks.DockerClient, :delete, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            # First create conflicts with the container already there; the retry succeeds.
+            if Agent.get_and_update(seen, fn s -> {s, true} end) do
+              send(test_pid, {:seq, :create})
+              {:ok, %{"Id" => "cid"}}
+            else
+              {:error, {:conflict, %{}}}
+            end
+
+          path == "/networks/homelab-iab-internal/connect" ->
+            send(test_pid, {:seq, :connect_ingress})
+            {:ok, %{}}
+
+          String.ends_with?(path, "/start") ->
+            send(test_pid, {:seq, :start})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+
+      seq =
+        for _ <- 1..3 do
+          receive do
+            {:seq, step} -> step
+          after
+            200 -> :none
+          end
+        end
+
+      assert seq == [:create, :connect_ingress, :start]
+    end
+
     test "does NOT connect the ingress network for a service_mode datastore (only the routed web joins ingress)" do
       test_pid = self()
 

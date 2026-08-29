@@ -1,8 +1,19 @@
 defmodule Homelab.Deployments.ReleaseSteps.PublishIngress do
   @moduledoc """
-  Grants external reachability by attaching the app's workload to the shared ingress
-  network — the single, idempotent action that exposes a release, run only after the
-  app has reached healthy. Mirrors the reconciler's ingress invariant.
+  Asserts that the app's workload is on the shared ingress network — the idempotent
+  action that makes a release externally reachable, run after the app reaches healthy.
+  Mirrors the reconciler's ingress invariant.
+
+  It is no longer what FIRST attaches a freshly deployed container. Both drivers now put
+  every network on the workload before it starts — the Engine between create and start
+  (`DockerEngine.attach_then_start/2`), Swarm in the service spec
+  (`DockerSwarm.build_networks/1`) — because Traefik resolves a backend from the START
+  event, and attaching afterwards left it routing to the tenant network. So on the normal
+  deploy path this step now finds the workload already attached and says so.
+
+  That does not make it redundant. It is what covers a workload that becomes routable
+  WITHOUT a fresh create, and it is the release's own assertion that the thing it just
+  deployed is actually reachable rather than an assumption that the driver managed it.
 
   `compensate/2` detaches it again, so a rolled-back release is never left externally
   reachable.
