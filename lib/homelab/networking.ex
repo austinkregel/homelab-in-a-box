@@ -268,8 +268,15 @@ defmodule Homelab.Networking do
   container nobody will ever clean up. The rule is that this function never reports a
   failure in a way that loses a durable side effect.
 
-  `{:error, reasons}` is therefore reserved for "nothing was written", where there is
-  nothing to lose. It carries EVERY reason, not just the first.
+  `{:error, reasons}` is therefore reserved for "nothing was written DESPITE being asked
+  to", where there is nothing to lose. It carries EVERY reason, not just the first.
+
+  "Nothing was ASKED for" is a different answer and is `{:ok, []}`. `detect_ip_config/0`
+  returns both addresses as `nil` whenever `get_host_lan_ip/0` finds no non-loopback IPv4
+  — a loopback-only or IPv6-only host, or `:inet.getifaddrs/0` erroring — and on such a
+  host there is no address to publish and nothing has gone wrong. Conflating the two
+  failed those deploys outright with an empty reason list, which is its own tell: nothing
+  failed, so nothing had a reason.
   """
   def ensure_deployment_dns_records(deployment, ip_config \\ %{}) do
     case deployment_hostnames(deployment) do
@@ -279,7 +286,10 @@ defmodule Homelab.Networking do
       hosts ->
         results = Enum.flat_map(hosts, &ensure_host_dns_records(deployment, &1, ip_config))
 
-        if Enum.any?(results, &match?({:ok, _}, &1)) do
+        # `results == []` means no ADDRESS was requested, not that every write failed --
+        # see the moduledoc. It is the ordinary state of a host with no routable IPv4,
+        # and it must stay the no-op it has always been rather than failing the release.
+        if results == [] or Enum.any?(results, &match?({:ok, _}, &1)) do
           {:ok, results}
         else
           {:error, Enum.map(results, fn {:error, reason} -> reason end)}

@@ -52,33 +52,35 @@ defmodule Homelab.Repo.Migrations.SplitMultiHostDeploymentDomains do
   # lifted out of `domain` from one the operator added by hand afterwards.
   def down, do: :ok
 
+  # Gated on `multi_host?/1`, the SAME predicate the forms split on, rather than on a raw
+  # `split/1`. That distinction is the whole rule: `split/1` breaks on whitespace, so
+  # `not a host` yields three pieces and `coming soon` yields two -- and splitting those
+  # turns an operator's text into a `domain` of `not` plus junk alias rows, destroying
+  # what they typed and leaving entries that block the next settings save. It is the very
+  # thing the moduledoc rejects about nulling, only worse, because nulling at least does
+  # not invent data.
+  #
+  # So: split what is genuinely several hostnames, canonicalize what is genuinely one,
+  # and leave everything else exactly as it is.
   defp repair(%{id: id, domain: domain} = row) do
-    case Hostname.split(domain) do
-      # The overwhelmingly common case: one host, already fine.
-      [^domain] ->
-        :ok
-
-      # One host, but not in canonical form (trailing dot, capitals, a pasted scheme).
-      # Worth rewriting so the stored string matches the router name and ACME identifier
-      # derived from it.
-      [single] ->
-        write_row(id, single, row.additional_domains)
-
-      [primary | aliases] ->
+    cond do
+      # Several genuine hostnames written as one field. The case this migration exists for.
+      Hostname.multi_host?(domain) ->
+        [primary | aliases] = Hostname.split(domain)
         write_row(id, primary, merge_aliases(row.additional_domains, aliases))
 
-      # A field holding only separators. Left exactly as it is, like any other value this
-      # migration cannot SPLIT.
-      #
-      # Clearing it was the first instinct and it is the wrong one. This migration
-      # repairs a value whose meaning is recoverable -- two hostnames written as one --
-      # and nulling an unrecoverable one is not the same act: the operator loses the
-      # record of what they typed, and the app quietly changes from broken-and-routed to
-      # working-and-unrouted, which is harder to notice and harder to explain. A value
-      # that is merely invalid stays visible in Settings, where it can now be corrected
-      # (the changeset validates what is being WRITTEN, so a bad legacy value no longer
-      # blocks the edit that would fix it).
-      [] ->
+      # One hostname, stored non-canonically (a trailing dot, capitals, a pasted scheme).
+      # Worth rewriting so the stored string matches the router name and the ACME
+      # identifier derived from it.
+      Hostname.valid?(domain) and Hostname.normalize(domain) != domain ->
+        write_row(id, Hostname.normalize(domain), row.additional_domains)
+
+      # Already canonical, or not a hostname at all. A value this cannot SPLIT is left
+      # alone: repair means recovering a meaning that is still there, and an unrecoverable
+      # one stays visible in Settings where it can be corrected (the changeset validates
+      # what is being WRITTEN, so a bad legacy value no longer blocks the edit that would
+      # fix it).
+      true ->
         :ok
     end
   end

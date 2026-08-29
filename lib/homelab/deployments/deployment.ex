@@ -126,6 +126,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_extra_routes()
     |> normalize_additional_domains()
     |> validate_additional_domains()
+    |> validate_duplicate_primary()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
     |> RuntimeSpec.validate_capabilities(:capabilities_add_override)
@@ -368,8 +369,6 @@ defmodule Homelab.Deployments.Deployment do
         changeset
 
       domains when is_list(domains) ->
-        primary = Hostname.normalize(get_field(changeset, :domain))
-
         Enum.reduce(domains, changeset, fn entry, acc ->
           cond do
             not valid_host?(entry["host"]) ->
@@ -391,13 +390,6 @@ defmodule Homelab.Deployments.Deployment do
                 acc,
                 :additional_domains,
                 "port must be 1-65535 (got #{inspect(entry["port"])})"
-              )
-
-            duplicates_primary?(entry, primary) ->
-              add_error(
-                acc,
-                :additional_domains,
-                "#{entry["host"]} is already this deployment's domain"
               )
 
             true ->
@@ -424,6 +416,40 @@ defmodule Homelab.Deployments.Deployment do
   # `port` rewrites `traefik.http.services.<base>.loadbalancer.server.port`, so the
   # PRIMARY route quietly starts serving a different backend than `routed_port` says.
   #
+  # Its OWN validation, reading `get_field/2` for both sides, because the collision is a
+  # relationship between two fields and either one moving can create it. Checking it
+  # inside `validate_additional_domains/1` -- which only runs when the alias list itself
+  # changed -- guarded exactly one direction: renaming the DOMAIN onto an existing alias
+  # walked straight past it, and so did the settings form resubmitting an unchanged alias
+  # list (a no-op change, so `get_change/2` is nil).
+  #
+  # Gated on either field having a change, never on the persisted pair alone. A row that
+  # already holds this collision must not become un-updatable for unrelated reasons --
+  # the same rule `validate_domain/1` follows, and for the same reason.
+  defp validate_duplicate_primary(changeset) do
+    if is_nil(get_change(changeset, :domain)) and
+         is_nil(get_change(changeset, :additional_domains)) do
+      changeset
+    else
+      primary = Hostname.normalize(get_field(changeset, :domain))
+
+      changeset
+      |> get_field(:additional_domains)
+      |> List.wrap()
+      |> Enum.reduce(changeset, fn entry, acc ->
+        if duplicates_primary?(entry, primary) do
+          add_error(
+            acc,
+            :additional_domains,
+            "#{entry["host"]} is already this deployment's domain"
+          )
+        else
+          acc
+        end
+      end)
+    end
+  end
+
   # A path-scoped duplicate is fine and stays allowed: it gets a name including the path,
   # so it is a genuinely distinct router (the same shape an extra path route takes).
   defp duplicates_primary?(entry, primary) when is_binary(primary) do

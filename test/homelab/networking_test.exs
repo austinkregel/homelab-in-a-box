@@ -702,6 +702,34 @@ defmodule Homelab.NetworkingTest do
       assert [%{name: "good"}] = Networking.list_dns_records_for_deployment(deployment.id)
     end
 
+    # `detect_ip_config/0` returns both addresses as nil whenever `get_host_lan_ip/0`
+    # finds no non-loopback IPv4 -- a loopback-only or IPv6-only host, or getifaddrs
+    # erroring. Nothing is asked for and nothing goes wrong, so this must stay the no-op
+    # it has always been rather than failing the release with an EMPTY reason list.
+    test "no address to publish is a no-op, not a failure" do
+      deployment = insert(:deployment, domain: "app.example.com")
+
+      assert {:ok, []} =
+               Networking.ensure_deployment_dns_records(deployment, %{
+                 public_ip: nil,
+                 internal_ip: nil
+               })
+
+      assert {:ok, []} = Networking.ensure_deployment_dns_records(deployment, %{})
+    end
+
+    test "no address to publish is a no-op even when a host's zone is unusable" do
+      # Nothing was requested, so there is nothing to fail over -- the bad zone is never
+      # even reached.
+      deployment =
+        insert(:deployment,
+          domain: "good.example.com",
+          additional_domains: [%{"host" => "bad.x_y.com"}]
+        )
+
+      assert {:ok, []} = Networking.ensure_deployment_dns_records(deployment, %{})
+    end
+
     test "reports one error per address a failed host would have written" do
       deployment = insert(:deployment, domain: "bad.x_y.com", additional_domains: [])
 

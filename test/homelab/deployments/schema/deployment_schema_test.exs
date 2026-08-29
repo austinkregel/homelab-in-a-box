@@ -372,6 +372,80 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
       refute changeset.valid?
     end
 
+    # The collision is a relationship between two fields, so either one moving can create
+    # it. Checking it only while the ALIAS list changed guarded one direction: renaming
+    # the DOMAIN onto an existing alias walked straight past it.
+    test "changing only the domain onto an existing alias is caught", %{
+      tenant: tenant,
+      template: template
+    } do
+      existing =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          domain: "a.example.com",
+          routed_port: 8000,
+          additional_domains: [%{"host" => "b.example.com", "path_prefix" => nil, "port" => 9999}]
+        )
+
+      changeset = Deployment.changeset(existing, %{domain: "b.example.com"})
+
+      refute changeset.valid?
+
+      assert Enum.any?(
+               errors_on(changeset).additional_domains,
+               &(&1 =~ "already this deployment's domain")
+             )
+    end
+
+    # The settings form's shape: it resubmits the alias list every save, so an unchanged
+    # list is a no-op change and `get_change/2` returns nil for it.
+    test "and is caught when the alias list is resubmitted unchanged", %{
+      tenant: tenant,
+      template: template
+    } do
+      existing =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          domain: "a.example.com",
+          additional_domains: [%{"host" => "b.example.com", "path_prefix" => nil, "port" => 9999}]
+        )
+
+      changeset =
+        Deployment.changeset(existing, %{
+          domain: "b.example.com",
+          additional_domains: [%{"host" => "b.example.com", "path_prefix" => nil, "port" => 9999}]
+        })
+
+      refute changeset.valid?
+    end
+
+    # The check is gated on a change to one of the two fields, never on the persisted pair
+    # alone -- a row that already holds this collision must not become un-updatable for
+    # unrelated reasons, and must stay repairable from either side.
+    test "a row already holding the collision stays updatable and repairable", %{
+      tenant: tenant,
+      template: template
+    } do
+      legacy =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          domain: "b.example.com",
+          additional_domains: [%{"host" => "b.example.com", "path_prefix" => nil, "port" => 9999}]
+        )
+
+      assert Deployment.changeset(legacy, %{status: :running}).valid?,
+             "an unrelated update must not be blocked by a pre-existing collision"
+
+      assert Deployment.changeset(legacy, %{domain: "c.example.com"}).valid?,
+             "moving the domain off the collision must be allowed"
+
+      assert Deployment.changeset(legacy, %{additional_domains: []}).valid?,
+             "clearing the colliding alias must be allowed"
+    end
+
     # A path-scoped duplicate gets a router name including the path, so it IS a distinct
     # router -- the same shape an extra path route takes. It stays allowed.
     test "a path-scoped duplicate of the primary domain is allowed", %{

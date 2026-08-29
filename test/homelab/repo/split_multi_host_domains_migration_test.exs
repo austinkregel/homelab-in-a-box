@@ -151,6 +151,30 @@ defmodule Homelab.Repo.SplitMultiHostDomainsMigrationTest do
     assert [%{"path_prefix" => "/scoped"}] = aliases
   end
 
+  # `split/1` breaks on whitespace, so a raw split turns typed text into a `domain` of
+  # its first word plus junk alias rows -- destroying what the operator wrote and leaving
+  # entries that block the next settings save. The migration splits on the same
+  # `multi_host?/1` predicate the forms do.
+  test "typed text is never split into a domain plus junk aliases" do
+    for text <- ["not a host", "coming soon", "my app domain"] do
+      id = legacy_row(text)
+      before = read(id)
+
+      migrate()
+
+      assert read(id) == before, "#{inspect(text)} should have been left untouched"
+    end
+  end
+
+  test "a partly-valid list is not split either" do
+    id = legacy_row("app.example.com not_a_host")
+    before = read(id)
+
+    migrate()
+
+    assert read(id) == before
+  end
+
   test "a row with no domain is untouched" do
     id = legacy_row(nil)
 
