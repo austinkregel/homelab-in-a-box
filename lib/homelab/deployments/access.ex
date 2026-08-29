@@ -6,8 +6,8 @@ defmodule Homelab.Deployments.Access do
   `exposure_mode_override` winning):
 
     * **Reverse proxy** — reached via Traefik at a `domain`, with an auth level:
-      `:public` (none), `:sso_protected` (SSO), `:private` (IP allowlist). Never
-      binds a host port.
+      `:public` (none), `:sso_protected` (SSO), `:private` (IP allowlist). May ALSO
+      publish host ports the proxy isn't carrying — see below.
     * **Host ports** (`:host`) — binds the published container ports to the host.
       Never proxied.
     * **Host network** (`:host_network`) — the container shares the HOST's network
@@ -15,9 +15,20 @@ defmodule Homelab.Deployments.Access do
       so nothing is mapped and nothing is published. Never proxied.
     * **Internal only** (`:service`) — no external access.
 
-  Proxy XOR host: a deployment is reached exactly one way, so there are no silent
-  overrides (a domain can't suppress a host port) and a protected app can't be
-  reached on the host bypassing its auth.
+  The rule used to be "proxy XOR host" — a deployment is reached exactly one way. It
+  was one notch too coarse. Exposure is a property of a PORT, not of a container: a git
+  server answers HTTP on 3000 and SSH on 22, and a reverse proxy can carry the first
+  and nothing whatsoever about the second. Forcing that deployment to choose meant
+  giving up the domain to get `git push`, or giving up `git push` to keep the domain.
+
+  So a proxy-mode deployment binds the ports individually marked `published`, and the
+  invariant narrowed to the thing it was actually protecting: on a **protected**
+  deployment (`:sso_protected` / `:private`) the ports Traefik forwards to are never
+  bound to the host. Traefik applies auth per ROUTER, so publishing a guarded backend
+  port is not a weaker protection but no protection. `SpecBuilder.build_ports/1` is
+  where that holds; `protected?/1` is the predicate it turns on.
+
+  `:host_network` stays exclusive for a harder reason than policy — see below.
 
   `:host_network` is exclusive for a harder reason than policy — the daemon enforces
   it. A container in the host's namespace has no address of its own on any bridge or
@@ -30,6 +41,11 @@ defmodule Homelab.Deployments.Access do
   alias Homelab.Deployments.RuntimeSpec
 
   @proxy_modes [:public, :sso_protected, :private]
+
+  # The proxy modes that put a middleware in front of the app. `:public` is proxied but
+  # unguarded, so it is a proxy mode and NOT a protected one -- the difference is what
+  # `protected?/1` exists to state.
+  @protected_modes [:sso_protected, :private]
 
   # What both drivers hardcoded before a restart policy could be chosen at all.
   @default_restart_policy "on-failure"
@@ -209,6 +225,17 @@ defmodule Homelab.Deployments.Access do
     do: RuntimeSpec.parse_sysctls(sysctls)
 
   def proxy_mode?(%Deployment{} = d), do: effective_exposure(d) in @proxy_modes
+
+  @doc """
+  Whether Traefik puts an auth check in front of this deployment.
+
+  `:sso_protected` carries a forwardAuth and `:private` an ip allowlist; `:public`
+  carries neither, and the non-proxy modes have no router to carry one at all. This is
+  the distinction that decides whether a published host port would be a bypass — a
+  protected app reached on the host skips the middleware entirely, which is why
+  `SpecBuilder` refuses to bind the proxy's backend ports for these two modes only.
+  """
+  def protected?(%Deployment{} = d), do: effective_exposure(d) in @protected_modes
   def host_mode?(%Deployment{} = d), do: effective_exposure(d) == :host
   def host_network_mode?(%Deployment{} = d), do: effective_exposure(d) == :host_network
   def internal_mode?(%Deployment{} = d), do: effective_exposure(d) == :service

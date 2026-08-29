@@ -4,6 +4,7 @@ defmodule HomelabWeb.DeployWizardLive do
   alias Homelab.Catalog
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.RuntimeSpec
+  alias Homelab.Deployments.SpecBuilder
   alias Homelab.Deployments.VolumeSpec
   alias Homelab.Catalog.CatalogEntry
   alias Homelab.Catalog.Dedup
@@ -1431,6 +1432,7 @@ defmodule HomelabWeb.DeployWizardLive do
               enriching={@enriching}
               exposure_mode={@exposure_mode}
               ports={@ports}
+              adv_routed_port={@adv_routed_port}
               volumes={@volumes}
               env_vars={@env_vars}
               db_suggestions={@db_suggestions}
@@ -2047,8 +2049,8 @@ defmodule HomelabWeb.DeployWizardLive do
                   >
                     UDP is not proxied — use Host ports access to publish it.
                   </p>
-                  <%!-- Host binding only appears in Host-ports access; every listed
-                     port binds. Proxy/internal modes keep the value but don't bind. --%>
+                  <%!-- Host-ports access binds every listed port, so there is nothing to
+                     tick -- the host port is the only open question. --%>
                   <div :if={@exposure_mode == "host"} class="flex items-center gap-2 mt-1.5">
                     <label class="text-[10px] text-base-content/40">Host port</label>
                     <input
@@ -2060,8 +2062,59 @@ defmodule HomelabWeb.DeployWizardLive do
                     />
                     <input type="hidden" name={"ports[#{idx}][published]"} value="true" />
                   </div>
+                  <%!-- A proxied app binds the ports Traefik is NOT carrying, per port: a
+                     git server's web UI belongs behind the proxy and its SSH port cannot
+                     go there at all. The routed port is excluded on a protected app --
+                     the auth is middleware on the ROUTE, so a host binding on that port
+                     would be the app with nothing in front of it. --%>
+                  <div
+                    :if={@exposure_mode in ~w(public sso_protected private)}
+                    class="flex items-center gap-2 mt-1.5"
+                  >
+                    <label class={[
+                      "flex items-center gap-1.5",
+                      if(wizard_guarded_port?(port, @adv_routed_port, @exposure_mode, @ports),
+                        do: "cursor-not-allowed opacity-40",
+                        else: "cursor-pointer"
+                      )
+                    ]}>
+                      <input
+                        type="checkbox"
+                        name={"ports[#{idx}][published]"}
+                        value="true"
+                        checked={
+                          port["published"] in [true, "true"] and
+                            not wizard_guarded_port?(
+                              port,
+                              @adv_routed_port,
+                              @exposure_mode,
+                              @ports
+                            )
+                        }
+                        disabled={
+                          wizard_guarded_port?(port, @adv_routed_port, @exposure_mode, @ports)
+                        }
+                        class="checkbox checkbox-xs checkbox-warning"
+                      />
+                      <span class="text-[10px] text-base-content/40">publish on host</span>
+                    </label>
+                    <input
+                      type="text"
+                      name={"ports[#{idx}][external]"}
+                      value={port["external"] || port["internal"]}
+                      placeholder={port["internal"]}
+                      title="The host port this container port binds to when published."
+                      class="w-20 rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1 px-2 focus:ring-2 focus:ring-primary/50"
+                    />
+                    <span
+                      :if={wizard_guarded_port?(port, @adv_routed_port, @exposure_mode, @ports)}
+                      class="text-[10px] text-base-content/30"
+                    >
+                      routed — reached through the proxy's access check
+                    </span>
+                  </div>
                   <input
-                    :if={@exposure_mode != "host"}
+                    :if={@exposure_mode not in ~w(host public sso_protected private)}
                     type="hidden"
                     name={"ports[#{idx}][external]"}
                     value={port["external"] || port["internal"]}
@@ -3606,6 +3659,25 @@ defmodule HomelabWeb.DeployWizardLive do
 
   # config_changed sync: merge the indexed form params back into the existing
   # rows, preserving fields the form doesn't render (descriptions, roles, etc.).
+  # Whether this port is the one Traefik will forward to on an app whose proxy carries an
+  # access check -- SSO's forwardAuth or private's ip allowlist. Middleware runs on the
+  # ROUTE, so binding that port to the host would publish the app with the check skipped,
+  # and `SpecBuilder.build_ports/1` drops it. Greying the box out here is the same rule
+  # said before the deploy instead of after it.
+  #
+  # `:public` is proxied but guards nothing, so it is not included -- publishing its
+  # routed port is a plain "also answer on the LAN", which is the operator's call.
+  defp wizard_guarded_port?(port, adv_routed_port, exposure_mode, ports) do
+    exposure_mode in ~w(sso_protected private) and
+      to_string(port["internal"]) == wizard_routed_port(adv_routed_port, ports)
+  end
+
+  # An explicit pick in Advanced is a DECISION and wins, exactly as it does in
+  # `SpecBuilder.routed_port/1`; with no pick, the guess is delegated rather than copied
+  # so the port this greys out is always the port that actually gets routed.
+  defp wizard_routed_port(adv, _ports) when is_binary(adv) and adv != "", do: String.trim(adv)
+  defp wizard_routed_port(_adv, ports), do: SpecBuilder.guess_port(ports)
+
   defp sync_ports(params, existing) do
     merge_indexed(existing, params, fn row, p ->
       row

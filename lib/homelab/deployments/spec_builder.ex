@@ -534,21 +534,100 @@ defmodule Homelab.Deployments.SpecBuilder do
     "homelab-#{sanitize(tenant_slug)}-#{sanitize(app_slug)}-#{path_slug}"
   end
 
-  # Host ports are bound ONLY in :host access mode. Proxy modes (public/
-  # sso_protected/private) are reached through Traefik and :service is internal —
-  # neither binds a host port, so there's no silent override and a protected app
-  # can never be reached on the host bypassing its auth.
+  # Which ports reach the host.
   #
-  # :host_network binds nothing either, for the opposite reason: the container is
-  # ALREADY on the host's ports. Emitting a binding there is not a smaller version of
-  # the same thing — the daemon discards it, and a spec that claimed a mapping would
-  # have the UI show a host port that no rule anywhere actually created.
+  # :host binds every port marked published — that mode's whole meaning.
+  #
+  # Proxy modes bind published ports TOO, minus the ones the proxy is guarding. They
+  # used to bind nothing at all, on the reasoning that a deployment is reached exactly
+  # one way. That reasoning holds for the port Traefik forwards to and nowhere else: a
+  # git server answers HTTP on 3000 and SSH on 22, and only the first of those is a
+  # thing a reverse proxy can carry. "Proxy XOR host" forced the operator to give up
+  # the route to publish the port, and the app is not reachable both ways in any sense
+  # that matters — it is reachable one way per PORT.
+  #
+  # What must never happen is the original bypass: reaching a PROTECTED app on the host
+  # without passing the forwardAuth or ip allowlist Traefik applies. That is a property
+  # of the guarded backend ports specifically, so that is what `drop_guarded_ports/2`
+  # removes — see it for which ports count and why public is not among them.
+  #
+  # :service is internal by definition, and :host_network binds nothing for the opposite
+  # reason to everything above: the container is ALREADY on the host's ports. Emitting a
+  # binding there is not a smaller version of the same thing — the daemon discards it,
+  # and a spec that claimed a mapping would have the UI show a host port that no rule
+  # anywhere actually created.
   defp build_ports(%Deployment{} = deployment) do
-    if Access.effective_exposure(deployment) == :host do
-      bind_host_ports(deployment)
-    else
-      []
+    cond do
+      Access.host_mode?(deployment) ->
+        bind_host_ports(deployment)
+
+      Access.proxy_mode?(deployment) ->
+        deployment |> bind_host_ports() |> drop_guarded_ports(deployment)
+
+      true ->
+        []
     end
+  end
+
+  # The bypass guard, and the ONLY thing left of "proxy XOR host".
+  #
+  # A protected deployment carries a forwardAuth (SSO) or an ip allowlist (private) as
+  # Traefik middleware. Middleware sits on the ROUTER, so it only runs for traffic that
+  # arrived through Traefik — publishing the backend port on the host puts the very same
+  # socket on the LAN with no middleware in front of it, which is not a weaker version of
+  # the protection but the absence of it. So on a protected deployment the guarded ports
+  # are dropped from the bindings even when explicitly published.
+  #
+  # "Guarded" is every port some router of this deployment forwards to — the routed port
+  # plus the extra-route and additional-domain backends — for the same reason the shared
+  # test "no router the spec emits escapes the protection the base router carries" exists:
+  # a second router is a second door onto a port, so a port is only unguarded if NO door
+  # opens onto it. A git server's 22 has no router pointing at it and publishes fine.
+  #
+  # :public is deliberately not filtered. There is no middleware to bypass, so the
+  # rationale simply does not reach it, and dropping a port the operator explicitly asked
+  # for needs a reason better than symmetry. (It does mean the app answers on the host
+  # without TLS; the Settings page says so at the checkbox rather than silently deciding.)
+  defp drop_guarded_ports(bindings, deployment) do
+    if Access.protected?(deployment) do
+      guarded = guarded_backend_ports(deployment)
+      Enum.reject(bindings, &MapSet.member?(guarded, &1.internal))
+    else
+      bindings
+    end
+  end
+
+  @doc """
+  Every container port some router of this deployment forwards to, as strings to match
+  the `internal` a binding carries.
+
+  Mirrors how `proxy_labels/3`, `extra_route_labels/3` and `additional_domain_labels/2`
+  each choose their backend, including the fallback to the routed port when an alias
+  names no port of its own. Note this answers "does a router point here", NOT "is it
+  protected" — `drop_guarded_ports/2` asks `Access.protected?/1` separately, because a
+  public deployment's backend ports are routed and guarded by nothing.
+
+  Public so the Settings page can warn about a port it is about to lose before the save
+  rather than after it. Deciding this twice is how the warning and the spec drift.
+  """
+  def guarded_backend_ports(%Deployment{} = deployment) do
+    default = routed_port(deployment)
+
+    extra =
+      deployment
+      |> Map.get(:extra_routes)
+      |> List.wrap()
+      |> Enum.filter(&is_integer(&1["port"]))
+      |> Enum.map(&to_string(&1["port"]))
+
+    aliases =
+      deployment
+      |> Map.get(:additional_domains)
+      |> List.wrap()
+      |> Enum.filter(&(is_binary(&1["host"]) and &1["host"] != ""))
+      |> Enum.map(&additional_backend_port(&1["port"], default))
+
+    MapSet.new([default | extra ++ aliases])
   end
 
   defp bind_host_ports(deployment) do
@@ -968,12 +1047,20 @@ defmodule Homelab.Deployments.SpecBuilder do
   def routed_port(%Deployment{routed_port: port}) when is_integer(port), do: to_string(port)
   def routed_port(%Deployment{} = deployment), do: guess_port(Access.effective_ports(deployment))
 
-  # UDP ports are excluded from the guess entirely, never merely deprioritized. This
-  # picks an HTTP backend for Traefik, and Traefik's http services speak TCP only — a
-  # UDP port is not a worse candidate than a TCP one, it is not a candidate. A game
-  # server publishing 27900/udp alongside a TCP admin port must never have its route
-  # handed to the UDP port just because it came first in the array.
-  defp guess_port(ports) when is_list(ports) do
+  @doc """
+  The port `routed_port/1` falls back to when a deployment recorded no decision.
+
+  UDP ports are excluded from the guess entirely, never merely deprioritized. This picks
+  an HTTP backend for Traefik, and Traefik's http services speak TCP only — a UDP port is
+  not a worse candidate than a TCP one, it is not a candidate. A game server publishing
+  27900/udp alongside a TCP admin port must never have its route handed to the UDP port
+  just because it came first in the array.
+
+  Public for the deploy wizard, which has a list of port maps and no Deployment yet, and
+  must grey out the same port this would route to. A second copy of the rule there is how
+  the wizard ends up guarding a different port than the spec builder routes to.
+  """
+  def guess_port(ports) when is_list(ports) do
     routable = Enum.reject(ports, &Access.udp?/1)
 
     port =

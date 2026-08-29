@@ -1352,13 +1352,63 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
-  describe "access model coherence (proxy XOR host)" do
+  describe "access model coherence (a port is reached one way, not a container)" do
     defp host_ports do
       [%{"internal" => "8080", "external" => "8080", "published" => true, "role" => "web"}]
     end
 
+    # The shape this whole feature exists for: one container, two protocols, and only one
+    # of them is a thing a reverse proxy can carry. Before this, a git server had to give
+    # up its domain to get `git push` or give up `git push` to keep its domain.
+    defp git_ports do
+      [
+        %{"internal" => "3000", "external" => "3000", "published" => false, "role" => "web"},
+        %{"internal" => "22", "external" => "2222", "published" => true, "role" => "other"}
+      ]
+    end
+
     for mode <- [:public, :sso_protected, :private] do
-      test "proxy mode #{mode} never binds host ports, even with published ports + a domain" do
+      test "proxy mode #{mode} publishes a port the proxy is not carrying" do
+        tenant = build_tenant()
+        template = build_template(%{exposure_mode: unquote(mode), ports: git_ports()})
+        deployment = build_deployment(tenant, template, %{domain: "git.friends.test"})
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+
+        # SSH on the host, and nothing else -- 3000 is the routed port and stays behind
+        # Traefik whether or not this mode would have allowed publishing it.
+        assert spec.ports == [
+                 %{
+                   internal: "22",
+                   external: "2222",
+                   role: "other",
+                   protocol: "tcp",
+                   host_ip: nil
+                 }
+               ]
+
+        # ...and it is still a routed app. The host binding must not have cost it that.
+        assert spec.labels["traefik.enable"] == "true"
+
+        assert spec.labels["traefik.http.services.git-friends-test.loadbalancer.server.port"] ==
+                 "3000"
+      end
+
+      test "proxy mode #{mode} does not publish a port left unpublished" do
+        tenant = build_tenant()
+        template = build_template(%{exposure_mode: unquote(mode), ports: git_ports()})
+
+        ports = Enum.map(git_ports(), &Map.put(&1, "published", false))
+        deployment = build_deployment(tenant, template, %{domain: "git.friends.test"})
+        deployment = %{deployment | ports_override: ports}
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+        assert spec.ports == []
+      end
+    end
+
+    for mode <- [:sso_protected, :private] do
+      test "#{mode} refuses to bind the routed port -- the auth is on the route, not the port" do
         tenant = build_tenant()
         template = build_template(%{exposure_mode: unquote(mode), ports: host_ports()})
         deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
@@ -1366,6 +1416,121 @@ defmodule Homelab.Deployments.SpecBuilderTest do
         assert {:ok, spec} = SpecBuilder.build(deployment)
         assert spec.ports == []
       end
+
+      test "#{mode} refuses to bind an extra path route's backend port" do
+        tenant = build_tenant()
+
+        template =
+          build_template(%{
+            exposure_mode: unquote(mode),
+            ports: [
+              %{"internal" => "8000", "published" => false, "role" => "web"},
+              %{
+                "internal" => "6001",
+                "external" => "6001",
+                "published" => true,
+                "role" => "other"
+              }
+            ]
+          })
+
+        deployment =
+          build_deployment(tenant, template, %{
+            domain: "app.friends.test",
+            extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
+          })
+
+        # 6001 is not the routed port, but a router points at it, so it is served through
+        # the same middleware -- and publishing it would be a door around that middleware.
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+        assert spec.ports == []
+      end
+
+      test "#{mode} refuses to bind an additional domain's backend port" do
+        tenant = build_tenant()
+
+        template =
+          build_template(%{
+            exposure_mode: unquote(mode),
+            ports: [
+              %{"internal" => "8000", "published" => false, "role" => "web"},
+              %{
+                "internal" => "9000",
+                "external" => "9000",
+                "published" => true,
+                "role" => "other"
+              }
+            ]
+          })
+
+        deployment =
+          build_deployment(tenant, template, %{
+            domain: "app.friends.test",
+            additional_domains: [%{"host" => "alias.friends.test", "port" => 9000}]
+          })
+
+        assert {:ok, spec} = SpecBuilder.build(deployment)
+        assert spec.ports == []
+      end
+    end
+
+    # The exception that keeps the rule honest: `:public` carries no middleware, so there
+    # is nothing for a host binding to skip past and no reason to overrule the operator.
+    test "public binds its routed port when explicitly asked -- there is no auth to bypass" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public, ports: host_ports()})
+      deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.ports == [
+               %{internal: "8080", external: "8080", role: "web", protocol: "tcp", host_ip: nil}
+             ]
+
+      assert spec.labels["traefik.enable"] == "true"
+    end
+
+    test ":service binds nothing, published or not -- internal is the whole point" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :service, ports: host_ports()})
+      deployment = build_deployment(tenant, template, %{})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert spec.ports == []
+    end
+
+    test "a published port keeps its host_ip and protocol through the proxy path" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          exposure_mode: :public,
+          ports: [
+            %{"internal" => "8000", "published" => false, "role" => "web"},
+            %{
+              "internal" => "5353",
+              "external" => "5353",
+              "published" => true,
+              "role" => "other",
+              "protocol" => "udp",
+              "host_ip" => "127.0.0.1"
+            }
+          ]
+        })
+
+      deployment = build_deployment(tenant, template, %{domain: "app.friends.test"})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.ports == [
+               %{
+                 internal: "5353",
+                 external: "5353",
+                 role: "other",
+                 protocol: "udp",
+                 host_ip: "127.0.0.1"
+               }
+             ]
     end
 
     test ":host binds published ports and is never given a Traefik route" do

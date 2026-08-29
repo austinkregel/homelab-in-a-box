@@ -748,11 +748,11 @@ defmodule HomelabWeb.DeploymentLive do
     # `Access.effective_ports/1` only inherits on nil, so an empty override won, and
     # `primary_port([])` falls back to "80". Merely opening Settings and saving
     # silently repointed the reverse proxy at port 80. Parse the form in every mode,
-    # publish to the host only in host mode, and treat "no ports" as inherit.
+    # and treat "no ports" as inherit.
     ports =
       settings["ports"]
       |> Homelab.Deployments.ConfigForm.parse_ports()
-      |> Enum.map(&Map.put(&1, "published", access == "host"))
+      |> Enum.map(&apply_publish_flag(&1, access))
 
     attrs = %{
       domain: domain,
@@ -787,14 +787,7 @@ defmodule HomelabWeb.DeploymentLive do
          |> assign(:deployment, updated)
          |> assign_derived()
          |> assign(:settings_edit_mode, false)
-         |> put_flash(
-           :info,
-           if(stack?,
-             do:
-               "Settings saved — re-deploying this container and everything sharing its network.",
-             else: "Settings saved — recreating the container."
-           )
-         )}
+         |> put_flash(:info, settings_saved_flash(updated, stack?))}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -2041,61 +2034,138 @@ defmodule HomelabWeb.DeploymentLive do
                     </p>
                     <div
                       :for={{port, idx} <- Enum.with_index(@settings_ports)}
-                      class="flex items-center gap-2"
+                      class="space-y-1"
                     >
-                      <label class="flex items-center gap-1.5 cursor-pointer">
+                      <div class="flex items-center gap-2">
+                        <label class="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="settings[routed_port]"
+                            value={port["internal"]}
+                            checked={@settings_routed_port == to_string(port["internal"])}
+                            class="radio radio-xs radio-primary"
+                          />
+                          <span class="text-[10px] text-base-content/40 w-10">route</span>
+                        </label>
                         <input
-                          type="radio"
-                          name="settings[routed_port]"
+                          type="text"
+                          name={"settings[ports][#{idx}][internal]"}
                           value={port["internal"]}
-                          checked={@settings_routed_port == to_string(port["internal"])}
-                          class="radio radio-xs radio-primary"
+                          placeholder="container port"
+                          class="w-28 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
                         />
-                        <span class="text-[10px] text-base-content/40 w-10">route</span>
-                      </label>
-                      <input
-                        type="text"
-                        name={"settings[ports][#{idx}][internal]"}
-                        value={port["internal"]}
-                        placeholder="container port"
-                        class="w-28 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                      />
-                      <input
-                        type="hidden"
-                        name={"settings[ports][#{idx}][role]"}
-                        value={port["role"]}
-                      />
-                      <select
-                        name={"settings[ports][#{idx}][protocol]"}
-                        class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                      >
-                        <option
-                          :for={proto <- ~w(tcp udp)}
-                          value={proto}
-                          selected={proto == Access.port_protocol(port)}
+                        <input
+                          type="hidden"
+                          name={"settings[ports][#{idx}][role]"}
+                          value={port["role"]}
+                        />
+                        <select
+                          name={"settings[ports][#{idx}][protocol]"}
+                          class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
                         >
-                          {String.upcase(proto)}
-                        </option>
-                      </select>
-                      <input
-                        type="text"
-                        name={"settings[ports][#{idx}][description]"}
-                        value={port["description"]}
-                        placeholder="what it's for (optional)"
-                        class="flex-1 rounded-lg bg-base-100 border-0 text-xs py-1.5 px-2 text-base-content/60"
-                      />
-                      <button
-                        type="button"
-                        phx-click="settings_remove_port"
-                        phx-value-index={idx}
-                        class="text-base-content/30 hover:text-error"
-                      >
-                        <.icon name="hero-x-mark" class="size-4" />
-                      </button>
+                          <option
+                            :for={proto <- ~w(tcp udp)}
+                            value={proto}
+                            selected={proto == Access.port_protocol(port)}
+                          >
+                            {String.upcase(proto)}
+                          </option>
+                        </select>
+                        <input
+                          type="text"
+                          name={"settings[ports][#{idx}][description]"}
+                          value={port["description"]}
+                          placeholder="what it's for (optional)"
+                          class="flex-1 rounded-lg bg-base-100 border-0 text-xs py-1.5 px-2 text-base-content/60"
+                        />
+                        <button
+                          type="button"
+                          phx-click="settings_remove_port"
+                          phx-value-index={idx}
+                          class="text-base-content/30 hover:text-error"
+                        >
+                          <.icon name="hero-x-mark" class="size-4" />
+                        </button>
+                      </div>
+
+                      <%!-- Publishing a port the proxy is NOT carrying is the whole point
+                            of this row: a git server routes its web UI through Traefik and
+                            still needs SSH on a host port, because a reverse proxy has
+                            nothing to say about SSH. Offered per port -- the container is
+                            reached one way per PORT, not one way overall. --%>
+                      <div class="flex items-center gap-2 pl-[4.25rem]">
+                        <label
+                          class={[
+                            "flex items-center gap-1.5",
+                            if(guarded_port?(port, @settings_routed_port, @settings_auth),
+                              do: "cursor-not-allowed opacity-40",
+                              else: "cursor-pointer"
+                            )
+                          ]}
+                          title={
+                            guarded_port?(port, @settings_routed_port, @settings_auth) &&
+                              "This is the port Traefik forwards to. Publishing it on the host would serve the app with no #{if @settings_auth == "private", do: "IP allowlist", else: "SSO"} in front of it."
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            name={"settings[ports][#{idx}][published]"}
+                            value="true"
+                            checked={publish_checked?(port, @settings_routed_port, @settings_auth)}
+                            disabled={guarded_port?(port, @settings_routed_port, @settings_auth)}
+                            class="checkbox checkbox-xs checkbox-warning"
+                          />
+                          <span class="text-[10px] text-base-content/40">publish on host</span>
+                        </label>
+                        <input
+                          type="text"
+                          name={"settings[ports][#{idx}][external]"}
+                          value={port["external"]}
+                          placeholder={"host port (default #{port["internal"]})"}
+                          class="w-40 rounded-lg bg-base-100 border-0 text-xs font-mono py-1 px-2"
+                        />
+                        <%!-- The INTERFACE, same as the host-mode editor. Without an input
+                              here an adopted `127.0.0.1:` binding would be widened to every
+                              interface by the first save on this page. --%>
+                        <input
+                          type="text"
+                          name={"settings[ports][#{idx}][host_ip]"}
+                          value={port["host_ip"]}
+                          placeholder="all interfaces"
+                          title="Publish on one interface only, e.g. 127.0.0.1. Blank means all interfaces."
+                          class="w-32 rounded-lg bg-base-100 border-0 text-xs font-mono py-1 px-2"
+                        />
+                      </div>
                     </div>
                     <p class="text-[10px] text-base-content/40">
                       The selected port is the one Traefik forwards to inside the container.
-                      Nothing is published to the host.
+                      Any other port can also be published straight to the host — for a
+                      protocol the proxy can't carry, like SSH.
+                    </p>
+                    <p
+                      :if={@settings_auth in ~w(sso_protected private)}
+                      class="text-[10px] text-base-content/40"
+                    >
+                      The routed port itself can't be published here: Traefik applies {if @settings_auth ==
+                                                                                            "private",
+                                                                                          do:
+                                                                                            "the IP allowlist",
+                                                                                          else: "SSO"} per route, so a host binding on that port would hand out the app with
+                      no check in front of it.
+                    </p>
+                    <p
+                      :if={
+                        @settings_auth == "public" &&
+                          Enum.any?(
+                            @settings_ports,
+                            &publish_checked?(&1, @settings_routed_port, @settings_auth)
+                          )
+                      }
+                      class="text-[10px] text-warning"
+                    >
+                      A published port answers over plain TCP on the host — no TLS and none
+                      of the proxy's headers. That's what you want for SSH; it's rarely what
+                      you want for HTTP.
                     </p>
                   </div>
 
@@ -3335,7 +3405,12 @@ defmodule HomelabWeb.DeploymentLive do
         # it means in the stored map and to Docker.
         "host_ip" => p["host_ip"],
         "description" => p["description"] || "",
-        "optional" => p["optional"] == true
+        "optional" => p["optional"] == true,
+        # Carried, or the "publish on host" box would render UNticked for a port that is
+        # currently published — and the next save, reading the box rather than the stored
+        # map, would quietly take the binding away. Merely opening Settings would have
+        # unpublished a git server's SSH port.
+        "published" => p["published"] == true
       }
     end)
   end
@@ -3356,7 +3431,10 @@ defmodule HomelabWeb.DeploymentLive do
         # under the operator's cursor on the next change event.
         "host_ip" => p["host_ip"],
         "description" => p["description"] || "",
-        "optional" => p["optional"] == "true"
+        "optional" => p["optional"] == "true",
+        # Round-tripped for the same reason as `host_ip` just above: without it the
+        # checkbox would revert to unticked on the next keystroke anywhere in the form.
+        "published" => p["published"] == "true"
       }
     end)
   end
@@ -3389,6 +3467,87 @@ defmodule HomelabWeb.DeploymentLive do
     do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
 
   # Which radio starts checked: the port Traefik will ACTUALLY forward to. A stored
+  defp settings_saved_flash(updated, stack?) do
+    base =
+      if stack?,
+        do: "Settings saved — re-deploying this container and everything sharing its network.",
+        else: "Settings saved — recreating the container."
+
+    case guarded_publish_conflicts(updated) do
+      [] ->
+        base
+
+      [port] ->
+        base <>
+          " Port #{port} was not published to the host: Traefik routes to it, and this app's" <>
+          " access check only runs on the proxy."
+
+      ports ->
+        base <>
+          " Ports #{Enum.join(ports, ", ")} were not published to the host: Traefik routes to" <>
+          " them, and this app's access check only runs on the proxy."
+    end
+  end
+
+  # The ports the operator asked to publish that `SpecBuilder.build_ports/1` will refuse.
+  #
+  # The checkbox already blocks the routed port, so in practice this catches the case the
+  # editor cannot see live: a port that is the backend of an extra path route or an
+  # additional domain. Read off the SAVED deployment, so the routes and hosts are the ones
+  # actually stored rather than whatever the form assigns had lagged to, and asked of the
+  # same function the spec builder uses so the message can't claim a different rule.
+  defp guarded_publish_conflicts(deployment) do
+    if Access.protected?(deployment) do
+      guarded = SpecBuilder.guarded_backend_ports(deployment)
+
+      deployment
+      |> Access.effective_ports()
+      |> Enum.filter(&(&1["published"] == true))
+      |> Enum.map(&to_string(&1["internal"]))
+      |> Enum.filter(&MapSet.member?(guarded, &1))
+      |> Enum.uniq()
+    else
+      []
+    end
+  end
+
+  # Whether Traefik's auth stands in front of this port, making a host binding on it a
+  # bypass rather than a second door. `SpecBuilder.build_ports/1` is the authority and
+  # drops such a port regardless of what the form says; this is the same rule stated at
+  # the checkbox, so the operator is told BEFORE saving instead of finding the port
+  # missing afterwards.
+  #
+  # Only the routed port is checked here, not the extra-route or additional-domain
+  # backends the spec builder also guards. Those live in free-text inputs that are not
+  # round-tripped into assigns on change, so a check against them would read a stale port
+  # and disable the wrong checkbox. `guarded_publish_conflicts/2` reports those at save,
+  # where the values are real.
+  defp guarded_port?(port, routed_port, auth) do
+    auth in ~w(sso_protected private) and
+      to_string(port["internal"]) == to_string(routed_port)
+  end
+
+  # A guarded port renders unchecked as well as disabled: a disabled checkbox posts
+  # nothing, so showing it ticked would promise a binding the save cannot make.
+  defp publish_checked?(port, routed_port, auth) do
+    not guarded_port?(port, routed_port, auth) and port["published"] in [true, "true"]
+  end
+
+  # Which ports the form is asking to bind on the host.
+  #
+  # Host mode publishes every listed port -- that mode's whole meaning, and its editor
+  # renders no per-port checkbox because there would be nothing to uncheck. Proxy mode
+  # publishes exactly the ports whose "publish on host" box is ticked, which
+  # `ConfigForm.parse_ports/1` has already read off the form; passing it through
+  # untouched is what lets a git server keep 22 on the host while 3000 stays behind
+  # Traefik. Everything else (internal, host network) binds nothing.
+  #
+  # This used to be `Map.put(&1, "published", access == "host")` for every mode at once,
+  # which is why proxy mode could not express a host port at all.
+  defp apply_publish_flag(port, "host"), do: Map.put(port, "published", true)
+  defp apply_publish_flag(port, "proxy"), do: port
+  defp apply_publish_flag(port, _access), do: Map.put(port, "published", false)
+
   # routed_port is the operator's decision and wins outright; only a deployment that
   # has never made one falls back to SpecBuilder's guess (mirrored here so the form
   # never shows a different port than the one the spec will use).
