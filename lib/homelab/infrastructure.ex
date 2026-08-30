@@ -54,6 +54,14 @@ defmodule Homelab.Infrastructure do
         "--log.level=INFO",
         "--providers.docker=true",
         "--providers.docker.exposedbydefault=false",
+        # The network Traefik resolves a backend address on when a container's own
+        # `traefik.docker.network` label names one it is not attached to. With no
+        # default the provider takes the first network on the container — for a
+        # deployment that is its tenant network, which Traefik has no interface on,
+        # so the route resolves to an address it cannot reach and the app answers
+        # 504 while looking healthy. Naming it here makes the fallback the routing
+        # fabric instead of whichever network happens to sort first.
+        "--providers.docker.network=#{@network}",
         # File provider for app-written dynamic config (the self ingress route).
         "--providers.file.directory=/dynamic",
         "--providers.file.watch=true",
@@ -389,7 +397,14 @@ defmodule Homelab.Infrastructure do
   # which a worker node cannot answer.
   defp swarm_provider_cmd do
     if Homelab.Docker.Network.swarm_manager?() do
-      ["--providers.swarm=true", "--providers.swarm.exposedbydefault=false"]
+      [
+        "--providers.swarm=true",
+        "--providers.swarm.exposedbydefault=false",
+        # Same fallback as the docker provider, for the same reason: a task whose
+        # `traefik.swarm.network` label misses resolves to its first attached
+        # network rather than the one Traefik is on.
+        "--providers.swarm.network=#{@network}"
+      ]
     else
       []
     end

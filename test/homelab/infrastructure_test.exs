@@ -293,6 +293,42 @@ defmodule Homelab.InfrastructureTest do
     end
   end
 
+  describe "traefik provider defaults (mocked daemon)" do
+    # Traefik dials a backend on the network the workload's own
+    # `traefik.docker.network` label names. When that label names a network the
+    # container is not attached to, the provider silently falls back to the
+    # container's FIRST network -- for a deployment that is its tenant network,
+    # which Traefik has no interface on, so the router resolves to an address it
+    # cannot reach and the app serves 504s while inspecting as healthy. Pinning
+    # the provider default makes that fallback the routing fabric instead.
+    test "the docker provider defaults backends to the routing network" do
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        case path do
+          "/networks/homelab-iab-internal" -> {:ok, %{}}
+          "/containers/homelab-traefik/json" -> {:error, {:not_found, %{}}}
+        end
+      end)
+
+      expect(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        case path do
+          "/containers/create?name=homelab-traefik" ->
+            assert "--providers.docker.network=#{Infrastructure.internal_network()}" in body[
+                     "Cmd"
+                   ]
+
+            {:ok, %{"Id" => "traefik-id"}}
+
+          "/containers/homelab-traefik/start" ->
+            {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, :started} = Infrastructure.provision_service("traefik")
+    end
+  end
+
   describe "connect_traefik_to_network/1 (mocked daemon)" do
     test "connects when Traefik is not already on the network" do
       expect(Homelab.Mocks.DockerClient, :get, fn "/containers/homelab-traefik/json", _opts ->
