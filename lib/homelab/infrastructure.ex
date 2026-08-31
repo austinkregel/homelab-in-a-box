@@ -13,6 +13,11 @@ defmodule Homelab.Infrastructure do
   # stack's `homelab-internal`. Keep in sync with the orchestrators' routing net.
   @network "homelab-iab-internal"
 
+  # The catch-all router, its errors middleware and its service all carry this one name.
+  # Traefik namespaces the three separately, so one name is not a collision; it is what
+  # makes the `hiab-hold@file` reference in the static config below read unambiguously.
+  @hold_router "hiab-hold"
+
   @system_templates %{
     "traefik" => %{
       name: "Traefik",
@@ -69,6 +74,19 @@ defmodule Homelab.Infrastructure do
         "--entryPoints.websecure.address=:443",
         "--entryPoints.web.http.redirections.entryPoint.to=websecure",
         "--entryPoints.web.http.redirections.entryPoint.scheme=https",
+        # Every router on the public entrypoint inherits the hold page's `errors`
+        # middleware, which is what covers the window a router-level trick cannot see:
+        # the container is up, so its labels exist and its route is live, but nothing is
+        # listening on the routed port yet and Traefik answers 502. Attached here rather
+        # than as a label per deployment so it also covers workloads that are ALREADY
+        # running -- a label only reaches a container that is created again.
+        #
+        # It names a middleware from the file provider, and Traefik disables a router
+        # whose middleware does not resolve. So `ensure_traefik/0` writes `hold.yml`
+        # before it can recreate the proxy, and again after: the only moment the name is
+        # unresolvable is a fresh install between Traefik's first start and that write,
+        # when there are no app routers to disable yet.
+        "--entryPoints.websecure.http.middlewares=#{@hold_router}@file",
         # ACME challenge flags (DNS-01 + provider) are injected at provision time
         # by `ensure_traefik/0` from the operator-supplied DNS API token.
         "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json",
@@ -173,12 +191,22 @@ defmodule Homelab.Infrastructure do
   def ensure_traefik do
     with {:ok, template} <- build_traefik_template(),
          :ok <- ensure_network(@network),
+         # BEFORE the proxy can be recreated, not only after. The template's entrypoint
+         # middleware names `hiab-hold@file`, and a Traefik that comes up with that name
+         # unresolvable disables every router that inherits it -- i.e. all of them. This
+         # write is what guarantees the file is already in the (persistent) dynamic
+         # volume when the new container reads it. On a fresh install it instead fails
+         # and logs -- there is no container to write into yet -- which is also the one
+         # case where no app router exists to be disabled, and the write below covers.
+         _ <- ensure_hold_ingress(),
          result when result in [{:ok, :already_running}, {:ok, :started}] <-
            ensure_traefik_current(template) do
       sync_traefik_networks()
       # Register the plane's OWN route + wildcard cert with the proxy it just
       # ensured. Best-effort: a failure here shouldn't fail the whole ensure.
       _ = ensure_self_ingress()
+      # The fresh-install path, where the write above had no container to reach.
+      _ = ensure_hold_ingress()
       result
     end
   end
@@ -263,6 +291,120 @@ defmodule Homelab.Infrastructure do
       ],
       "\n"
     ) <> "\n"
+  end
+
+  @hold_file "hold.yml"
+
+  @doc """
+  Registers the hold-page ingress: the routing half of the "we're deploying, try again
+  in a moment" pages (`HomelabWeb.HoldPage`).
+
+  Written to the same dynamic-config dir as the self ingress, and for the same reason —
+  the plane cannot label its own running container, and neither of these routes belongs
+  to a deployment. Idempotent (same file each time) and best-effort.
+  """
+  def ensure_hold_ingress do
+    base = Homelab.Config.base_domain()
+    url = self_service_url()
+
+    cond do
+      is_nil(base) or base == "" ->
+        Logger.warning("Infrastructure: base_domain unset; skipping hold-page registration")
+        :ok
+
+      is_nil(url) ->
+        Logger.warning(
+          "Infrastructure: could not determine own container name; skipping hold-page ingress"
+        )
+
+        :ok
+
+      true ->
+        tar = dynamic_config_tar(@hold_file, hold_ingress_yaml(base, url))
+
+        case Client.upload_archive("homelab-traefik", @traefik_dynamic_dir, tar) do
+          :ok ->
+            Logger.info("Infrastructure: registered hold-page ingress for *.#{base}")
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Infrastructure: hold-page upload failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+    end
+  end
+
+  @doc """
+  Pure Traefik dynamic-config (YAML) for the hold pages. Public for testing.
+
+  Three things, all named `hiab-hold` (Traefik namespaces routers, middlewares and
+  services separately):
+
+    * A router over every host under the base domain, at `priority: 1`. Priority is
+      explicit and minimal because it is the entire mechanism: a deployment's own router
+      is generated by the Docker provider with Traefik's default priority — the length
+      of its rule — so it outranks this one whenever it exists, and this one answers
+      only when it does not. A regexp rule would otherwise be LONG, and quietly
+      outrank the real route.
+
+      `tls: {}` and no `certResolver`, deliberately. The wildcard the self ingress
+      provisions already authenticates these names, and Traefik picks a stored
+      certificate by SNI regardless of which router asked for it; naming a resolver here
+      would instead open an ACME order per held hostname — including for names that
+      exist only because someone mistyped one.
+
+    * An `errors` middleware, which the websecure entrypoint attaches to every router
+      (see the Traefik template) so that an upstream 502/504 is answered with the hold
+      page too. 503 is deliberately NOT in the list: the catch-all's own pages are 503,
+      and including it would send every one of them back through the proxy to re-render
+      itself. Traefik keeps the upstream's status code and takes only the body, so the
+      client still sees the 502 that was real.
+
+    * The service, pointing back at this container over the internal network — the same
+      backend the self ingress uses, because the pages are rendered by the plane.
+  """
+  def hold_ingress_yaml(base_domain, service_url) do
+    r = @hold_router
+
+    Enum.join(
+      [
+        "http:",
+        "  routers:",
+        "    #{r}:",
+        # Single-quoted, unlike every other line here: the rule is a regexp whose dot
+        # escapes are backslashes, which a YAML double-quoted scalar reads as escape
+        # sequences of its own -- and a parse error in this file takes the whole dynamic
+        # config down with it. A single-quoted scalar has no escapes at all.
+        "      rule: 'HostRegexp(`#{wildcard_regexp(base_domain)}`)'",
+        "      priority: 1",
+        "      entryPoints:",
+        "        - websecure",
+        "      service: #{r}",
+        "      tls: {}",
+        "  middlewares:",
+        "    #{r}:",
+        "      errors:",
+        "        status:",
+        "          - \"502\"",
+        "          - \"504\"",
+        "        service: #{r}",
+        "        query: \"/_hiab/hold/{status}\"",
+        "  services:",
+        "    #{r}:",
+        "      loadBalancer:",
+        "        servers:",
+        "          - url: \"#{service_url}\""
+      ],
+      "\n"
+    ) <> "\n"
+  end
+
+  # "any host under this domain", as a Go regexp: `^.+\.example\.com$`. The only
+  # character a hostname may contain that a regexp reads as syntax is the dot, and
+  # leaving it unescaped would widen the match to hosts that merely resemble the base
+  # domain -- `notexample.com` for `example.com`.
+  defp wildcard_regexp(base_domain) do
+    "^.+" <> String.replace("." <> base_domain, ".", "\\.") <> "$"
   end
 
   # The URL Traefik uses to reach THIS container, over the internal network. The

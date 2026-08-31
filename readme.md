@@ -60,6 +60,7 @@ Homelab-in-a-Box is a control plane for your self-hosted infrastructure. It prov
 - **Host Monitoring**: CPU, memory, and disk usage gauges with live updates via PubSub
 - **Domain Management**: Registrar syncing (Cloudflare, Namecheap), DNS zones, and automatic DNS record creation for deployments across public (Cloudflare) and internal (UniFi, Pi-hole) DNS providers
 - **Backup Management**: Trigger, schedule, and restore backups across deployments
+- **Hold Pages**: A deployment's route lives on its own container, so a domain 404s whenever the container is not there to answer it. Instead, visitors get a branded "we're deploying" / "we're updating" / "try again in a few minutes" page that reloads itself the moment the app is back -- covering both the window with no route at all and the one where the container is up but not listening yet. The page names nothing about the deployment behind it. Nineteen pages in all: eight chosen from the deployment's own state, nine named by a status code a proxied app can really produce (400, 401, 403, 413, 429, 500, 504, 507, 508), and two that were jokes (418, 420). The code-named eleven are reachable at `/_hiab/hold/<code>` on any host the box routes
 - **Activity Logging**: Persistent audit trail of all system operations with database-backed storage
 - **Notifications**: Real-time notification system for deployment events, backup completions, and system alerts
 - **Infrastructure Services**: Auto-provision reverse proxies (Traefik), DNS (Pi-hole), and other system-level services

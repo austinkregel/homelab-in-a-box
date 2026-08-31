@@ -13,6 +13,7 @@ defmodule Homelab.Deployments do
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
+  alias Homelab.Networking.Hostname
   alias Homelab.Services.ActivityLog
 
   @doc """
@@ -252,6 +253,66 @@ defmodule Homelab.Deployments do
     |> where([d], not is_nil(d.domain) and d.domain != "")
     |> preload([:tenant, :app_template])
     |> Repo.all()
+  end
+
+  @doc """
+  The deployment routed at `hostname`, or nil.
+
+  Answers the reverse of the routing labels: given a Host header that reached the plane
+  because nothing else would take it, which deployment was SUPPOSED to answer? Both
+  places a hostname can be stored are searched, because both become Traefik routers —
+  `domain`, and every `additional_domains` entry (see
+  `SpecBuilder.additional_domain_labels/2`).
+
+  Only deployments that hold a primary `domain` are considered, which is not a
+  shortcut: `SpecBuilder.build_routing_labels/2` emits no router at all without one, so
+  a row with aliases and no domain was never routed and cannot be what a request was
+  looking for.
+
+  The exact-`domain` match is tried alone first. It is what nearly every held request
+  is, and it keeps the common case — including a flood of requests to a name that is
+  down — off the alias scan.
+  """
+  @spec get_deployment_by_hostname(String.t() | nil) :: Deployment.t() | nil
+  def get_deployment_by_hostname(hostname) do
+    case Hostname.normalize(hostname) do
+      nil -> nil
+      host -> Repo.one(from d in routed_by_domain(host), limit: 1) || by_alias(host)
+    end
+  end
+
+  defp routed_by_domain(host) do
+    from d in Deployment, where: d.domain == ^host, preload: [:tenant, :app_template]
+  end
+
+  # `additional_domains` is a JSON column of objects, so there is no index to match a
+  # host against. The `LIKE` narrows the rows Postgres hands back to the ones whose JSON
+  # so much as mentions the name — a prefilter, not the check: it also matches
+  # `not-#{host}` and a host appearing in some other key, so the entry's `"host"` is
+  # still compared exactly in Elixir.
+  #
+  # Gated on `valid?/1`, which is where the LIKE pattern gets its safety: `normalize/1`
+  # lowercases and strips a paste apart but does NOT constrain the alphabet, so a Host
+  # header carrying `%` or `_` would otherwise reach the pattern as a wildcard. Nothing
+  # is lost by refusing it — every stored alias is a validated hostname, so a host that
+  # is not one cannot match a row.
+  defp by_alias(host) do
+    if Hostname.valid?(host), do: scan_aliases(host)
+  end
+
+  defp scan_aliases(host) do
+    Deployment
+    |> where([d], not is_nil(d.domain) and d.domain != "")
+    |> where([d], fragment("?::text LIKE ?", d.additional_domains, ^"%#{host}%"))
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+    |> Enum.find(&aliased?(&1, host))
+  end
+
+  defp aliased?(%Deployment{additional_domains: domains}, host) do
+    domains
+    |> List.wrap()
+    |> Enum.any?(fn entry -> is_map(entry) and entry["host"] == host end)
   end
 
   @doc "Lists ingress-published deployments currently in `:running`, preloaded."

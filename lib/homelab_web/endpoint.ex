@@ -15,6 +15,12 @@ defmodule HomelabWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  # In front of everything, including the static files: a request that arrives on some
+  # OTHER service's hostname is answered with a hold page rather than with any part of
+  # the control plane. Falls through for every host that is not one we route — see
+  # `HomelabWeb.Plugs.HoldingPage`.
+  plug HomelabWeb.Plugs.HoldingPage
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),
