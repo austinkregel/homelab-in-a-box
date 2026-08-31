@@ -820,14 +820,33 @@ defmodule Homelab.Deployments do
   end
 
   # The tail of a routed release, all of it after the app is healthy: claim the name
-  # locally, publish it to DNS, then actually grant reachability. Ordered so nothing
-  # advertises a name before something answers to it, and so compensation (which walks
-  # descending) severs reachability first, then DNS, then the row.
+  # locally, publish it to DNS, grant reachability, then CHECK it.
+  #
+  # Ordered so nothing advertises a name before something answers to it, and so
+  # compensation (which walks descending) severs reachability first, then DNS, then the
+  # row. The verification is last because it is the only step that observes the result of
+  # all three rather than performing one of them.
   #
   # Public (but undocumented) for `Adoption`, for the reason on `ingress_proxy_steps/1`.
   @doc false
   def ingress_steps(app) do
-    name_steps(app) ++ reachability_steps(app)
+    name_steps(app) ++ reachability_steps(app) ++ verify_steps(app)
+  end
+
+  # Does the release end by confirming the URL works?
+  #
+  # Keyed off `own_domain?/1` rather than `routed?/1`, and the difference is the netns
+  # donor: a donor carries its CHILD's Traefik labels, so it is routed while having no
+  # URL of its own to check. The child holds the name, and the child's own
+  # `verify_public_url` step is what checks it — planned by `name_steps/2`'s sibling in
+  # `redeploy_netns_stack/2`, against the child.
+  #
+  # Without a name there is nothing to verify, and a step that reports "no domain" on
+  # every internal deployment is noise on the one view that should read as a checklist.
+  defp verify_steps(deployment) do
+    if own_domain?(deployment),
+      do: [%{type: :verify_public_url, resource_handle: %{}}],
+      else: []
   end
 
   @doc false
@@ -943,6 +962,18 @@ defmodule Homelab.Deployments do
     child_name_steps =
       Enum.flat_map(children, &name_steps(&1, %{"deployment_id" => &1.id}))
 
+    # A tunneled child is the case where "routed" and "holds a URL" come apart: the
+    # DONOR carries the child's Traefik labels and so gets `ingress_steps/1`, while the
+    # name being served belongs to the child. Verifying the donor would check a URL it
+    # does not have, so each child that holds a name checks its own — targeted by handle,
+    # the same way its Domain row and A records are.
+    child_verify_steps =
+      Enum.flat_map(children, fn child ->
+        if own_domain?(child),
+          do: [%{type: :verify_public_url, resource_handle: %{"deployment_id" => child.id}}],
+          else: []
+      end)
+
     # Ingress LAST, after the children exist.
     #
     # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason
@@ -956,7 +987,7 @@ defmodule Homelab.Deployments do
         [
           %{type: :app_container, resource_handle: %{}},
           %{type: :await_health, resource_handle: %{}}
-        ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor)
+        ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor) ++ child_verify_steps
 
     # Settled first, for the reason on `reconverge_release/1`: the newest plan wins, and a
     # refusal must not have reset the donor and its children on the way to being refused.

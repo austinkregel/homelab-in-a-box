@@ -50,6 +50,20 @@ defmodule Homelab.Deployments.ReleaseRunner do
     :adopt_container
   ]
 
+  # Steps whose failure is REPORTED but does not roll the release back.
+  #
+  # The saga's default is fail-closed, and that is right for every step that performs
+  # part of the deploy: if it did not happen, the release did not happen. `:verify_public_url`
+  # is the exception because it performs nothing — it observes, and what it observes is
+  # outside the deploy entirely. A DNS record's TTL at the provider, an ACME order, a
+  # resolver's cache: none of them are reasons to undeploy a container that came up
+  # correctly, publish nothing, and hand the operator back an empty box.
+  #
+  # Failing loudly is still the point. The step goes to `:failed` with its reason, so a
+  # URL that never came up is on the Releases tab where it belongs; the release simply
+  # settles rather than compensating around it.
+  @advisory_steps [:verify_public_url]
+
   @lease_ttl_seconds 120
   @snooze_seconds 15
   # A third of the TTL, so two beats can be lost to a slow database before the
@@ -292,7 +306,7 @@ defmodule Homelab.Deployments.ReleaseRunner do
                 {:noop, _} -> :ok
               end
 
-              {:error, reason}
+              advisory_result(step, reason)
           end
         rescue
           e ->
@@ -301,10 +315,15 @@ defmodule Homelab.Deployments.ReleaseRunner do
               {:noop, _} -> :ok
             end
 
-            {:error, e}
+            advisory_result(step, e)
         end
     end
   end
+
+  # `:ok` continues the loop, `{:error, _}` rolls the release back. The step is already
+  # recorded as failed either way — the choice here is only what the SAGA does about it.
+  defp advisory_result(%{type: type}, _reason) when type in @advisory_steps, do: :ok
+  defp advisory_result(_step, reason), do: {:error, reason}
 
   # --- Lease heartbeat ------------------------------------------------------
 
@@ -524,6 +543,20 @@ defmodule Homelab.Deployments.ReleaseRunner do
   end
 
   defp log_step_completed(_step, _ctx), do: :ok
+
+  # `:warn` for an advisory step, because the deploy did not fail — the release goes on
+  # to `:running` and the container is serving. Filing it as an error would put a red row
+  # on the Activity page for every deployment whose certificate was still being issued.
+  defp log_step_failed(%{type: type} = step, ctx, reason) when type in @advisory_steps do
+    id = step_deployment_id(step, ctx)
+
+    activity(
+      :warn,
+      "deploy",
+      "#{label_for(id)} #{step.type} did not pass: #{format_error(reason)}",
+      id
+    )
+  end
 
   defp log_step_failed(step, ctx, reason) do
     id = step_deployment_id(step, ctx)

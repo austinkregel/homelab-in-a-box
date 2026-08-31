@@ -298,6 +298,7 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
                :sync_domain,
                :publish_dns,
                :publish_ingress,
+               :verify_public_url,
                :backup_verify,
                :adopt_credentials,
                :quiesce_old,

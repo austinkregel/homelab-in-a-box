@@ -62,7 +62,8 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
              :await_health,
              :sync_domain,
              :publish_dns,
-             :publish_ingress
+             :publish_ingress,
+             :verify_public_url
            ]
   end
 

@@ -85,6 +85,13 @@ config :homelab,
   docker_client: Homelab.Docker.UnavailableClient,
   # Never open a real TLS connection from a test that merely mounts a page.
   tls_probe: Homelab.Networking.TlsProbeStub,
+  # Nor a real HTTPS request: `verify_public_url` is planned on every routed release, and
+  # the factory's domains are made-up names.
+  url_probe: Homelab.Networking.UrlProbeStub,
+  # The URL check polls. Tests that stage an unreachable URL are asserting the timeout
+  # path, and must not spend the production 90s doing it.
+  verify_url_timeout_ms: 50,
+  verify_url_interval_ms: 10,
   start_services: false,
   registries: [Homelab.Registries.DockerHub],
   # In-process copy (no helper container) so migration steps run against temp dirs.

@@ -104,8 +104,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "switch_tab", %{"tab" => "releases"})
-      assert html =~ "backup verify"
-      assert html =~ "adopt container"
+      assert html =~ "Backup verified"
+      assert html =~ "Container adopted"
 
       # A step transition broadcasts and the panel re-renders with the new status.
       step = Releases.next_pending_step(release)
@@ -136,7 +136,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       # The companion has no release of its own, but the app's release is shown.
       assert html =~ "part of another release"
-      assert html =~ "dependency container"
+      assert html =~ "Dependency container started"
     end
 
     test "redeploy re-plans a release and flashes", %{conn: conn, deployment: dep} do
@@ -1834,7 +1834,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       refute html =~ "No releases yet"
       assert html =~ "Config change"
-      assert html =~ "app container"
+      assert html =~ "Container created"
     end
 
     # Pressing it used to make it vanish, which reads the same as the control having been
@@ -1855,7 +1855,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       html = render_click(view, "switch_tab", %{"tab" => "overview"})
 
       refute html =~ "Re-run deploy"
-      assert html =~ "app container", "the button should name the step the release is on"
+      assert html =~ "Container created", "the button should name the step the release is on"
       assert has_element?(view, "button[phx-click=\"redeploy\"][disabled]")
     end
   end

@@ -1068,9 +1068,7 @@ defmodule HomelabWeb.DeploymentLive do
             <.icon name="hero-exclamation-triangle" class="size-5 text-error flex-shrink-0 mt-0.5" />
             <div class="min-w-0">
               <p class="text-sm font-semibold text-error">
-                Deploy stopped at "{failed_step(@driving_release).type
-                |> to_string()
-                |> String.replace("_", " ")}"
+                Deploy stopped at "{humanize_step(failed_step(@driving_release).type)}"
               </p>
               <p
                 :if={failed_step(@driving_release).error_message}
@@ -3982,6 +3980,15 @@ defmodule HomelabWeb.DeploymentLive do
   defp can_redeploy?(_), do: false
 
   # The first step that failed on a release, if any — the reason the stack stalled.
+  # The step a release STOPPED at — which is not the same as "a step that failed".
+  #
+  # An advisory step (`:verify_public_url`) records a failure and the saga carries on, so
+  # a release can settle `:running` with a failed step on it. Reporting that as "Deploy
+  # stopped at ..." would be flatly wrong: the deploy finished and the container is up;
+  # only the URL check did not pass, which the release card already shows in place.
+  defp failed_step(%Homelab.Deployments.Release{status: status}) when status == :running,
+    do: nil
+
   defp failed_step(%Homelab.Deployments.Release{steps: steps}) when is_list(steps),
     do: Enum.find(Enum.sort_by(steps, & &1.position), &(&1.status == :failed))
 
@@ -4157,6 +4164,32 @@ defmodule HomelabWeb.DeploymentLive do
     Enum.find(steps, &(&1.status == :running)) || Enum.find(steps, &(&1.status == :pending))
   end
 
+  # What each step MEANS, rather than its type spelled with spaces. The timeline is the
+  # one place an operator reads a deploy, and "publish ingress" is the clearest example of
+  # why the identifier is not the label: it names the mechanism (attach the workload to
+  # the ingress network) while the reader is asking about the outcome, and the outcome it
+  # delivers is a precondition of being reachable rather than being reachable — which is
+  # what `:verify_public_url` was added to actually assert.
+  defp humanize_step(:ensure_ingress_proxy), do: "Reverse proxy running"
+  defp humanize_step(:provision_credentials), do: "Credentials generated"
+  defp humanize_step(:dependency_container), do: "Dependency container started"
+  defp humanize_step(:ensure_datastore_grants), do: "Database access granted"
+  defp humanize_step(:app_container), do: "Container created"
+  defp humanize_step(:netns_child_container), do: "Container created in shared network"
+  defp humanize_step(:await_health), do: "Container healthy"
+  defp humanize_step(:sync_domain), do: "Domain claimed"
+  defp humanize_step(:publish_dns), do: "DNS records published"
+  defp humanize_step(:publish_ingress), do: "Attached to the reverse proxy"
+  defp humanize_step(:verify_public_url), do: "Answering at its URL"
+  defp humanize_step(:network), do: "Network created"
+  defp humanize_step(:backup_verify), do: "Backup verified"
+  defp humanize_step(:quiesce_old), do: "Existing container paused"
+  defp humanize_step(:migrate_volume), do: "Data copied"
+  defp humanize_step(:resume_old), do: "Existing container resumed"
+  defp humanize_step(:adopt_credentials), do: "Credentials imported"
+  defp humanize_step(:adopt_volume), do: "Volume adopted"
+  defp humanize_step(:adopt_container), do: "Container adopted"
+  defp humanize_step(:verify_integrity), do: "Copied data verified"
   defp humanize_step(type), do: type |> to_string() |> String.replace("_", " ")
 
   # What KIND of event this release was, which its steps cannot say: a config save and a
@@ -4219,7 +4252,7 @@ defmodule HomelabWeb.DeploymentLive do
           <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
           <div class="min-w-0">
             <p class="text-sm text-base-content">
-              {step.type |> to_string() |> String.replace("_", " ")}
+              {humanize_step(step.type)}
               <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
             </p>
             <p :if={step.error_message} class="text-xs text-error mt-0.5 break-words">

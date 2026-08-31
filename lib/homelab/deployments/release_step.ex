@@ -40,6 +40,16 @@ defmodule Homelab.Deployments.ReleaseStep do
     :sync_domain,
     :publish_dns,
     :publish_ingress,
+    # The last step of a routed release, and the only one that asserts the thing the
+    # operator actually wants: that `https://<domain>/` answers, and that the app is what
+    # answered. `:publish_ingress` proves the workload is ON the ingress network, which
+    # is a precondition of reachability rather than reachability itself — Traefik still
+    # has to rebuild its router, ACME still has to issue, DNS still has to propagate, and
+    # all three windows sat after the release had already reported success.
+    #
+    # Advisory in `ReleaseRunner`: it fails loudly and does NOT roll back, because
+    # everything it waits on is outside the deploy.
+    :verify_public_url,
     # Adoption steps (taking over an existing stack in place). `:backup_verify`
     # is the fail-closed gate; `:adopt_credentials` imports existing secrets
     # rather than generating; `:quiesce_old` stops the old container (and

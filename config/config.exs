@@ -68,6 +68,8 @@ config :homelab, :release_step_handlers, %{
   sync_domain: Homelab.Deployments.ReleaseSteps.SyncDomain,
   publish_dns: Homelab.Deployments.ReleaseSteps.PublishDns,
   publish_ingress: Homelab.Deployments.ReleaseSteps.PublishIngress,
+  # Reachability as a browser sees it, after everything that grants it has run.
+  verify_public_url: Homelab.Deployments.ReleaseSteps.VerifyPublicUrl,
   # Adoption steps.
   backup_verify: Homelab.Deployments.ReleaseSteps.BackupVerify,
   quiesce_old: Homelab.Deployments.ReleaseSteps.QuiesceOld,

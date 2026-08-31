@@ -114,7 +114,9 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
       types = step_types(result)
 
       assert List.last(Enum.take_while(types, &(&1 != :sync_domain))) == :verify_integrity
-      assert Enum.drop_while(types, &(&1 != :sync_domain)) == [:sync_domain, :publish_dns]
+
+      assert Enum.drop_while(types, &(&1 != :sync_domain)) ==
+               [:sync_domain, :publish_dns, :verify_public_url]
     end
 
     test "plans no publish_ingress for a :host adoption" do
@@ -140,9 +142,12 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
       types = step_types(result)
 
       assert :publish_ingress in types
-      # Last of all: reachability is granted after the name resolves, so compensation
-      # (which walks descending) severs the route before it removes the record.
-      assert List.last(types) == :publish_ingress
+
+      # Reachability is granted after the name resolves, so compensation (which walks
+      # descending) severs the route before it removes the record. The URL check follows
+      # it, observing the result of all three rather than performing any of them.
+      assert Enum.drop_while(types, &(&1 != :publish_ingress)) ==
+               [:publish_ingress, :verify_public_url]
     end
   end
 end

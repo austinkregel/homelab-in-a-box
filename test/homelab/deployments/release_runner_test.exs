@@ -94,6 +94,61 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  describe "advisory steps" do
+    # `:verify_public_url` observes rather than performs, and everything it waits on is
+    # outside the deploy — a DNS TTL at the provider, an ACME order, a resolver cache.
+    # Rolling back would undeploy a container that came up correctly and hand the
+    # operator an empty box over a certificate that arrived a minute later.
+    test "a failed URL check is recorded but does not roll the release back" do
+      deployment = insert(:deployment, domain: "app.example.test")
+
+      {:ok, release} =
+        Releases.plan_release(deployment, [
+          %{type: :app_container},
+          %{type: :publish_ingress},
+          %{type: :verify_public_url}
+        ])
+
+      # The REAL handler for the step under test, the double for everything else — so the
+      # advisory seam is exercised end to end while the other steps still report to this
+      # process. Deleting the registry instead would fall through to `NoopHandler`, and
+      # the step would pass for the wrong reason.
+      Application.put_env(:homelab, :release_step_handlers, %{
+        default: TestHandler,
+        verify_public_url: Homelab.Deployments.ReleaseSteps.VerifyPublicUrl
+      })
+
+      Application.put_env(:homelab, :url_probe_result, :holding)
+
+      on_exit(fn -> Application.delete_env(:homelab, :url_probe_result) end)
+
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      release = Releases.get_release(release.id)
+
+      # The deploy succeeded and the container is serving.
+      assert release.status == :running
+
+      # And the check that did not pass says so, in place, with a reason.
+      verify = Enum.find(release.steps, &(&1.type == :verify_public_url))
+      assert verify.status == :failed
+      assert verify.error_message =~ "url_unreachable"
+
+      # Nothing was undone: the steps before it are still completed.
+      assert Enum.find(release.steps, &(&1.type == :app_container)).status == :completed
+      assert Enum.find(release.steps, &(&1.type == :publish_ingress)).status == :completed
+    end
+
+    # The rule is scoped to the advisory list, not loosened for everything.
+    @tag fail_at: 2
+    test "a non-advisory step failing still rolls the release back" do
+      release = plan(insert(:deployment), [:app_container, :publish_ingress])
+
+      assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t1")
+      assert Releases.get_release(release.id).status == :rolled_back
+    end
+  end
+
   describe "supersession" do
     test "a release superseded before its job runs does nothing at all" do
       release = plan(insert(:deployment))
