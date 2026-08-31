@@ -281,6 +281,81 @@ defmodule Homelab.Deployments.Releases do
   def abandon_note, do: @abandon_note
 
   @doc """
+  Marks a release `:superseded` because a newer one is about to take over the same
+  deployment. Returns `{:ok, release}`, or `{:noop, release}` if it was not in a state
+  that may be handed over (already terminal, or `:rolling_back`).
+
+  ## Terminal, and NOT compensated
+
+  Same reasoning as `abandon_release/2`, reached from the other direction. Compensation
+  would undeploy the container, sever ingress and withdraw the A records — for a
+  deployment that is not going away, seconds before its replacement re-creates all
+  three. The visible result of "I saved again" would be an outage.
+
+  The successor re-plans the same steps against the configuration as it now stands, and
+  every handler is required to be idempotent, so the half-finished work is not orphaned
+  the way an abandoned release's is: it is converged over.
+
+  ## Why the lease is left alone
+
+  Deliberately not cleared, and this is the whole safety property. A superseded release
+  may still have a runner inside a step that cannot be interrupted — an image pull, a
+  health wait, a volume copy — and that runner keeps its lease heartbeating until the
+  step returns. `ReleaseRunner.run/2` refuses to start a successor while any other
+  release for the deployment holds a live lease, so leaving it set is what serializes
+  the handover; clearing it here would let both runners call `orchestrator.deploy/1`
+  for one container name.
+
+  The outgoing runner drops the lease itself as soon as it notices, at its next step
+  boundary. If it never does — a crashed node — the lease expires on its TTL and the
+  successor proceeds. Either way the wait is bounded and nothing runs twice at once.
+  """
+  @supersede_note "Superseded by a newer release for this deployment. Nothing was stopped, " <>
+                    "removed or deleted: the release that replaced it re-plans the same steps " <>
+                    "against the configuration as it now stands."
+
+  def supersede_release(%Release{} = release) do
+    transition_release(release, :superseded, [:planning, :provisioning], error: @supersede_note)
+  end
+
+  @doc "The wording a superseded release records."
+  def supersede_note, do: @supersede_note
+
+  @doc """
+  Is some OTHER release for this release's deployment still holding a live lease?
+
+  The handover gate. `releases_one_active_per_deployment` cannot answer this: the
+  release being handed over is `:superseded`, which is terminal, so it has already left
+  every active-status query — including `leased_deployment_ids/0` — while its runner may
+  still be inside a step. Status says the handover happened; the lease says whether it
+  has actually finished.
+  """
+  def deployment_leased_elsewhere?(%Release{id: id, deployment_id: deployment_id}, now \\ nil) do
+    now = now || utc_now()
+
+    Release
+    |> where([r], r.deployment_id == ^deployment_id and r.id != ^id)
+    |> where([r], not is_nil(r.lease_owner) and r.lease_expires_at > ^now)
+    |> Repo.exists?()
+  end
+
+  @doc """
+  Drops the lease `owner` holds on a release without touching its status. Returns `:ok`,
+  or `:noop` when the lease has already moved on (expired, or taken by someone else).
+
+  Scoped to the owner for the same reason `renew_lease/3` is: a runner standing down
+  must not clear a lease that has since been granted to another.
+  """
+  def clear_lease(release_id, owner) do
+    {count, _} =
+      Release
+      |> where([r], r.id == ^release_id and r.lease_owner == ^owner)
+      |> Repo.update_all(set: [lease_owner: nil, lease_expires_at: nil, updated_at: naive_now()])
+
+    if count == 1, do: :ok, else: :noop
+  end
+
+  @doc """
   Compare-and-set a step status. `opts` may carry `:error` and `:handle` (stored
   in `resource_handle`). Returns `{:ok, step}` or `{:noop, step}`.
   """

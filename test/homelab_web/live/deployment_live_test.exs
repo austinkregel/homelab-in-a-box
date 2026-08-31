@@ -1526,9 +1526,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
       conn: conn,
       deployment: dep
     } do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "volumes"})
       render_click(view, "start_volumes_edit")
@@ -1544,6 +1541,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"container_path" => "/var/www/html/storage"}] = reloaded.volumes_override
+
+      assert_reconfigure_release(dep.id)
     end
 
     test "a relative mount path is rejected rather than turned into a garbage volume name",
@@ -1575,7 +1574,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
       # pass silently.
       Homelab.Mocks.Orchestrator
       |> expect(:undeploy, 0, fn _id -> :ok end)
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
 
@@ -1611,6 +1609,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       assert Homelab.Deployments.Access.effective_ports(reloaded) ==
                reloaded.app_template.ports
+
+      assert_reconfigure_release(dep.id)
     end
 
     # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
@@ -1618,9 +1618,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
     # one backend port, and every websocket handshake landed on the HTTP server.
     test "an extra path route persists and reaches a different container port",
          %{conn: conn, deployment: dep} do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
@@ -1638,13 +1635,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"path_prefix" => "/app", "port" => 6001}] = reloaded.extra_routes
+
+      assert_reconfigure_release(dep.id)
     end
 
     test "a half-filled route row is dropped rather than saved broken",
          %{conn: conn, deployment: dep} do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
@@ -1666,13 +1662,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"path_prefix" => "/app"}] = reloaded.extra_routes
+
+      assert_reconfigure_release(dep.id)
     end
 
     test "switching to Host ports persists the container->host binding and recreates",
          %{conn: conn, deployment: dep} do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
@@ -1697,13 +1692,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       assert [%{"internal" => "8080", "external" => "9090", "published" => true}] =
                updated.ports_override
+
+      assert_reconfigure_release(dep.id)
     end
 
     test "a UDP host binding persists, and survives an unrelated later save",
          %{conn: conn, deployment: dep} do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, 2, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
@@ -1723,6 +1717,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"internal" => "27900", "protocol" => "udp"}] = updated.ports_override
+      assert_reconfigure_release(dep.id)
 
       # The real regression risk is not the first save but the SECOND: the settings form
       # re-renders from stored state, and a protocol the form fails to round-trip silently
@@ -1731,21 +1726,37 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form", settings: %{"memory_mb" => "1024"})
-      |> render_submit()
+      html =
+        view
+        |> form("#settings-form", settings: %{"memory_mb" => "1024"})
+        |> render_submit()
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
 
       assert [%{"internal" => "27900", "protocol" => "udp"}] = reloaded.ports_override,
              "an unrelated save rewrote the port back to tcp"
+
+      # Oban is `testing: :manual`, so the first release is still sitting in `:planning`
+      # when the second save lands — which is exactly the case the newest plan has to win.
+      # The second save supersedes the first and applies, rather than persisting an edit
+      # that never reaches the container.
+      assert reloaded.resource_limits_override["memory_mb"] == 1024
+      refute html =~ "Saved, but not applied yet"
+
+      driving = Homelab.Deployments.Releases.driving_release(dep.id)
+      assert driving.plan["kind"] == "reconfigure"
+      assert driving.status == :planning
+
+      superseded =
+        dep.id
+        |> Homelab.Deployments.Releases.list_releases_for_deployment()
+        |> Enum.find(&(&1.status == :superseded))
+
+      assert superseded, "the first release should have been handed over, not left active"
     end
 
     test "saving resilience limits + health path persists per-deployment overrides",
          %{conn: conn, deployment: dep} do
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
-
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
@@ -1765,6 +1776,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.resource_limits_override == %{"memory_mb" => 1024, "cpu_shares" => 2048}
       assert updated.health_check_override["path"] == "/healthz"
+
+      assert_reconfigure_release(dep.id)
     end
 
     test "overriding one deployment's config does not affect a sibling on the same template",
@@ -1777,9 +1790,6 @@ defmodule HomelabWeb.DeploymentLiveTest do
           external_id: "sibling_123",
           domain: nil
         )
-
-      Homelab.Mocks.Orchestrator
-      |> expect(:deploy, fn _spec -> {:ok, "container_new"} end)
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
@@ -1794,6 +1804,80 @@ defmodule HomelabWeb.DeploymentLiveTest do
       reloaded_sibling = Homelab.Deployments.get_deployment!(sibling.id)
       assert reloaded_sibling.exposure_mode_override == nil
       assert reloaded_sibling.domain == nil
+
+      assert_reconfigure_release(dep.id)
+
+      # The sibling was never in the release, so nothing planned against it either.
+      refute Homelab.Deployments.Releases.driving_release(sibling.id)
     end
+  end
+
+  describe "release visibility after a config save" do
+    # The gap this closes: the container WAS being recreated, but by an imperative call
+    # that planned nothing, so the page that exists to show what a deploy is doing showed
+    # "No releases yet" for every version bump and every network edit.
+    test "a settings save appears on the Releases tab, labelled as a config change",
+         %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      render_click(view, "switch_tab", %{"tab" => "releases"})
+      assert render(view) =~ "No releases yet"
+
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form", settings: %{"access" => "proxy", "domain" => "app.example.com"})
+      |> render_submit()
+
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      refute html =~ "No releases yet"
+      assert html =~ "Config change"
+      assert html =~ "app container"
+    end
+
+    # Pressing it used to make it vanish, which reads the same as the control having been
+    # removed. It stays, disabled, and says which step the release is on.
+    test "the redeploy button reports the running release instead of disappearing",
+         %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      assert render(view) =~ "Re-run deploy"
+
+      render_click(view, "switch_tab", %{"tab" => "settings"})
+      render_click(view, "start_settings_edit")
+
+      view
+      |> form("#settings-form", settings: %{"access" => "internal"})
+      |> render_submit()
+
+      html = render_click(view, "switch_tab", %{"tab" => "overview"})
+
+      refute html =~ "Re-run deploy"
+      assert html =~ "app container", "the button should name the step the release is on"
+      assert has_element?(view, "button[phx-click=\"redeploy\"][disabled]")
+    end
+  end
+
+  # A config save no longer deploys inside the request. It plans a release and hands it
+  # to `ReleaseRunner`, so the `expect(:deploy, ...)` these tests used to carry asserted
+  # a call that now happens in an Oban worker `testing: :manual` never runs — it would
+  # pass just as happily if the save had stopped applying anything at all.
+  #
+  # The equivalent assertion is against the release that will make the call: it exists,
+  # it is labelled as a config change rather than something else that happened to be
+  # planned, and it actually contains the step that replaces the container.
+  defp assert_reconfigure_release(deployment_id) do
+    release = Homelab.Deployments.Releases.driving_release(deployment_id)
+
+    assert release,
+           "no release was planned — the saved config would never reach the container"
+
+    assert release.plan["kind"] == "reconfigure"
+    assert Enum.any?(release.steps, &(&1.type == :app_container))
+    assert Enum.any?(release.steps, &(&1.type == :await_health))
+
+    release
   end
 end

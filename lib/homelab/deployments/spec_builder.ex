@@ -396,8 +396,8 @@ defmodule Homelab.Deployments.SpecBuilder do
   # This belongs here, not in the callers. It used to live in the release-step handlers
   # — `DeployContainer` and `AdoptContainer` each merged it onto the spec themselves —
   # which meant the two IMPERATIVE deploy paths (`start_deployment/1` and `do_deploy/1`)
-  # silently did not. `recreate_deployment/1` is `start_deployment/1`, and that is what
-  # every config save on the deployment page runs. So saving one env var recreated the
+  # silently did not. `recreate_deployment/1` is `start_deployment/1`, and that was what
+  # every config save on the deployment page ran. So saving one env var recreated the
   # container with every generated DB password and every adopted credential missing,
   # while pressing "Redeploy" (which plans a release) put them back. The behaviour
   # depended on which button you pressed.

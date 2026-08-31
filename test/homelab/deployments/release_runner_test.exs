@@ -14,9 +14,15 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     @behaviour Homelab.Deployments.ReleaseStep.Handler
 
     @impl true
-    def run(step, _ctx) do
+    def run(step, ctx) do
       cfg = Application.get_env(:homelab, :test_release_handler)
       send(cfg.pid, {:run, step.position, step.type})
+
+      # Stands in for a second config save landing while this step is in flight — the
+      # one moment a runner cannot be stopped, and so the only interesting one.
+      if step.position == cfg[:supersede_at] do
+        Homelab.Deployments.Releases.supersede_release(ctx.release)
+      end
 
       if step.position == cfg[:fail_at] do
         {:error, {:boom, step.position}}
@@ -42,7 +48,8 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
 
     Application.put_env(:homelab, :test_release_handler, %{
       pid: self(),
-      fail_at: context[:fail_at]
+      fail_at: context[:fail_at],
+      supersede_at: context[:supersede_at]
     })
 
     on_exit(fn ->
@@ -84,6 +91,69 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       # Each completed step recorded its handle.
       handles = Map.new(release.steps, &{&1.position, &1.resource_handle["ran"]})
       assert handles == %{1 => 1, 2 => 2, 3 => 3, 4 => 4}
+    end
+  end
+
+  describe "supersession" do
+    test "a release superseded before its job runs does nothing at all" do
+      release = plan(insert(:deployment))
+      assert {:ok, _} = Releases.supersede_release(release)
+
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      refute_received {:run, _, _}
+      refute_received {:compensate, _, _}
+      assert Releases.get_release(release.id).status == :superseded
+    end
+
+    # The case the step boundary exists for. A handler cannot be interrupted, so the
+    # runner finishes the step it is in and stops at the next boundary.
+    @tag supersede_at: 2
+    test "a runner superseded mid-flight stands down without compensating" do
+      release = plan(insert(:deployment))
+
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      # The step that superseded it still finished — it was already running.
+      assert_received {:run, 1, _}
+      assert_received {:run, 2, _}
+
+      # Nothing after it started, and nothing before it was undone. Compensating would
+      # undeploy the container the successor is about to re-create.
+      refute_received {:run, 3, _}
+      refute_received {:compensate, _, _}
+
+      release = Releases.get_release(release.id)
+      assert release.status == :superseded
+      assert release.error_message == Releases.supersede_note()
+
+      # The lease is handed back rather than left to expire, so the successor's job stops
+      # snoozing immediately instead of waiting out the TTL.
+      assert is_nil(release.lease_owner)
+      assert is_nil(release.lease_expires_at)
+    end
+
+    # The handover gate. Status alone cannot answer this: the outgoing release is already
+    # terminal while its runner is still inside a step.
+    test "a successor snoozes while the release it replaced still holds a live lease" do
+      deployment = insert(:deployment)
+      outgoing = plan(deployment)
+
+      # An outgoing runner mid-step: leased, and superseded underneath it.
+      assert {:ok, _} = Releases.acquire_lease(outgoing, "outgoing-runner", 120)
+      assert {:ok, _} = Releases.supersede_release(outgoing)
+
+      successor = plan(deployment)
+
+      assert {:snooze, _seconds} = ReleaseRunner.run(successor.id, owner: "t2")
+      refute_received {:run, _, _}
+
+      # Once that runner hands the lease back, the successor proceeds.
+      assert :ok = Releases.clear_lease(outgoing.id, "outgoing-runner")
+      assert :ok = ReleaseRunner.run(successor.id, owner: "t2")
+
+      assert_received {:run, 1, _}
+      assert Releases.get_release(successor.id).status == :running
     end
   end
 

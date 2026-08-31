@@ -520,13 +520,12 @@ defmodule HomelabWeb.DeploymentLive do
     }
 
     case apply_config(deployment, attrs) do
-      {:ok, updated} ->
+      {:ok, updated, _release} ->
         {:noreply,
          socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
+         |> assign_applied(updated)
          |> assign(:runtime_edit_mode, false)
-         |> put_flash(:info, "Runtime settings saved — recreating the container.")}
+         |> put_flash(:info, "Runtime settings saved — #{release_started_flash(false)}")}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -685,14 +684,13 @@ defmodule HomelabWeb.DeploymentLive do
     volumes = VolumeSpec.parse(params["volumes"])
 
     case apply_config(deployment, %{volumes_override: volumes}) do
-      {:ok, updated} ->
+      {:ok, updated, _release} ->
         {:noreply,
          socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
+         |> assign_applied(updated)
          |> assign(:volumes_edit_mode, false)
          |> assign(:volumes_rows, [])
-         |> put_flash(:info, "Volumes updated — recreating the container.")}
+         |> put_flash(:info, "Volumes updated — #{release_started_flash(false)}")}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -781,11 +779,10 @@ defmodule HomelabWeb.DeploymentLive do
     stack? = netns_member?(deployment, attrs.network_parent_id)
 
     case apply_config(deployment, attrs, stack?) do
-      {:ok, updated} ->
+      {:ok, updated, _release} ->
         {:noreply,
          socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
+         |> assign_applied(updated)
          |> assign(:settings_edit_mode, false)
          |> put_flash(:info, settings_saved_flash(updated, stack?))}
 
@@ -1009,7 +1006,10 @@ defmodule HomelabWeb.DeploymentLive do
                 :if={@deployment.status in [:stopped, :failed]}
                 type="button"
                 phx-click="start"
-                class="px-4 py-2 rounded-lg bg-success text-success-content text-sm font-medium hover:bg-success/90 transition-colors"
+                class={[
+                  action_button(),
+                  "px-4 py-2 text-sm bg-success text-success-content hover:bg-success/90"
+                ]}
               >
                 Start
               </button>
@@ -1017,7 +1017,10 @@ defmodule HomelabWeb.DeploymentLive do
                 :if={@deployment.status == :running}
                 type="button"
                 phx-click="stop"
-                class="px-4 py-2 rounded-lg bg-warning text-warning-content text-sm font-medium hover:bg-warning/90 transition-colors"
+                class={[
+                  action_button(),
+                  "px-4 py-2 text-sm bg-warning text-warning-content hover:bg-warning/90"
+                ]}
               >
                 Stop
               </button>
@@ -1025,24 +1028,19 @@ defmodule HomelabWeb.DeploymentLive do
                 :if={@deployment.status == :running && @deployment.external_id}
                 type="button"
                 phx-click="restart"
-                class="px-4 py-2 rounded-lg bg-info text-info-content text-sm font-medium hover:bg-info/90 transition-colors"
+                class={[
+                  action_button(),
+                  "px-4 py-2 text-sm bg-info text-info-content hover:bg-info/90"
+                ]}
               >
                 Restart
               </button>
-              <button
-                :if={can_redeploy?(@driving_release)}
-                type="button"
-                phx-click="redeploy"
-                data-confirm="Re-run the deployment steps for this stack from the start?"
-                class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-              >
-                Re-run deploy
-              </button>
+              <.redeploy_button release={@driving_release} size="px-4 py-2 text-sm" />
               <button
                 type="button"
                 phx-click="delete"
                 data-confirm="Are you sure you want to delete this deployment?"
-                class="px-4 py-2 rounded-lg bg-error/10 text-error text-sm font-medium hover:bg-error/20 transition-colors"
+                class={[action_button(), "px-4 py-2 text-sm bg-error/10 text-error hover:bg-error/20"]}
               >
                 Delete
               </button>
@@ -2964,15 +2962,7 @@ defmodule HomelabWeb.DeploymentLive do
             <p class="text-xs text-base-content/40">
               Each release runs an ordered set of steps. A failed step stops the deploy — fix the cause and re-run.
             </p>
-            <button
-              :if={can_redeploy?(@driving_release)}
-              type="button"
-              phx-click="redeploy"
-              data-confirm="Re-run the deployment steps for this stack from the start?"
-              class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-xs font-medium hover:bg-primary/90 transition-colors shrink-0"
-            >
-              Re-run deploy
-            </button>
+            <.redeploy_button release={@driving_release} size="px-3 py-1.5 text-xs" />
           </div>
 
           <%!-- App deployments have their own release history. --%>
@@ -3009,6 +2999,19 @@ defmodule HomelabWeb.DeploymentLive do
     socket
     |> assign(:readiness, Readiness.checks(deployment))
     |> assign_netns(deployment)
+  end
+
+  # What every config save does to the page. `assign_releases/1` is the part that is
+  # easy to leave out and the whole reason a save now reads as an event: `plan_release/3`
+  # does not broadcast — only `transition_release/4` and `transition_step/4` do — so
+  # without this the release exists but the tab keeps saying "No releases yet" until the
+  # runner picks the job up. Re-reading here means the card is on screen before the
+  # flash has finished animating in.
+  defp assign_applied(socket, updated) do
+    socket
+    |> assign(:deployment, updated)
+    |> assign_derived()
+    |> assign_releases()
   end
 
   defp assign_netns(socket, deployment) do
@@ -3060,15 +3063,14 @@ defmodule HomelabWeb.DeploymentLive do
       |> Map.new(fn row -> {String.trim(row["key"]), row["value"] || ""} end)
 
     case apply_config(deployment, %{env_overrides: env_overrides}) do
-      {:ok, updated} ->
+      {:ok, updated, _release} ->
         {:noreply,
          socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
+         |> assign_applied(updated)
          |> assign(:env_edit_mode, false)
          |> assign(:env_form, nil)
          |> assign(:env_rows, [])
-         |> put_flash(:info, "Environment updated — recreating the container.")}
+         |> put_flash(:info, "Environment updated — #{release_started_flash(false)}")}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
@@ -3280,29 +3282,42 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  # A version change is `apply_config/2` with a different image — the pull-and-converge
+  # A version change is `apply_config/3` with a different image — the pull-and-converge
   # sequence was always there, it had just never been handed anything different to run.
+  #
+  # `stack?` is computed here rather than left to default `false`, and the omission was a
+  # real bug: a version bump on a netns DONOR took the standalone branch, re-creating the
+  # donor's container and leaving every child's `NetworkMode` naming a container that no
+  # longer exists — dead until something else re-created them. The settings form had
+  # worked this out (`netns_member?/2`); the version control had not, so the one edit
+  # guaranteed to replace the container was the one that ignored the group.
   defp apply_version(socket, override) do
     deployment = socket.assigns.deployment
+    stack? = netns_member?(deployment, deployment.network_parent_id)
 
-    case apply_config(deployment, %{image_override: override}) do
-      {:ok, updated} ->
-        message =
-          if override,
-            do: "Now running #{override} — recreating the container.",
-            else: "Reset to the catalog default — recreating the container."
+    case apply_config(deployment, %{image_override: override}, stack?) do
+      {:ok, updated, _release} ->
+        target = if override, do: "Now running #{override}", else: "Reset to the catalog default"
 
         {:noreply,
          socket
-         |> assign(:deployment, updated)
-         |> assign_derived()
+         |> assign_applied(updated)
          |> assign(version_edit_mode: false, available_tags: :idle)
-         |> put_flash(:info, message)}
+         |> put_flash(:info, "#{target} — #{release_started_flash(stack?)}")}
 
       {:error, message} ->
         {:noreply, put_flash(socket, :error, message)}
     end
   end
+
+  # The one sentence every config save ends with. A save no longer applies anything
+  # itself — it plans a release and hands it to `ReleaseRunner` — so the flash points at
+  # the place that shows what is actually happening instead of asserting it is done.
+  defp release_started_flash(false),
+    do: "release started, watch the Releases tab."
+
+  defp release_started_flash(true),
+    do: "release started for the whole network group, watch the Releases tab."
 
   # `start_async` rather than a supervised Task: it is scoped to this LiveView, so a
   # registry that hangs cannot outlive the page that asked, and the result arrives via
@@ -3323,11 +3338,16 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  # Persists config attrs then recreates the container so the changes take effect.
+  # Persists config attrs then plans a release that applies them to the workload.
+  #
+  # Returns the reloaded deployment AND the release driving it, because the caller has
+  # to say which of the two happened: the save is synchronous and done, the apply is a
+  # saga that has only just been enqueued. Every flash on this path used to promise
+  # "recreating the container" in the past tense for work that had not started.
   defp apply_config(deployment, attrs, stack? \\ false) do
     with {:ok, updated} <- Deployments.update_deployment(deployment, attrs),
-         {:ok, _} <- reconverge(updated, stack?) do
-      {:ok, Deployments.get_deployment!(updated.id)}
+         {:ok, release} <- reconverge(updated, stack?) do
+      {:ok, Deployments.get_deployment!(updated.id), release}
     else
       # The changeset's OWN message, not a generic stand-in. Every refusal reachable from
       # this form was written to say what is wrong and what to do instead — `Netns` alone
@@ -3336,16 +3356,44 @@ defmodule HomelabWeb.DeploymentLive do
       {:error, %Ecto.Changeset{} = changeset} ->
         {:error, HomelabWeb.ChangesetErrors.to_sentence(changeset)}
 
+      # The config IS saved — `update_deployment/2` committed before the plan was
+      # refused — so this must not read as a failed save, or the operator retypes an
+      # edit the row already holds. Both saga entry points can refuse this way, and it
+      # is the ordinary outcome of saving twice in a row while the first release runs.
+      # A second save normally SUPERSEDES the release still in flight, so reaching here
+      # means it was one of the few that cannot be handed over: an import moving data, a
+      # rollback undoing itself, or a deploy anchored on another deployment in this
+      # stack. The edit is committed either way — say which of the two happened, or the
+      # operator retypes something the row already holds.
+      {:error, {:release_in_flight, _id}} ->
+        {:error,
+         "Saved, but not applied yet: this deployment is being driven by a release that " <>
+           "cannot be handed over — an import, a rollback, or a deploy anchored on " <>
+           "another deployment in its stack. Re-run the deploy once that one finishes."}
+
+      {:error, :release_active} ->
+        {:error,
+         "Saved, but not applied yet: a release is already running for this stack. " <>
+           "Re-run the deploy once it finishes."}
+
       {:error, reason} ->
-        {:error, "Saved, but recreate failed: #{inspect(reason)}"}
+        {:error, "Saved, but the release could not be planned: #{inspect(reason)}"}
     end
   end
 
-  # A lone container converges in place; a network-namespace group cannot. Re-creating
-  # one member mints a new container id that the others are pinned to, so the group goes
-  # round together as one ordered release.
-  defp reconverge(deployment, true), do: Deployments.redeploy_netns_stack(deployment)
-  defp reconverge(deployment, false), do: Deployments.recreate_deployment(deployment)
+  # Both branches plan a release; they differ only in what the release covers.
+  #
+  # A lone container converges through a release of its own. A network-namespace group
+  # cannot: re-creating one member mints a new container id that the others are pinned
+  # to, so the group goes round together as one ordered release.
+  #
+  # The `false` branch used to be `Deployments.recreate_deployment/1`, which deployed
+  # imperatively in this process — right result, no release row, so the Releases tab
+  # stayed empty for every version bump and every network edit.
+  defp reconverge(deployment, true),
+    do: Deployments.redeploy_netns_stack(deployment, plan: %{"kind" => "reconfigure"})
+
+  defp reconverge(deployment, false), do: Deployments.reconverge_release(deployment)
 
   # True when this save touches a network-namespace group at all — either this
   # deployment is joining/leaving one, or it is the donor others are already inside.
@@ -3468,10 +3516,7 @@ defmodule HomelabWeb.DeploymentLive do
 
   # Which radio starts checked: the port Traefik will ACTUALLY forward to. A stored
   defp settings_saved_flash(updated, stack?) do
-    base =
-      if stack?,
-        do: "Settings saved — re-deploying this container and everything sharing its network.",
-        else: "Settings saved — recreating the container."
+    base = "Settings saved — #{release_started_flash(stack?)}"
 
     case guarded_publish_conflicts(updated) do
       [] ->
@@ -3869,6 +3914,7 @@ defmodule HomelabWeb.DeploymentLive do
   defp pill_classes(:compensating), do: "bg-warning/10 text-warning"
   defp pill_classes(:compensated), do: "bg-base-200 text-base-content/50"
   defp pill_classes(:skipped), do: "bg-base-200 text-base-content/50"
+  defp pill_classes(:superseded), do: "bg-base-200 text-base-content/50"
   defp pill_classes(_), do: "bg-base-200 text-base-content/50"
 
   defp dot_color(:running), do: "bg-success"
@@ -3911,6 +3957,7 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_status(:rolling_back), do: "Rolling back"
   defp format_status(:rolled_back), do: "Rolled back"
   defp format_status(:rollback_failed), do: "Rollback failed"
+  defp format_status(:superseded), do: "Superseded"
   defp format_status(:compensating), do: "Compensating"
   defp format_status(:compensated), do: "Compensated"
   defp format_status(:skipped), do: "Skipped"
@@ -4047,7 +4094,87 @@ defmodule HomelabWeb.DeploymentLive do
 
   defp tls_status_detail(%{issuer: issuer}), do: "Issued by #{issuer}."
 
-  # One release: header (status + time + lease), any release-level error, then the
+  # The interaction half of every action button on this page: the cursor, the press, the
+  # in-flight state. Held in one place because it is the half that was missing — the
+  # buttons carried their colour and nothing else, so a click that enqueued an Oban job
+  # and returned looked exactly like a click that did nothing, on a default arrow cursor.
+  #
+  # `phx-click-loading` is LiveView's own class, applied for as long as the event is
+  # unacknowledged (the variant is declared in app.css). It covers the round trip; the
+  # release card that appears afterwards covers the work.
+  defp action_button do
+    "rounded-lg font-medium cursor-pointer transition-all active:scale-[0.97] " <>
+      "phx-click-loading:opacity-60 phx-click-loading:cursor-wait phx-click-loading:scale-[0.97] " <>
+      "disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100"
+  end
+
+  attr :release, :any, required: true
+  attr :size, :string, required: true
+
+  # Rendered in both states rather than hidden while a release runs. The button used to
+  # carry `:if={can_redeploy?(...)}`, so pressing it made it disappear — which is a
+  # signal, but not one that says a release started, and it reads identically to the
+  # control having been removed. Disabled-and-labelled says which.
+  defp redeploy_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      phx-click="redeploy"
+      disabled={not can_redeploy?(@release)}
+      data-confirm="Re-run the deployment steps for this stack from the start?"
+      class={[
+        action_button(),
+        @size,
+        "shrink-0 inline-flex items-center gap-1.5 bg-primary text-primary-content hover:bg-primary/90"
+      ]}
+    >
+      <%= if can_redeploy?(@release) do %>
+        <.icon name="hero-arrow-path" class="size-4" /> Re-run deploy
+      <% else %>
+        <.icon name="hero-arrow-path" class="size-4 animate-spin" />
+        {release_progress(@release)}
+      <% end %>
+    </button>
+    """
+  end
+
+  # "Deploying 3/7 · await health" beats a spinner: the steps are already in the release
+  # and the operator's next question is always which one is taking this long. Falls back
+  # to the release's own status once every step is done but the saga has not settled.
+  defp release_progress(%Homelab.Deployments.Release{} = release) do
+    steps = Enum.sort_by(release.steps, & &1.position)
+    done = Enum.count(steps, &(&1.status == :completed))
+
+    case next_pending_or_running(steps) do
+      nil -> format_status(release.status)
+      step -> "#{done}/#{length(steps)} · #{humanize_step(step.type)}"
+    end
+  end
+
+  defp release_progress(_release), do: "Working…"
+
+  defp next_pending_or_running(steps) do
+    Enum.find(steps, &(&1.status == :running)) || Enum.find(steps, &(&1.status == :pending))
+  end
+
+  defp humanize_step(type), do: type |> to_string() |> String.replace("_", " ")
+
+  # What KIND of event this release was, which its steps cannot say: a config save and a
+  # first deploy of an app with no companions plan an identical list. Only the planner
+  # knew, so it writes `plan["kind"]` and this reads it back.
+  #
+  # Unlabelled means a plain deploy — every release planned before this badge existed,
+  # plus `deploy_release/2` itself, which needs no badge because it is the default thing
+  # a release is.
+  defp release_kind(%{plan: %{"kind" => "reconfigure"}}),
+    do: {"Config change", "bg-info/10 text-info"}
+
+  defp release_kind(%{plan: %{"kind" => "adoption"}}),
+    do: {"Adoption", "bg-secondary/10 text-secondary"}
+
+  defp release_kind(_release), do: {"Deploy", "bg-base-content/5 text-base-content/50"}
+
+  # One release: header (status + kind + time + lease), any release-level error, then the
   # ordered steps with per-step status and error.
   attr :release, :map, required: true
 
@@ -4057,6 +4184,10 @@ defmodule HomelabWeb.DeploymentLive do
       <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
         <div class="flex items-center gap-3">
           <.status_pill status={@release.status} />
+          <% {kind_label, kind_class} = release_kind(@release) %>
+          <span class={["text-[11px] font-medium px-2 py-0.5 rounded-full", kind_class]}>
+            {kind_label}
+          </span>
           <span class="text-xs text-base-content/40">
             {Calendar.strftime(@release.inserted_at, "%b %d, %Y %H:%M")}
           </span>
@@ -4068,7 +4199,13 @@ defmodule HomelabWeb.DeploymentLive do
 
       <div
         :if={@release.error_message}
-        class="px-4 py-2 bg-error/5 text-error text-xs border-b border-error/10"
+        class={[
+          "px-4 py-2 text-xs border-b",
+          if(@release.status == :superseded,
+            do: "bg-base-200/50 text-base-content/50 border-base-content/5",
+            else: "bg-error/5 text-error border-error/10"
+          )
+        ]}
       >
         {@release.error_message}
       </div>

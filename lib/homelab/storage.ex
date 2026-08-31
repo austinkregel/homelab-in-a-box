@@ -520,12 +520,23 @@ defmodule Homelab.Storage do
 
     result =
       if stack?,
-        do: Deployments.redeploy_netns_stack(deployment),
-        else: Deployments.recreate_deployment(deployment)
+        do: Deployments.redeploy_netns_stack(deployment, plan: %{"kind" => "reconfigure"}),
+        else: Deployments.reconverge_release(deployment)
 
     case result do
-      {:ok, value} -> {:ok, value}
-      {:error, reason} -> {:error, "Mount saved, but recreate failed: #{inspect(reason)}"}
+      {:ok, value} ->
+        {:ok, value}
+
+      # The mount IS saved by the time the plan is refused, so this cannot read as a
+      # failed save. A second save normally supersedes the release in flight; reaching
+      # here means that one cannot be handed over — see `Deployments.reconverge_release/1`.
+      {:error, {:release_in_flight, _id}} ->
+        {:error,
+         "Mount saved, but not applied yet: a release that cannot be handed over is " <>
+           "driving this deployment. Re-run the deploy once it finishes."}
+
+      {:error, reason} ->
+        {:error, "Mount saved, but the release could not be planned: #{inspect(reason)}"}
     end
   end
 

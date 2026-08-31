@@ -36,8 +36,9 @@ defmodule Homelab.Deployments.ReleaseSteps.DeployContainer do
 
     with {:ok, spec} <- SpecBuilder.build(deployment) do
       # Secrets are merged by `SpecBuilder.build_env/5` now, so every deploy path gets
-      # them — including `recreate_deployment/1`, which is what a config save runs and
-      # which used to drop them because this merge lived here rather than at the seam.
+      # them — including the imperative `start_deployment/1`/`recreate_deployment/1`
+      # pair, which used to drop them because this merge lived here rather than at the
+      # seam.
       case orchestrator().deploy(spec) do
         {:ok, external_id} ->
           case Deployments.transition_status(deployment, :deploying, @deployable_from,

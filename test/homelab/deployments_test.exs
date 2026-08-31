@@ -82,6 +82,152 @@ defmodule Homelab.DeploymentsTest do
     end
   end
 
+  describe "reconverge_release/1" do
+    test "plans a config-change release for the deployment and nothing else" do
+      deployment = insert(:deployment, status: :running, external_id: "live-1")
+
+      assert {:ok, release} = Deployments.reconverge_release(deployment)
+
+      assert release.deployment_id == deployment.id
+      assert release.plan["kind"] == "reconfigure"
+
+      types = Enum.map(Enum.sort_by(release.steps, & &1.position), & &1.type)
+      assert :app_container in types
+      assert :await_health in types
+    end
+
+    # The whole reason this is not `redeploy/1`. A version bump on an app must not take
+    # the datastore behind it down: that companion is not in the step list, and its row
+    # keeps the container id it is running under.
+    test "leaves a companion of the previous release alone" do
+      tenant = insert(:tenant)
+      app = insert(:deployment, tenant: tenant, status: :running, external_id: "app-1")
+      companion = insert(:deployment, tenant: tenant, status: :running, external_id: "db-1")
+
+      {:ok, previous} =
+        Homelab.Deployments.Releases.plan_release(app, [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :app_container},
+          %{type: :await_health}
+        ])
+
+      previous |> Ecto.Changeset.change(status: :running) |> Homelab.Repo.update!()
+
+      assert {:ok, release} = Deployments.reconverge_release(app)
+
+      refute Enum.any?(release.steps, &(&1.type == :dependency_container))
+
+      still_up = Deployments.get_deployment!(companion.id)
+      assert still_up.status == :running
+      assert still_up.external_id == "db-1"
+    end
+
+    test "resets only the edited deployment so the saga provisions it fresh" do
+      deployment = insert(:deployment, status: :running, external_id: "live-2")
+
+      assert {:ok, _release} = Deployments.reconverge_release(deployment)
+
+      reloaded = Deployments.get_deployment!(deployment.id)
+      assert reloaded.status == :pending
+      assert reloaded.external_id == nil
+    end
+
+    # The newest plan wins. Refusing here made the LAST save the one that lost: the row
+    # held the new config and the container kept running the old, with nothing to say so.
+    test "supersedes the release already in flight instead of refusing" do
+      deployment = insert(:deployment, status: :running, external_id: "live-3")
+
+      {:ok, outgoing} =
+        Homelab.Deployments.Releases.plan_release(deployment, [%{type: :app_container}])
+
+      assert {:ok, successor} = Deployments.reconverge_release(deployment)
+      assert successor.id != outgoing.id
+
+      outgoing = Homelab.Deployments.Releases.get_release(outgoing.id)
+      assert outgoing.status == :superseded
+      assert outgoing.error_message == Homelab.Deployments.Releases.supersede_note()
+
+      # Handed over, not rolled back: no step was compensated, so nothing the outgoing
+      # release had already built was torn down under the successor.
+      assert Enum.all?(outgoing.steps, &(&1.status in [:pending, :running, :completed]))
+    end
+
+    # Superseding is scoped to releases anchored on THIS deployment. A wider release that
+    # merely names it as a companion is somebody else's deploy: standing it down because
+    # its datastore was edited would abandon the app half-provisioned, and the successor
+    # covers only the datastore, so nothing would ever finish the app.
+    test "refuses while another deployment's release drives it as a companion" do
+      tenant = insert(:tenant)
+      app = insert(:deployment, tenant: tenant, status: :running, external_id: "app-2")
+      companion = insert(:deployment, tenant: tenant, status: :running, external_id: "db-2")
+
+      {:ok, active} =
+        Homelab.Deployments.Releases.plan_release(app, [
+          %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
+          %{type: :app_container}
+        ])
+
+      assert {:error, {:release_in_flight, _}} = Deployments.reconverge_release(companion)
+
+      # Refused BEFORE the reset, so the row still carries what the in-flight release
+      # needs to compensate with.
+      assert Deployments.get_deployment!(companion.id).external_id == "db-2"
+      assert Homelab.Deployments.Releases.get_release(active.id).status == :planning
+    end
+
+    # An adoption's steps move data. Standing one down at a step boundary and pointing a
+    # fresh container at the half-made copy is the one handover that can lose bytes.
+    test "refuses to supersede an adoption" do
+      deployment = insert(:deployment, status: :running, external_id: "live-5")
+
+      {:ok, adoption} =
+        Homelab.Deployments.Releases.plan_release(
+          deployment,
+          [%{type: :adopt_volume}, %{type: :adopt_container}],
+          plan: %{"kind" => "adoption"}
+        )
+
+      assert {:error, {:release_in_flight, _}} = Deployments.reconverge_release(deployment)
+      assert Homelab.Deployments.Releases.get_release(adoption.id).status == :planning
+      assert Deployments.get_deployment!(deployment.id).external_id == "live-5"
+    end
+
+    # A rollback is undoing itself; stopping it midway strands whatever it had not yet
+    # compensated. `supersede_release/1` only transitions from :planning/:provisioning,
+    # so this falls out of the CAS rather than needing a case of its own.
+    test "refuses to supersede a release that is rolling back" do
+      deployment = insert(:deployment, status: :running, external_id: "live-6")
+
+      {:ok, release} =
+        Homelab.Deployments.Releases.plan_release(deployment, [%{type: :app_container}])
+
+      {:ok, _} =
+        Homelab.Deployments.Releases.transition_release(release, :rolling_back, [:planning])
+
+      assert {:error, {:release_in_flight, _}} = Deployments.reconverge_release(deployment)
+      assert Homelab.Deployments.Releases.get_release(release.id).status == :rolling_back
+    end
+
+    # A config save is the operation most likely to have MOVED the route, and the labels
+    # that serve it live on the container this release replaces — so the name and
+    # reachability steps have to be replanned, not assumed still correct.
+    test "replans the ingress steps for a deployment that holds a domain" do
+      deployment =
+        insert(:deployment,
+          status: :running,
+          external_id: "live-4",
+          domain: "app.example.com",
+          exposure_mode_override: "public"
+        )
+
+      assert {:ok, release} = Deployments.reconverge_release(deployment)
+
+      types = Enum.map(release.steps, & &1.type)
+      assert :sync_domain in types
+      assert :publish_dns in types
+    end
+  end
+
   describe "list_deployments/0" do
     test "returns all deployments with preloaded associations" do
       insert(:deployment)

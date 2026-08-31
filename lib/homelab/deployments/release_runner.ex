@@ -130,13 +130,26 @@ defmodule Homelab.Deployments.ReleaseRunner do
         {:cancel, :release_not_found}
 
       %Release{} = release ->
-        if Release.terminal?(release) do
-          :ok
-        else
-          case Releases.acquire_lease(release, owner, lease_ttl_seconds()) do
-            {:ok, release} -> drive(release, owner)
-            :taken -> {:snooze, @snooze_seconds}
-          end
+        cond do
+          # Includes `:superseded`: a release handed over before its job ever ran has
+          # nothing to do, and the successor covers the same ground.
+          Release.terminal?(release) ->
+            :ok
+
+          # The handover gate. Its own lease being free is not enough — the release this
+          # one SUPERSEDED may still have a runner inside a step it cannot be pulled out
+          # of, and that runner is about to call `orchestrator.deploy/1` for the same
+          # container name. Leases are per-release, so nothing else notices; the outgoing
+          # runner drops its lease at its next step boundary (or it expires), and this
+          # snooze is what makes the two consecutive rather than concurrent.
+          Releases.deployment_leased_elsewhere?(release) ->
+            {:snooze, @snooze_seconds}
+
+          true ->
+            case Releases.acquire_lease(release, owner, lease_ttl_seconds()) do
+              {:ok, release} -> drive(release, owner)
+              :taken -> {:snooze, @snooze_seconds}
+            end
         end
     end
   end
@@ -184,6 +197,38 @@ defmodule Homelab.Deployments.ReleaseRunner do
   defp loop(release_id, owner) do
     release = Releases.get_release(release_id)
 
+    cond do
+      # Somebody settled this release while we were inside a step — in practice a newer
+      # save superseding it. The step boundary is the only place a runner can be stopped,
+      # since a handler in flight cannot be interrupted, so the check belongs here rather
+      # than at the top of `run/2` alone (which only sees the state before the first step).
+      #
+      # Stand down WITHOUT compensating. The successor re-plans the same steps against
+      # the current configuration and every handler is idempotent, so the right move is to
+      # leave the half-built world exactly as it is and let it be converged over.
+      # Compensating would undeploy the container the successor is about to re-create.
+      Release.terminal?(release) ->
+        stand_down(release, owner)
+
+      true ->
+        continue(release, release_id, owner)
+    end
+  end
+
+  # Handing the lease back is the half that matters: `deployment_leased_elsewhere?/2`
+  # holds the successor's job in a snooze loop until this returns, so dropping it here
+  # turns a 120s TTL wait into an immediate handover.
+  defp stand_down(release, owner) do
+    Logger.info(
+      "[release] #{release.id} stood down as #{release.status}; " <>
+        "leaving its work in place for the release that replaced it"
+    )
+
+    Releases.clear_lease(release.id, owner)
+    :ok
+  end
+
+  defp continue(release, release_id, owner) do
     case Releases.next_pending_step(release) do
       nil ->
         finalize(release)

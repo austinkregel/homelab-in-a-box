@@ -12,7 +12,7 @@ defmodule Homelab.Deployments do
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.SpecBuilder
-  alias Homelab.Deployments.{Access, ReleaseRunner, Releases}
+  alias Homelab.Deployments.{Access, Release, ReleaseRunner, Releases}
   alias Homelab.Networking.Hostname
   alias Homelab.Services.ActivityLog
 
@@ -482,9 +482,15 @@ defmodule Homelab.Deployments do
     do: Homelab.Config.orchestrator().undeploy(external_id)
 
   @doc """
-  Applies a deployment's current config (domain, ports, exposure, env) to its
-  running workload. Pass the deployment AFTER persisting any config changes; the
-  new spec is rebuilt from the row by `SpecBuilder.build/1`.
+  Applies a deployment's current config to its running workload IMPERATIVELY, in the
+  caller's process. The new spec is rebuilt from the row by `SpecBuilder.build/1`, so
+  pass the deployment after persisting any changes.
+
+  Not the path a config save takes — that is `reconverge_release/1`, which does the same
+  thing through the saga and so leaves a `Release` behind to look at. This one is for
+  callers that must know the deploy succeeded before they return, and `Reclaim.reclaim/1`
+  is the reason it still exists: it has just removed a Swarm service and cannot report
+  `{:redeploy_failed, reason}` about work that has not happened yet.
 
   This CONVERGES rather than undeploying first, and the difference is downtime.
 
@@ -896,9 +902,13 @@ defmodule Homelab.Deployments do
   Callers pass any member of the stack; the donor is resolved from it.
 
   A plain config change on a child (env, volumes) does not go through here: it does not
-  touch the donor, so `recreate_deployment/1` is both sufficient and much cheaper.
+  touch the donor, so `reconverge_release/1` is both sufficient and much cheaper.
+
+  `opts[:plan]` is stored on the release verbatim. Callers use it to say WHY the stack
+  is going round — the Releases tab renders `plan["kind"]` as a badge — because the step
+  list cannot tell a config save apart from the reconciler re-creating a stale child.
   """
-  def redeploy_netns_stack(%Deployment{} = deployment) do
+  def redeploy_netns_stack(%Deployment{} = deployment, opts \\ []) do
     donor =
       case Netns.donor(deployment) do
         nil -> deployment
@@ -948,9 +958,17 @@ defmodule Homelab.Deployments do
           %{type: :await_health, resource_handle: %{}}
         ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor)
 
-    with {:ok, donor} <- reset_to_pending(donor),
+    # Settled first, for the reason on `reconverge_release/1`: the newest plan wins, and a
+    # refusal must not have reset the donor and its children on the way to being refused.
+    #
+    # There was no guard here at all before — a second save while the stack was still
+    # going round collided on `releases_one_active_per_deployment` inside `plan_release/3`,
+    # which surfaced to the operator as a raw constraint error on a form that had already
+    # saved their edit.
+    with :ok <- supersede_or_refuse(donor.id),
+         {:ok, donor} <- reset_to_pending(donor),
          {:ok, _children} <- reset_all_to_pending(children),
-         {:ok, release} <- Releases.plan_release(donor, steps) do
+         {:ok, release} <- Releases.plan_release(donor, steps, Keyword.take(opts, [:plan])) do
       ReleaseRunner.enqueue_or_log(release)
       {:ok, release}
     end
@@ -975,8 +993,8 @@ defmodule Homelab.Deployments do
           deploy_release(app)
         end
 
-      %{__struct__: Homelab.Deployments.Release} = release ->
-        if Homelab.Deployments.Release.terminal?(release) do
+      %{__struct__: Release} = release ->
+        if Release.terminal?(release) do
           app = get_deployment!(release.deployment_id)
 
           companions =
@@ -996,6 +1014,128 @@ defmodule Homelab.Deployments do
         end
     end
   end
+
+  @doc """
+  Re-drives ONE deployment through the release saga after its configuration changed:
+  plans `ingress_proxy → app_container → await_health → ingress` against the row as it
+  now stands, resets it to `:pending`, and enqueues `ReleaseRunner`.
+
+  This is what a config save runs. It replaces `recreate_deployment/1` on that path,
+  which called `start_deployment/1` synchronously inside the LiveView process — the
+  container was replaced correctly, but with none of the saga around it: no health gate,
+  no ingress-after-healthy, no rollback, no in-flight guard, and no `Release` row, so a
+  version bump or a network edit left the Releases tab showing nothing at all. The edits
+  that reach here are not small (image, network mode, published ports, routed port,
+  domain and its Traefik labels), and the imperative path applied every one of them with
+  no way to see what happened or to undo it.
+
+  ## Why the companions are left alone
+
+  Deliberately NOT `redeploy/1`, which resolves the driving release, pulls the companion
+  set out of its `:dependency_container` steps and resets those rows too. That is right
+  for "re-run this deploy from the start" — it is what the button means — and wrong for
+  a config save: bumping an app's image tag would recreate the Postgres behind it,
+  minting a new container id and taking the datastore down for a change that never
+  touched it.
+
+  So the step list is `plan_deploy_release/3`'s tail with the companion block omitted.
+  The ingress steps ARE included: a config save is the operation most likely to move a
+  route, and the labels that serve it live on the container this release replaces.
+
+  A companion that must come along is not silently skipped — it is refused. A netns
+  child's donor, or anything else the saga would have to bring up first, is caught by
+  `ensure_none_in_flight/1` if it is mid-release, and by `SpecBuilder.build/1` at
+  `DeployContainer` if it is absent. Neither is a case this function can quietly get
+  wrong; both surface as a failed step with the reason on it.
+
+  Callers holding a netns group take `redeploy_netns_stack/1` instead — a member cannot
+  converge alone, because re-creating it mints a container id the others are pinned to.
+
+  Returns `{:ok, release}`, or `{:error, {:release_in_flight, id}}` when something is
+  already driving this deployment. The refusal matters on this path specifically: the
+  caller has ALREADY persisted the new config by the time it gets here, so the row and
+  the running container disagree until a release applies it. Callers say exactly that
+  rather than reporting a failed save.
+  """
+  def reconverge_release(%Deployment{} = deployment) do
+    deployment = with_associations(deployment)
+
+    steps =
+      ingress_proxy_steps(deployment) ++
+        [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}}
+        ] ++ ingress_steps(deployment)
+
+    # Settled BEFORE the reset, so a refused save leaves the row exactly as the caller
+    # persisted it. Resetting first would clear `external_id` on a deployment another
+    # release is actively driving — the one thing that release needs to compensate.
+    with :ok <- supersede_or_refuse(deployment.id),
+         {:ok, deployment} <- reset_to_pending(deployment),
+         {:ok, release} <-
+           Releases.plan_release(deployment, steps, plan: %{"kind" => "reconfigure"}) do
+      ReleaseRunner.enqueue_or_log(release)
+      {:ok, release}
+    end
+  end
+
+  # Clears the way for a release anchored on `anchor_id`: the newest plan wins, so an
+  # in-flight release for the same anchor is handed over rather than blocking the save.
+  #
+  # This replaced a flat refusal, which made the LAST save the one that lost — you
+  # changed the image, changed your mind about the port before the first release had
+  # finished, and the port edit was persisted but never applied. Nothing said so
+  # afterwards either: the row and the running container simply disagreed until someone
+  # pressed the button again.
+  #
+  # Two cases still refuse, and neither is a config save racing itself:
+  #
+  #   * A release anchored on a DIFFERENT deployment that names this one as a companion
+  #     — the "app + its datastore" shape. Superseding it would abandon the app's deploy
+  #     halfway through because somebody edited the datastore's env, and the new release
+  #     covers only the datastore, so nothing would ever finish the app. The narrower
+  #     operation must not cancel the wider one.
+  #
+  #   * An ADOPTION. Its steps move data (`migrate_copy`, `verify_integrity`,
+  #     `backup_verify`), and standing one down mid-walk leaves a copy half-made that a
+  #     fresh container would then be pointed at. `abandon_release/2` makes the same
+  #     argument about not acting on a plan you have stopped believing.
+  #
+  # `:rolling_back` needs no case of its own: `supersede_release/1` only transitions from
+  # `:planning` or `:provisioning`, so a rollback in progress falls out as a `{:noop, _}`
+  # that is still active, and is refused below.
+  defp supersede_or_refuse(anchor_id) do
+    case Releases.active_release_driving(anchor_id) do
+      nil -> :ok
+      release -> hand_over(release, anchor_id)
+    end
+  end
+
+  # Same anchor: this plan replaces that one, so hand the deployment over.
+  defp hand_over(%{deployment_id: anchor_id} = release, anchor_id) do
+    if adoption?(release) do
+      {:error, {:release_in_flight, anchor_id}}
+    else
+      case Releases.supersede_release(release) do
+        {:ok, _superseded} ->
+          :ok
+
+        # It settled on its own between the read and the write. Terminal means the way is
+        # clear anyway; still-active means it moved to `:rolling_back`, which has to be
+        # left alone to finish undoing itself.
+        {:noop, %{status: status}} ->
+          if status in Release.active_statuses(),
+            do: {:error, {:release_in_flight, anchor_id}},
+            else: :ok
+      end
+    end
+  end
+
+  # A different anchor — this deployment is a COMPANION in somebody else's release.
+  defp hand_over(_other, anchor_id), do: {:error, {:release_in_flight, anchor_id}}
+
+  defp adoption?(%{plan: plan}) when is_map(plan), do: Map.get(plan, "kind") == "adoption"
+  defp adoption?(_release), do: false
 
   # Resets a deployment to `:pending` and clears the stale container id so the
   # re-driven release provisions it fresh; returns a fully-preloaded struct.
