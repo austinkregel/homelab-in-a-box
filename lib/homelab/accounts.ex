@@ -150,10 +150,114 @@ defmodule Homelab.Accounts do
   end
 
   @doc """
-  Lists all users.
+  Gets or creates the local row standing in for a machine principal.
+
+  This is the identity a `client_credentials` token assumes. `attrs` is the body of the
+  issuer's machine-info endpoint, which is the machine-grant analogue of `userinfo`:
+  aut.hair answers `client_id`, `name` and `scopes` there, so the caller hands it
+  straight over the way the browser flow hands over userinfo.
+
+  ## Why there is a row at all
+
+  `activity_logs.user_id` is a real foreign key, so without a row the audit trail cannot
+  name what acted and every machine-initiated change is attributed to nobody. Giving the
+  machine its OWN row rather than borrowing one is the other half: attributing an agent's
+  writes to whichever operator happens to own the OAuth client would not merely be
+  imprecise, it would put a person's name on changes they did not make.
+
+  ## Why the subject is synthesised
+
+  There is no `sub` to borrow. A `client_credentials` token has no user identifier at all
+  — that absence is the whole reason an issuer needs a separate machine-info endpoint —
+  so `client_id` is the stable key, prefixed `service:` so it cannot collide with a
+  subject an issuer minted for a person. The email is invented for the same reason
+  `get_or_create_breakglass_admin/1` invents one: the column is `null: false` and no
+  machine has an address.
+
+  ## What it deliberately does not do
+
+  It never runs the provisioning gate in `get_or_create_from_oidc/1`, and that is the
+  point of it being a separate function rather than a flag on that one. That gate's first
+  rule is that the first `sub` to arrive becomes the `:admin`, reasoning that somebody has
+  to be able to get in. On a fresh box the first thing to authenticate could easily be an
+  agent, and the rule would hand it the Docker host in silence. A machine is never that
+  somebody, so the role is pinned to `:service` and neither the first-user rule nor
+  `oidc_allowed_emails` is consulted.
+
+  Scopes are accepted and ignored. They live in the issuer, can be changed there between
+  one request and the next, and a copy on this row would be a stale second opinion about
+  what the caller may do. Authorization reads them from the presented token, per request.
+  """
+  def get_or_create_service_account(attrs) when is_map(attrs) do
+    case client_id(attrs) do
+      nil ->
+        {:error, :missing_client_id}
+
+      client_id ->
+        sub = "service:#{client_id}"
+
+        case get_user_by_sub(sub) do
+          nil ->
+            %User{}
+            |> User.changeset(%{
+              sub: sub,
+              email: "#{client_id}@service.local",
+              name: service_name(attrs, client_id),
+              role: :service
+            })
+            |> Repo.insert()
+
+          user ->
+            {:ok, user}
+        end
+    end
+  end
+
+  # Passport casts its client id to a string, but an issuer is free to send a number and
+  # the key has to be identical across calls either way — a row keyed on "7" and one
+  # keyed on 7 are two different service accounts with one set of credentials.
+  defp client_id(attrs) do
+    case Map.get(attrs, "client_id") || Map.get(attrs, :client_id) do
+      id when is_binary(id) -> if String.trim(id) == "", do: nil, else: String.trim(id)
+      id when is_integer(id) -> Integer.to_string(id)
+      _ -> nil
+    end
+  end
+
+  # The client's name in the issuer is the only human-readable handle an operator has for
+  # an agent in the activity log, but nothing guarantees it is set.
+  defp service_name(attrs, client_id) do
+    case Map.get(attrs, "name") || Map.get(attrs, :name) do
+      name when is_binary(name) ->
+        if String.trim(name) == "", do: "Service #{client_id}", else: String.trim(name)
+
+      _ ->
+        "Service #{client_id}"
+    end
+  end
+
+  @doc """
+  Lists every principal on this instance, people and machines alike.
+
+  Service accounts are ordered last rather than filtered out. Hiding them would be the
+  worse failure: a machine credential nobody can see is one nobody thinks to revoke, and
+  the roster is the only place an operator would look to find out what holds access to
+  this box. They sort below the people because they are infrastructure — the caller
+  de-emphasises them visually, and this ordering is where that starts.
+
+  Ties break on `id` so the list is stable across renders instead of drifting with
+  whatever order the rows happen to come back in.
   """
   def list_users do
-    Repo.all(User)
+    import Ecto.Query
+
+    Repo.all(
+      from u in User,
+        order_by: [
+          asc: fragment("CASE WHEN ? = 'service' THEN 1 ELSE 0 END", u.role),
+          asc: u.id
+        ]
+    )
   end
 
   @doc """
@@ -177,6 +281,17 @@ defmodule Homelab.Accounts do
   def admin?(_), do: false
 
   @doc """
+  Whether this principal is a machine rather than a person.
+
+  The inverse is not `admin?/1`: a service account is neither an administrator nor a
+  member, and code that means "a person" should ask this rather than assume the negative
+  of the privilege check.
+  """
+  @spec service?(User.t() | nil) :: boolean()
+  def service?(%User{role: :service}), do: true
+  def service?(_), do: false
+
+  @doc """
   Whether this user is the only administrator left.
 
   Public so a caller can refuse before it tries, and say why — `update_user/2` returns
@@ -195,7 +310,8 @@ defmodule Homelab.Accounts do
   @doc """
   Updates a user.
 
-  Refuses to demote the last administrator, with an error on `:role`.
+  Refuses to demote the last administrator, and refuses to move any row into or out of
+  `:service`. Both come back as an error on `:role`.
 
   That refusal lives here rather than at the one LiveView that calls it today because it
   is an invariant of the account model, and nothing else defends it: there is no delete
@@ -207,7 +323,48 @@ defmodule Homelab.Accounts do
     user
     |> User.changeset(attrs)
     |> refuse_last_admin_demotion(user)
+    |> refuse_service_role_change(user)
     |> Repo.update()
+  end
+
+  # `:service` is a kind, not a rung, so it is not somewhere a row can be moved to or from.
+  #
+  # Both directions matter. Promoting a service account to `:admin` would hand an agent
+  # the write half of the API through the one gate that is supposed to be a hard ceiling
+  # on machine principals regardless of what its token claims. Demoting it to `:member`
+  # would not restrict it — a machine's privileges never came from the role — but it would
+  # make `service?/1` false and quietly reclassify the row as a person, putting it back in
+  # the human roster.
+  #
+  # Setting `:service` on an existing human is refused as well: the row's authority would
+  # then be its token scopes, and a person has no token. Machine principals arrive from
+  # `get_or_create_service_account/1` and nowhere else.
+  #
+  # Here rather than at the LiveView for the reason `refuse_last_admin_demotion/2` is here:
+  # it is an invariant of the account model, and the settings form is not the only caller
+  # that will ever exist. `String.to_existing_atom/1` on posted form input is enough to
+  # reach this with `"service"` the moment that atom is loaded.
+  defp refuse_service_role_change(changeset, user) do
+    new_role = Ecto.Changeset.get_field(changeset, :role)
+
+    cond do
+      user.role == :service and new_role != :service ->
+        Ecto.Changeset.add_error(
+          changeset,
+          :role,
+          "cannot be changed: a service account's privileges come from its token, not its role"
+        )
+
+      user.role != :service and new_role == :service ->
+        Ecto.Changeset.add_error(
+          changeset,
+          :role,
+          "cannot be set: service accounts are created from a machine token, not by promotion"
+        )
+
+      true ->
+        changeset
+    end
   end
 
   defp refuse_last_admin_demotion(changeset, user) do

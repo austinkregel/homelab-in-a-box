@@ -684,6 +684,39 @@ defmodule HomelabWeb.SettingsLiveTest do
       html = render_click(view, "switch_section", %{"section" => "users"})
       assert html =~ user.email
     end
+
+    test "lists service accounts too, badged alongside the people", %{conn: conn, user: user} do
+      insert(:user, sub: "service:mcp", email: "mcp@service.local", role: :service)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "users"})
+
+      assert html =~ user.email
+      assert html =~ "mcp@service.local"
+      assert html =~ "Service"
+    end
+
+    test "a machine's role select is disabled, a person's is not", %{conn: conn} do
+      insert(:user, sub: "service:mcp", email: "mcp@service.local", role: :service)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "users"})
+
+      assert has_element?(view, ~s|select[name="role"][disabled] option[value="service"]|)
+      assert has_element?(view, ~s|select[name="role"]:not([disabled]) option[value="admin"]|)
+    end
+
+    test "service is never an option on a person's row", %{conn: conn} do
+      insert(:user, sub: "service:mcp", email: "mcp@service.local", role: :service)
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "users"})
+
+      # `:service` is a kind, not a rung, so it must not appear anywhere a human could be
+      # moved onto it. The server refuses that change regardless — see
+      # `Homelab.Accounts.update_user/2` — but the form should not offer it either.
+      refute has_element?(view, ~s|select[name="role"]:not([disabled]) option[value="service"]|)
+    end
   end
 
   # Every writer here used to be `if value != "", do: set` — which made blank mean

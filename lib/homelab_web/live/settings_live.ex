@@ -2862,18 +2862,63 @@ defmodule HomelabWeb.SettingsLive do
             </tr>
           </thead>
           <tbody class="divide-y divide-base-content/[0.04]">
-            <tr :for={user <- @users} class="hover:bg-base-content/[0.02]">
-              <td class="px-4 py-3 text-sm text-base-content">{user.email}</td>
+            <tr
+              :for={user <- @users}
+              class={["hover:bg-base-content/[0.02]", Accounts.service?(user) && "opacity-55"]}
+            >
+              <td class="px-4 py-3 text-sm text-base-content">
+                <div class="flex items-center gap-2">
+                  <span>{user.email}</span>
+                  <span
+                    :if={Accounts.service?(user)}
+                    class="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-base-content/[0.06] text-base-content/50"
+                  >
+                    Service
+                  </span>
+                </div>
+              </td>
               <td class="px-4 py-3 text-sm text-base-content/70">{user.name || "—"}</td>
               <td class="px-4 py-3">
+                <%!-- `disabled` is an affordance, not the defence: it keeps the operator
+                      from clicking somewhere that leads nowhere, while `Accounts.update_user/2`
+                      is what actually refuses the change to anyone who posts it anyway. That
+                      refusal became load-bearing the moment `:service` joined the enum, since
+                      `String.to_existing_atom("service")` in the handler above now succeeds
+                      where it used to raise. --%>
                 <form phx-change="update_user_role" class="inline">
                   <input type="hidden" name="user_id" value={user.id} />
                   <select
                     name="role"
-                    class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-1.5 px-2 cursor-pointer"
+                    disabled={Accounts.service?(user)}
+                    title={
+                      Accounts.service?(user) &&
+                        "Granted by the issuer; change the client's scopes there"
+                    }
+                    class={[
+                      "rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2",
+                      if(Accounts.service?(user),
+                        do: "text-base-content/40 cursor-not-allowed",
+                        else: "text-base-content cursor-pointer"
+                      )
+                    ]}
                   >
-                    <option value="admin" selected={user.role == :admin}>Admin</option>
-                    <option value="member" selected={user.role == :member}>Member</option>
+                    <%!-- Offered only on the row it belongs to: `:service` is not a rung a
+                          person can be moved onto, so it is never in a human's list. --%>
+                    <option :if={Accounts.service?(user)} value="service" selected>Service</option>
+                    <option
+                      :if={not Accounts.service?(user)}
+                      value="admin"
+                      selected={user.role == :admin}
+                    >
+                      Admin
+                    </option>
+                    <option
+                      :if={not Accounts.service?(user)}
+                      value="member"
+                      selected={user.role == :member}
+                    >
+                      Member
+                    </option>
                   </select>
                 </form>
               </td>
