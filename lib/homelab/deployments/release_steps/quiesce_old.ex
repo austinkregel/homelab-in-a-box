@@ -1,8 +1,8 @@
 defmodule Homelab.Deployments.ReleaseSteps.QuiesceOld do
   @moduledoc """
-  Stops the old container so its data can be copied consistently, and — critically
-  — **disables its restart policy first** so the daemon cannot resurrect a stopped
-  `restart: always` database into a split-brain double-writer while the copy runs.
+  Stops the old container so its data can be copied consistently, and disables its
+  restart policy so the daemon cannot resurrect a stopped `restart: always` database
+  into a split-brain double-writer while the copy runs.
 
   It records the container's original restart policy in the step handle so
   compensation (and the later `:resume_old` step) can restore it. `compensate/2`
@@ -23,11 +23,14 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceOld do
   @impl true
   def run(step, _ctx) do
     id = step.resource_handle["container"]
-    Logger.info("[quiesce_old] disabling restart policy + stopping #{id}")
+    Logger.info("[quiesce_old] stopping + disabling restart policy on #{id}")
 
+    # Stop first: Docker rejects /update on a container with no running task, which is what
+    # `restarting` is. The stop marks it manually-stopped, so the policy cannot fire before
+    # the write lands.
     with {:ok, original} <- ops().restart_policy(id),
-         :ok <- ops().set_restart_policy(id, "no"),
-         :ok <- ops().stop(id, stop_timeout()) do
+         :ok <- ops().stop(id, stop_timeout()),
+         :ok <- ops().set_restart_policy(id, "no") do
       {:ok, %{"quiesced" => true, "container" => id, "original_restart_policy" => original}}
     else
       {:error, reason} -> {:error, {:quiesce_failed, id, reason}}

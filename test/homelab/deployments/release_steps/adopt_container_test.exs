@@ -141,9 +141,10 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainerTest do
     assert handle["container"] == "old-pg"
     assert handle["original_restart_policy"] == "always"
 
-    # Old container was quiesced+stopped BEFORE the new one deployed.
-    assert_received {:set_restart_policy, "old-pg", "no"}
+    # Old container was quiesced+stopped BEFORE the new one deployed, and the stop comes
+    # first — Docker rejects /update on a container with no running task.
     assert_received {:stop, "old-pg"}
+    assert_received {:set_restart_policy, "old-pg", "no"}
     assert_received {:deploy_env, env}
     assert env["POSTGRES_PASSWORD"] == "s3cret"
 

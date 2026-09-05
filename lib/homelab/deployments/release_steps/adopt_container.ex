@@ -5,8 +5,8 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainer do
 
   `run/2`:
 
-    1. **Final re-quiesce** of the original — records its restart policy, disables
-       it, and stops the container. This closes the write-divergence window left
+    1. **Final re-quiesce** of the original — records its restart policy, stops the
+       container, and disables the policy. This closes the write-divergence window left
        open by `:resume_old` (which brought the original back up after phase-1's
        copy) and prevents a port conflict / double-writer during cutover.
     2. **Verified delta re-sync** — re-copies each preserve target into its
@@ -38,9 +38,10 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptContainer do
     targets = preserve_targets(step)
     deployment = Deployments.get_deployment!(ctx.deployment.id)
 
+    # Stop before disabling — see `QuiesceOld.run/2` for why the order matters.
     with {:ok, policy} <- ops().restart_policy(old),
-         :ok <- ops().set_restart_policy(old, "no"),
          :ok <- ops().stop(old, stop_timeout()),
+         :ok <- ops().set_restart_policy(old, "no"),
          :ok <- delta_resync(targets),
          :ok <- import_ports(deployment, old) do
       deployment = Deployments.get_deployment!(deployment.id)
