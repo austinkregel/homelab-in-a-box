@@ -9,6 +9,7 @@ defmodule Homelab.Auth.OidcDiscovery do
     :authorization_endpoint,
     :token_endpoint,
     :userinfo_endpoint,
+    :machine_info_endpoint,
     :jwks_uri,
     :device_authorization_endpoint,
     :end_session_endpoint,
@@ -64,6 +65,16 @@ defmodule Homelab.Auth.OidcDiscovery do
   end
 
   @doc """
+  Whether the issuer can identify a `client_credentials` token.
+
+  `machine_info_endpoint` is not in the OIDC spec — it is aut.hair's, since `userinfo`
+  has no answer for a token with no user behind it.
+  """
+  def supports_machine_info?(%__MODULE__{} = discovery) do
+    discovery.machine_info_endpoint != nil and supports_grant?(discovery, "client_credentials")
+  end
+
+  @doc """
   Serializes a discovery struct to a JSON-encodable map for storage.
   """
   def to_json(%__MODULE__{} = d) do
@@ -86,6 +97,7 @@ defmodule Homelab.Auth.OidcDiscovery do
       authorization_endpoint: body["authorization_endpoint"],
       token_endpoint: body["token_endpoint"],
       userinfo_endpoint: body["userinfo_endpoint"],
+      machine_info_endpoint: body["machine_info_endpoint"],
       jwks_uri: body["jwks_uri"],
       device_authorization_endpoint: body["device_authorization_endpoint"],
       end_session_endpoint: body["end_session_endpoint"],
