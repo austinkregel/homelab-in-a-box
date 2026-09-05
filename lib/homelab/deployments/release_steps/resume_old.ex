@@ -7,7 +7,7 @@ defmodule Homelab.Deployments.ReleaseSteps.ResumeOld do
 
   Expects `step.resource_handle["container"]` and `["restart_policy"]` (the
   original policy, supplied by the planner from discovery). `compensate/2`
-  re-quiesces (disable policy + stop) so a rollback past this step doesn't leave a
+  re-quiesces (stop + disable policy) so a rollback past this step doesn't leave a
   double-writer.
   """
 
@@ -35,8 +35,8 @@ defmodule Homelab.Deployments.ReleaseSteps.ResumeOld do
   def compensate(step, _ctx) do
     case step.resource_handle["container"] do
       id when is_binary(id) ->
-        _ = ops().set_restart_policy(id, "no")
         _ = ops().stop(id, stop_timeout())
+        _ = ops().set_restart_policy(id, "no")
         :ok
 
       _ ->

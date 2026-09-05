@@ -16,7 +16,7 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceResumeTest do
     @impl true
     def set_restart_policy(id, name) do
       send(pid(), {:set_restart_policy, id, name})
-      :ok
+      Application.get_env(:homelab, :stub_set_policy_result, :ok)
     end
 
     @impl true
@@ -62,6 +62,7 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceResumeTest do
       Application.delete_env(:homelab, :quiesce_test_pid)
       Application.delete_env(:homelab, :quiesce_stop_timeout)
       Application.delete_env(:homelab, :stub_current_policy)
+      Application.delete_env(:homelab, :stub_set_policy_result)
     end)
 
     :ok
@@ -69,17 +70,42 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceResumeTest do
 
   defp step(handle), do: %{id: 1, resource_handle: handle}
 
+  # Everything the stub reported, in the order it was called.
+  defp drain(acc \\ []) do
+    receive do
+      msg -> drain([msg | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp index(calls, msg) do
+    case Enum.find_index(calls, &(&1 == msg)) do
+      nil -> flunk("#{inspect(msg)} was never called; got #{inspect(calls)}")
+      i -> i
+    end
+  end
+
   describe "QuiesceOld" do
-    test "disables restart policy BEFORE stopping, and records the original" do
+    test "stops BEFORE disabling the restart policy, and records the original" do
       Application.put_env(:homelab, :stub_current_policy, "always")
 
       assert {:ok, handle} = QuiesceOld.run(step(%{"container" => "pg1"}), %{})
       assert handle["original_restart_policy"] == "always"
       assert handle["container"] == "pg1"
 
-      # Order matters: read policy, disable, THEN stop.
-      assert_received {:restart_policy, "pg1"}
-      assert_received {:set_restart_policy, "pg1", "no"}
+      # `assert_received` scans the whole mailbox, so it cannot see order — compare indices.
+      calls = drain()
+      assert index(calls, {:stop, "pg1", 60}) < index(calls, {:set_restart_policy, "pg1", "no"})
+    end
+
+    test "a policy write that fails does not mask a container left running" do
+      Application.put_env(:homelab, :stub_current_policy, "always")
+      Application.put_env(:homelab, :stub_set_policy_result, {:error, :cannot_update_stopped})
+
+      assert {:error, {:quiesce_failed, "pg1", :cannot_update_stopped}} =
+               QuiesceOld.run(step(%{"container" => "pg1"}), %{})
+
       assert_received {:stop, "pg1", 60}
     end
 
@@ -106,8 +132,9 @@ defmodule Homelab.Deployments.ReleaseSteps.QuiesceResumeTest do
       done = step(%{"container" => "pg1", "restart_policy" => "always"})
 
       assert :ok = ResumeOld.compensate(done, %{})
-      assert_received {:set_restart_policy, "pg1", "no"}
-      assert_received {:stop, "pg1", 60}
+
+      calls = drain()
+      assert index(calls, {:stop, "pg1", 60}) < index(calls, {:set_restart_policy, "pg1", "no"})
     end
   end
 
