@@ -85,6 +85,122 @@ defmodule Homelab.AccountsTest do
     test "returns empty list when no users exist" do
       assert Accounts.list_users() == []
     end
+
+    test "includes service accounts, ordered after the people" do
+      insert(:user, sub: "service:mcp", email: "mcp@service.local", role: :service)
+      human = insert(:user, role: :member)
+      admin = insert(:user, role: :admin)
+
+      assert [a, b, c] = Accounts.list_users()
+      assert [a.id, b.id] == [human.id, admin.id]
+      assert c.sub == "service:mcp"
+    end
+  end
+
+  describe "get_or_create_service_account/1" do
+    test "creates a :service row keyed on the client id" do
+      assert {:ok, sa} =
+               Accounts.get_or_create_service_account(%{
+                 "client_id" => "abc-123",
+                 "name" => "MCP Server",
+                 "scopes" => ["openid", "telemetry:read"]
+               })
+
+      assert sa.role == :service
+      assert sa.sub == "service:abc-123"
+      assert sa.email == "abc-123@service.local"
+      assert sa.name == "MCP Server"
+    end
+
+    test "is idempotent for the same client" do
+      attrs = %{"client_id" => "abc-123", "name" => "MCP Server"}
+      assert {:ok, first} = Accounts.get_or_create_service_account(attrs)
+      assert {:ok, second} = Accounts.get_or_create_service_account(attrs)
+      assert first.id == second.id
+    end
+
+    test "never becomes admin, even as the very first principal on the box" do
+      assert Accounts.list_users() == []
+
+      assert {:ok, sa} = Accounts.get_or_create_service_account(%{"client_id" => "first"})
+
+      assert sa.role == :service
+      refute Accounts.admin?(sa)
+      assert Accounts.list_admins() == []
+    end
+
+    test "accepts atom keys and an integer client id" do
+      assert {:ok, sa} = Accounts.get_or_create_service_account(%{client_id: 7, name: "Agent"})
+      assert sa.sub == "service:7"
+    end
+
+    test "falls back to a generated name when the issuer sends none" do
+      assert {:ok, sa} = Accounts.get_or_create_service_account(%{"client_id" => "bare"})
+      assert sa.name == "Service bare"
+    end
+
+    test "refuses attrs with no client id" do
+      assert {:error, :missing_client_id} = Accounts.get_or_create_service_account(%{})
+
+      assert {:error, :missing_client_id} =
+               Accounts.get_or_create_service_account(%{"client_id" => "  "})
+    end
+
+    test "does not collide with an OIDC user carrying the same sub string" do
+      insert(:user, sub: "abc-123", email: "person@test.local")
+      assert {:ok, sa} = Accounts.get_or_create_service_account(%{"client_id" => "abc-123"})
+      assert sa.sub == "service:abc-123"
+    end
+  end
+
+  describe "service?/1" do
+    test "true only for :service rows" do
+      assert Accounts.service?(
+               insert(:user, sub: "service:x", email: "x@service.local", role: :service)
+             )
+
+      refute Accounts.service?(insert(:user, role: :admin))
+      refute Accounts.service?(insert(:user, role: :member))
+      refute Accounts.service?(nil)
+    end
+  end
+
+  describe "update_user/2 and the :service boundary" do
+    test "refuses to promote a service account to admin" do
+      sa = insert(:user, sub: "service:x", email: "x@service.local", role: :service)
+
+      assert {:error, changeset} = Accounts.update_user(sa, %{role: :admin})
+      assert %{role: [msg]} = errors_on(changeset)
+      assert msg =~ "token"
+    end
+
+    test "refuses to demote a service account to member" do
+      sa = insert(:user, sub: "service:x", email: "x@service.local", role: :service)
+      assert {:error, _} = Accounts.update_user(sa, %{role: :member})
+    end
+
+    test "refuses to turn a person into a service account" do
+      user = insert(:user, role: :member)
+
+      assert {:error, changeset} = Accounts.update_user(user, %{role: :service})
+      assert %{role: [msg]} = errors_on(changeset)
+      assert msg =~ "not by promotion"
+    end
+
+    test "still allows non-role edits on a service account" do
+      sa = insert(:user, sub: "service:x", email: "x@service.local", role: :service)
+      assert {:ok, updated} = Accounts.update_user(sa, %{name: "Renamed Agent"})
+      assert updated.name == "Renamed Agent"
+      assert updated.role == :service
+    end
+
+    test "a service account does not count toward the last-admin guard" do
+      admin = insert(:user, role: :admin)
+      insert(:user, sub: "service:x", email: "x@service.local", role: :service)
+
+      assert Accounts.last_admin?(admin)
+      assert {:error, _} = Accounts.update_user(admin, %{role: :member})
+    end
   end
 
   describe "update_user/2" do
