@@ -2879,12 +2879,7 @@ defmodule HomelabWeb.SettingsLive do
               </td>
               <td class="px-4 py-3 text-sm text-base-content/70">{user.name || "—"}</td>
               <td class="px-4 py-3">
-                <%!-- `disabled` is an affordance, not the defence: it keeps the operator
-                      from clicking somewhere that leads nowhere, while `Accounts.update_user/2`
-                      is what actually refuses the change to anyone who posts it anyway. That
-                      refusal became load-bearing the moment `:service` joined the enum, since
-                      `String.to_existing_atom("service")` in the handler above now succeeds
-                      where it used to raise. --%>
+                <%!-- `disabled` is an affordance; `Accounts.update_user/2` is the defence. --%>
                 <form phx-change="update_user_role" class="inline">
                   <input type="hidden" name="user_id" value={user.id} />
                   <select
@@ -2902,8 +2897,6 @@ defmodule HomelabWeb.SettingsLive do
                       )
                     ]}
                   >
-                    <%!-- Offered only on the row it belongs to: `:service` is not a rung a
-                          person can be moved onto, so it is never in a human's list. --%>
                     <option :if={Accounts.service?(user)} value="service" selected>Service</option>
                     <option
                       :if={not Accounts.service?(user)}
