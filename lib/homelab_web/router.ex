@@ -141,7 +141,9 @@ defmodule HomelabWeb.Router do
   # path constraint, all of it was served publicly. `POST /tenants/:id/deployments`
   # reaches `deploy_now/1`, and `image_override` takes any parseable reference, so this
   # was unauthenticated arbitrary-image execution on the Docker host.
-  # Reads: any signed-in user. Backups nest under the tenant like everything else —
+  # Reads: any signed-in user, or a machine holding a `client_credentials` token (see
+  # `RequireAuthApi`). A machine gets exactly this half; the scope below refuses it.
+  # Backups nest under the tenant like everything else —
   # top-level `/backups` meant `index` listed every tenant's jobs and `show`/`restore`
   # took a bare id, so any signed-in user could read all backup history and restore any
   # tenant's snapshot over `/data/restore`. The old paths are removed rather than kept
