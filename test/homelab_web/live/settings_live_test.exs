@@ -712,9 +712,6 @@ defmodule HomelabWeb.SettingsLiveTest do
       {:ok, view, _html} = live(conn, ~p"/settings")
       render_click(view, "switch_section", %{"section" => "users"})
 
-      # `:service` is a kind, not a rung, so it must not appear anywhere a human could be
-      # moved onto it. The server refuses that change regardless — see
-      # `Homelab.Accounts.update_user/2` — but the form should not offer it either.
       refute has_element?(view, ~s|select[name="role"]:not([disabled]) option[value="service"]|)
     end
   end
