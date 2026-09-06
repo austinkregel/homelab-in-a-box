@@ -306,13 +306,13 @@ defmodule HomelabWeb.StorageLiveTest do
       |> element("button[phx-click='mount_volume'][phx-value-name='music-library']")
       |> render_click()
 
+      # No `source`: that field only renders in custom mode.
       view
       |> form("form[phx-submit='attach_mount']",
         mount: %{
           "deployment_id" => to_string(deployment.id),
           "type" => "volume",
           "source_choice" => "music-library",
-          "source" => "",
           "container_path" => "/music",
           "read_only" => "true"
         }
@@ -341,6 +341,18 @@ defmodule HomelabWeb.StorageLiveTest do
       {:ok, view, _html} = live(conn, ~p"/storage?tab=mounts")
 
       view |> element("button[phx-value-modal='mount']") |> render_click()
+
+      # The picker appears with "volume", its text field with "custom". Each is revealed
+      # by a change event, and the form rebuilds from blank, so each step resends the last.
+      view
+      |> form("form[phx-submit='attach_mount']", mount: %{"type" => "volume"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{"type" => "volume", "source_choice" => "__custom__"}
+      )
+      |> render_change()
 
       view
       |> form("form[phx-submit='attach_mount']",
