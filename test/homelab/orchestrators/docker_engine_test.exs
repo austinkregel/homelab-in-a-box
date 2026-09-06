@@ -718,6 +718,51 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                DockerEngine.publish("container-abc", "homelab-iab-internal")
     end
 
+    test "the 403 body arrives decoded as a map, and is read as one" do
+      # The daemon answers with JSON, so the body reaching us is `%{"message" => ...}`,
+      # never the bare string. Matching that shape with `to_string/1` raised
+      # Protocol.String.Chars mid-deploy instead of recognising an already-attached
+      # container, turning a no-op into a crash.
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        if String.ends_with?(path, "/connect") do
+          {:error,
+           {:http_error, 403,
+            %{
+              "message" =>
+                "endpoint with name homelab_identity_authair-web already exists in " <>
+                  "network homelab-iab-internal"
+            }}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert :ok = DockerEngine.publish("container-abc", "homelab-iab-internal")
+    end
+
+    test "a decoded 403 body that is NOT 'already exists' still errors" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        if String.ends_with?(path, "/connect") do
+          {:error,
+           {:http_error, 403,
+            %{
+              "message" =>
+                "container sharing network namespace with another container or host " <>
+                  "cannot be connected to any other network"
+            }}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:error, {:publish_failed, "container-abc", "homelab-iab-internal", _}} =
+               DockerEngine.publish("container-abc", "homelab-iab-internal")
+    end
+
     test "the network is a parameter, not a constant baked into the driver" do
       # A workload can be reached over a network other than the default ingress one —
       # hardcoding a single name would make that inexpressible.

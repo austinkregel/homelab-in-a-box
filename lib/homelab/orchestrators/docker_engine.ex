@@ -341,12 +341,19 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # code exists to avoid. `Deployments.publish_deployment/1` already declines to call
   # this for such a workload; this is the backstop if something else does.
   defp already_attached_or_error(container_id, network, body) do
-    if body |> to_string() |> String.downcase() =~ "already exists" do
+    if body |> error_message() |> String.downcase() =~ "already exists" do
       :ok
     else
       {:error, {:publish_failed, container_id, network, {:http_error, 403, body}}}
     end
   end
+
+  # The daemon's error body arrives decoded as `%{"message" => ...}`, so it cannot go
+  # through `to_string/1`. Falls back to `inspect/1` for any other shape rather than
+  # raising on a body whose only job is to be matched against.
+  defp error_message(%{"message" => message}) when is_binary(message), do: message
+  defp error_message(body) when is_binary(body), do: body
+  defp error_message(body), do: inspect(body)
 
   # --- Image Management ---
 
