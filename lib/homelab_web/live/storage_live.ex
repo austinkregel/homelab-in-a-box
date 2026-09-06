@@ -32,6 +32,11 @@ defmodule HomelabWeb.StorageLive do
 
   @tabs ~w(disks volumes mounts)
 
+  # The picker's escape hatch: a volume that does not exist on the daemon yet. Docker
+  # creates a named volume on first mount, so typing a name is a legitimate way to make
+  # one — the picker must not make it the only unreachable case.
+  @custom_source "__custom__"
+
   @impl true
   def mount(_params, _session, socket) do
     socket =
@@ -39,6 +44,7 @@ defmodule HomelabWeb.StorageLive do
       |> assign(:page_title, "Storage")
       |> assign(:tenants, Tenants.list_active_tenants())
       |> assign(:active_tab, "disks")
+      |> assign(:custom_source, @custom_source)
       |> assign(:modal, nil)
       |> assign(:form_error, nil)
       |> assign(:confirm_delete, nil)
@@ -161,10 +167,26 @@ defmodule HomelabWeb.StorageLive do
     {:noreply, assign(socket, :mount_form, Map.merge(blank_mount_form(), params))}
   end
 
+  # Opens the mount modal with this volume already chosen. The volume list is where an
+  # operator is actually looking when they decide to mount something, and making them
+  # re-find it by name in a second control is how the picker below would go unused.
+  def handle_event("mount_volume", %{"name" => name}, socket) do
+    {:noreply,
+     socket
+     |> assign(:modal, "mount")
+     |> assign(:form_error, nil)
+     |> assign(
+       :mount_form,
+       blank_mount_form()
+       |> Map.put("type", "volume")
+       |> Map.put("source_choice", name)
+     )}
+  end
+
   def handle_event("attach_mount", %{"mount" => params}, socket) do
     row = %{
       "container_path" => params["container_path"],
-      "source" => params["source"],
+      "source" => resolve_source(params),
       "type" => params["type"],
       "read_only" => params["read_only"]
     }
@@ -233,10 +255,14 @@ defmodule HomelabWeb.StorageLive do
   defp blank_volume_form,
     do: %{"name" => "", "backing" => "docker", "device" => ""}
 
+  # `source_choice` is the picker's value; `source` is the typed name behind
+  # `@custom_source`. `attach_mount` resolves the two into the single source the row
+  # actually needs — see `resolve_source/1`.
   defp blank_mount_form,
     do: %{
       "deployment_id" => "",
       "type" => "bind",
+      "source_choice" => "",
       "source" => "",
       "container_path" => "",
       "read_only" => "false"
@@ -248,6 +274,29 @@ defmodule HomelabWeb.StorageLive do
       _ -> []
     end
   end
+
+  # The volumes the picker offers. An unreadable daemon offers none rather than failing
+  # the render — the "type a name" path still works, so the form stays usable.
+  defp volume_options(%{volumes: {:ok, volumes}}), do: volumes
+  defp volume_options(_assigns), do: []
+
+  defp volume_option_label(%{name: name, size: size}) when is_number(size),
+    do: "#{name} · #{format_bytes(size)}"
+
+  defp volume_option_label(%{name: name}), do: name
+
+  # What the picker and the text field mean together.
+  #
+  # A bind has no picker: its source is the host path, typed. For a named volume the
+  # choice wins, except on `@custom_source`, where the choice is only a mode and the
+  # typed name is the answer. Blank stays blank, which is what tells `SpecBuilder` to
+  # derive a tenant-scoped managed name — the behaviour this page had before, and the
+  # one an operator gets by not touching the control.
+  defp resolve_source(%{"type" => "bind"} = params), do: params["source"]
+
+  defp resolve_source(%{"source_choice" => @custom_source} = params), do: params["source"]
+  defp resolve_source(%{"source_choice" => choice}) when is_binary(choice), do: choice
+  defp resolve_source(params), do: params["source"]
 
   # --- formatting ----------------------------------------------------------
 
@@ -517,6 +566,16 @@ defmodule HomelabWeb.StorageLive do
             <p class="text-sm text-base-content/70">{format_bytes(volume.size)}</p>
             <p class="text-[11px] text-base-content/30">{volume.driver}</p>
           </div>
+
+          <button
+            type="button"
+            phx-click="mount_volume"
+            phx-value-name={volume.name}
+            class="shrink-0 p-2 rounded-lg text-base-content/25 hover:text-primary hover:bg-primary/10 cursor-pointer"
+            title="Mount this volume into a deployment"
+          >
+            <.icon name="hero-squares-plus" class="size-4" />
+          </button>
 
           <button
             type="button"
@@ -804,23 +863,60 @@ defmodule HomelabWeb.StorageLive do
           </select>
         </div>
 
-        <div>
-          <label class="block text-xs font-medium text-base-content/60 mb-1.5">
-            {if @mount_form["type"] == "volume", do: "Volume name", else: "Host path"}
-          </label>
+        <%!-- A named volume is CHOSEN from what the daemon actually has; a bind is typed,
+              because a host path has no list to pick from. --%>
+        <div :if={@mount_form["type"] == "volume"}>
+          <label class="block text-xs font-medium text-base-content/60 mb-1.5">Volume</label>
+          <select
+            name="mount[source_choice]"
+            class="w-full px-3 py-2 rounded-lg bg-base-200/60 border border-base-content/10 text-sm focus:outline-none focus:border-primary/40"
+          >
+            <option value="" selected={@mount_form["source_choice"] == ""}>
+              New volume named after this deployment
+            </option>
+            <optgroup :if={volume_options(assigns) != []} label="On this host">
+              <option
+                :for={volume <- volume_options(assigns)}
+                value={volume.name}
+                selected={@mount_form["source_choice"] == volume.name}
+              >
+                {volume_option_label(volume)}
+              </option>
+            </optgroup>
+            <option
+              value={@custom_source}
+              selected={@mount_form["source_choice"] == @custom_source}
+            >
+              Type a name…
+            </option>
+          </select>
+
+          <input
+            :if={@mount_form["source_choice"] == @custom_source}
+            type="text"
+            name="mount[source]"
+            value={@mount_form["source"]}
+            placeholder="media-cache"
+            autocomplete="off"
+            class="w-full mt-2 px-3 py-2 rounded-lg bg-base-200/60 border border-base-content/10 text-sm font-mono focus:outline-none focus:border-primary/40"
+          />
+
+          <p class="text-[11px] text-base-content/30 mt-1.5">
+            Any volume on this host can go into any deployment — that is how one library
+            serves several apps. Mark it read-only below unless this app should write to it.
+          </p>
+        </div>
+
+        <div :if={@mount_form["type"] != "volume"}>
+          <label class="block text-xs font-medium text-base-content/60 mb-1.5">Host path</label>
           <input
             type="text"
             name="mount[source]"
             value={@mount_form["source"]}
-            placeholder={
-              if @mount_form["type"] == "volume", do: "media-cache", else: "/mnt/tank/media"
-            }
+            placeholder="/mnt/tank/media"
             autocomplete="off"
             class="w-full px-3 py-2 rounded-lg bg-base-200/60 border border-base-content/10 text-sm font-mono focus:outline-none focus:border-primary/40"
           />
-          <p :if={@mount_form["type"] == "volume"} class="text-[11px] text-base-content/30 mt-1.5">
-            Leave blank to let the spec builder derive a tenant-scoped name.
-          </p>
         </div>
 
         <div>
