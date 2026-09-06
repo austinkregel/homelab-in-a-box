@@ -14,6 +14,9 @@ defmodule HomelabWeb.DeployWizardLiveTest do
 
   setup do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
+    # The config step reads the host's volumes to suggest names for a managed row; the
+    # tests about that list override this with volumes of their own.
+    stub(Homelab.Mocks.Orchestrator, :list_volumes, fn -> {:ok, []} end)
     :ok
   end
 
@@ -494,6 +497,72 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert [vol] = reloaded.volumes
       assert vol["type"] == "bind"
       assert vol["source"] == "/srv/homelab/app/storage"
+    end
+
+    # An app that reads a library another app already owns had to be deployed against an
+    # empty derived volume and re-pointed from the storage page afterwards — a recreate,
+    # and a wrong first boot, for something known before the deploy button was pressed.
+    test "offers the host's volumes when naming a managed volume", %{
+      conn: conn,
+      template: template
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "homelab-media-plex-music", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, _view, html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      assert html =~ ~s(<datalist id="known-volumes">)
+      assert html =~ "homelab-media-plex-music"
+      assert html =~ ~s(name="volumes[0][source]")
+    end
+
+    test "deploys against an existing volume named on the config step", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_submit(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "app.example.com",
+        "exposure_mode" => "public",
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/music",
+            "type" => "volume",
+            "source" => "homelab-media-plex-music",
+            "read_only" => "true"
+          }
+        },
+        "ports" => %{},
+        "env" => %{}
+      })
+
+      {:ok, reloaded} = Homelab.Catalog.get_app_template_by_slug(template.slug)
+      assert [vol] = reloaded.volumes
+      assert vol["source"] == "homelab-media-plex-music"
+      assert vol["type"] == "volume"
+      assert vol["read_only"] == true
+    end
+
+    # The wizard had no read-only control at all, so every mount it created was writable —
+    # including a compose service that declared `:ro`, whose flag the parser captured and
+    # this form then dropped.
+    test "a read-only mount can be chosen on the config step", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      assert render(view) =~ ~s(name="volumes[0][read_only]")
+
+      render_change(view, "config_changed", %{
+        "volumes" => %{"0" => %{"container_path" => "/music", "read_only" => "true"}}
+      })
+
+      # Deploy is submitted from the REVIEW step, whose hidden inputs are the only thing
+      # carrying the decision that far.
+      html = render_click(view, "go_step", %{"step" => "review"})
+      assert html =~ ~s(name="volumes[0][read_only]" value="true")
     end
   end
 

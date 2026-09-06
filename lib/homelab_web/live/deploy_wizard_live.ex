@@ -13,6 +13,7 @@ defmodule HomelabWeb.DeployWizardLive do
   alias Homelab.Catalog.Enrichers.DatabaseDetector
   alias Homelab.Catalog.Enrichers.InfraDetector
   alias Homelab.Networking.Hostname
+  alias Homelab.Storage
   alias Homelab.Tenants
   alias HomelabWeb.SecretReveal
 
@@ -74,6 +75,9 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:compose_error, nil)
       |> assign(:ports, [])
       |> assign(:volumes, [])
+      # Suggestions for the volume rows' name field, read when the config step is first
+      # reached — see `maybe_load_known_volumes/2`.
+      |> assign(:known_volumes, [])
       |> assign(:env_vars, [])
       |> assign(:revealed_env, MapSet.new())
       |> assign(:db_suggestions, [])
@@ -104,9 +108,23 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:step, step)
       |> maybe_load_from_params(params, already_loaded)
       |> maybe_prefill_from_domain(step)
+      |> maybe_load_known_volumes(step)
 
     {:noreply, socket}
   end
+
+  # The daemon's volume list, read once, when the operator first reaches the step that
+  # has a field for it. Not on mount: most of the wizard never shows a volume row, and
+  # the first two steps are the ones people abandon.
+  defp maybe_load_known_volumes(socket, "config") do
+    if connected?(socket) and socket.assigns.known_volumes == [] do
+      assign(socket, :known_volumes, Storage.volume_names())
+    else
+      socket
+    end
+  end
+
+  defp maybe_load_known_volumes(socket, _step), do: socket
 
   defp maybe_load_from_params(socket, %{"template_id" => tid}, false = _already_loaded) do
     case Catalog.get_app_template(String.to_integer(tid)) do
@@ -1449,6 +1467,7 @@ defmodule HomelabWeb.DeployWizardLive do
               ports={@ports}
               adv_routed_port={@adv_routed_port}
               volumes={@volumes}
+              known_volumes={@known_volumes}
               env_vars={@env_vars}
               revealed_env={@revealed_env}
               db_suggestions={@db_suggestions}
@@ -2185,6 +2204,26 @@ defmodule HomelabWeb.DeployWizardLive do
                     >
                       Volume {idx + 1}
                     </span>
+                    <%!-- Whether the container may write through this mount, decided at
+                          DEPLOY time. There was no control here at all, so every mount
+                          came up writable — including a compose service that declared
+                          `:ro`, whose flag the parser captured and this form then dropped.
+                          The hidden input is what makes unchecking work: an unchecked box
+                          posts nothing, which the change event cannot tell apart from the
+                          field not being rendered. --%>
+                    <label
+                      class="ml-auto mr-2 flex items-center gap-1.5 text-[10px] text-base-content/40 cursor-pointer"
+                      title="Mount read-only — the container cannot write through it"
+                    >
+                      <input type="hidden" name={"volumes[#{idx}][read_only]"} value="false" />
+                      <input
+                        type="checkbox"
+                        name={"volumes[#{idx}][read_only]"}
+                        value="true"
+                        checked={vol["read_only"] in [true, "true"]}
+                        class="rounded border-base-content/20"
+                      /> read-only
+                    </label>
                     <button
                       type="button"
                       phx-click="remove_volume"
@@ -2207,15 +2246,26 @@ defmodule HomelabWeb.DeployWizardLive do
                         <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
                       </select>
                     </div>
-                    <div :if={vol["type"] == "bind"} class="flex-1">
+                    <%!-- A managed volume gets its name field here too, not only after
+                          deploying. An app that reads a library another app already owns
+                          — one media tree behind Plex and Sonarr — had to be deployed
+                          against an empty derived volume first and re-pointed from the
+                          storage page afterwards, which is a recreate and a wrong first
+                          boot for something the operator knew at deploy time. --%>
+                    <div class="flex-1">
                       <label class="block text-[10px] text-base-content/30 mb-0.5">
-                        Host folder
+                        {if vol["type"] == "bind", do: "Host folder", else: "Volume name"}
                       </label>
                       <input
                         type="text"
                         name={"volumes[#{idx}][source]"}
                         value={vol["source"] || ""}
-                        placeholder="/home/you/.homelab/app/data"
+                        list={vol["type"] != "bind" && "known-volumes"}
+                        placeholder={
+                          if vol["type"] == "bind",
+                            do: "/home/you/.homelab/app/data",
+                            else: "new volume named after this app"
+                        }
                         class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
                       />
                     </div>
@@ -2240,7 +2290,21 @@ defmodule HomelabWeb.DeployWizardLive do
                     it is. Must be an absolute path: Docker reads a bare name as a named
                     volume and would mount an empty one instead.
                   </p>
+                  <p
+                    :if={vol["type"] != "bind" && vol["source"] not in [nil, ""]}
+                    class="mt-1 text-[10px] text-base-content/40 leading-snug"
+                  >
+                    Mounts the existing <span class="font-mono">{vol["source"]}</span>
+                    rather than a new volume of its own. Any volume on this host can go into
+                    any deployment — that is how one library serves several apps.
+                  </p>
                 </div>
+
+                <%!-- One list for every row's name field; a datalist is referenced by id. --%>
+                <datalist id="known-volumes">
+                  <option :for={name <- @known_volumes} value={name}></option>
+                </datalist>
+
                 <button
                   type="button"
                   phx-click="add_volume"
@@ -3246,11 +3310,26 @@ defmodule HomelabWeb.DeployWizardLive do
                   name={"volumes[#{idx}][optional]"}
                   value={to_string(vol["optional"] || false)}
                 />
+                <%!-- Rides along for the same reason type/source do: deploy is submitted
+                      from THIS form, so a mount the operator marked read-only one step
+                      earlier came up writable. --%>
+                <input
+                  type="hidden"
+                  name={"volumes[#{idx}][read_only]"}
+                  value={to_string(vol["read_only"] in [true, "true"])}
+                />
                 <.icon name="hero-circle-stack-mini" class="size-2.5 text-secondary" />
                 <span :if={vol["type"] == "bind"} class="text-base-content/40">
                   {vol["source"]} →
                 </span>
                 {vol["path"] || vol["container_path"]}
+                <span
+                  :if={vol["read_only"] in [true, "true"]}
+                  class="text-base-content/40"
+                  title="Read-only"
+                >
+                  ro
+                </span>
               </span>
             </div>
             <p :if={@volumes == []} class="text-[11px] text-base-content/30 italic">
@@ -3475,6 +3554,12 @@ defmodule HomelabWeb.DeployWizardLive do
               type="hidden"
               name={"volumes[#{idx}][source]"}
               value={vol["source"] || ""}
+            />
+            <input
+              :for={{vol, idx} <- Enum.with_index(@volumes)}
+              type="hidden"
+              name={"volumes[#{idx}][read_only]"}
+              value={to_string(vol["read_only"] in [true, "true"])}
             />
             <input
               :for={env <- @env_vars}
@@ -3756,6 +3841,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> put_present(p, "container_path")
       |> put_present(p, "type")
       |> put_present(p, "source")
+      |> put_present(p, "read_only")
     end)
   end
 

@@ -167,6 +167,32 @@ defmodule Homelab.Storage do
     end
   end
 
+  @doc """
+  Just the names of the volumes the daemon has, sorted, for the source pickers on the
+  deploy wizard and a deployment's Volumes tab.
+
+  Deliberately not `volumes/2`: that annotates each one with size and consumers, and the
+  size half of it walks `/system/df`, which is the slow call the storage page loads in
+  the background rather than on mount. A picker needs neither number.
+
+  A daemon that cannot be read yields `[]` rather than an error. The field these feed is
+  a name the operator may type — Docker creates a named volume on first mount — so a
+  missing list costs suggestions, not the ability to fill the form in.
+  """
+  @spec volume_names() :: [String.t()]
+  def volume_names do
+    case orchestrator().list_volumes() do
+      {:ok, vols} ->
+        vols
+        |> Enum.map(&(&1[:name] || &1["name"]))
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.sort()
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
   defp annotate_volume(vol, consumers, sizes) do
     labels = vol[:labels] || vol["labels"] || %{}
     name = vol[:name] || vol["name"]

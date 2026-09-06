@@ -331,6 +331,39 @@ defmodule HomelabWeb.StorageLiveTest do
              end)
     end
 
+    # The other half of the choice. Read-only is a checkbox, so leaving it alone has to
+    # produce a WRITABLE mount -- an unchecked box posts nothing at all, and a form that
+    # read only the checkbox would make every mount read-only.
+    test "a mount is read-write unless the operator asks for read-only", %{conn: conn} do
+      stub_volumes([volume("music-library")])
+      deployment = insert(:deployment)
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=volumes")
+
+      view
+      |> element("button[phx-click='mount_volume'][phx-value-name='music-library']")
+      |> render_click()
+
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{
+          "deployment_id" => to_string(deployment.id),
+          "type" => "volume",
+          "source_choice" => "music-library",
+          "container_path" => "/music"
+        }
+      )
+      |> render_submit()
+
+      volumes =
+        Homelab.Deployments.get_deployment!(deployment.id)
+        |> Homelab.Deployments.Access.effective_volumes()
+
+      assert Enum.any?(volumes, fn vol ->
+               vol["source"] == "music-library" and vol["read_only"] == false
+             end)
+    end
+
     test "typing a name still reaches the row when the picker is set to custom",
          %{conn: conn} do
       # Docker creates a named volume on first mount, so a name that is not on the daemon
