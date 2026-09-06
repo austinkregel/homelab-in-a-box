@@ -2746,6 +2746,95 @@ defmodule HomelabWeb.CatalogLiveTest do
     end
   end
 
+  # The catalog's own masking rule was `PASSWORD or SECRET` — a fourth, narrower copy of
+  # something Homelab.SecretKeys already owned, so SMTP_PASS printed in plain text here
+  # while the deployment page masked it. And nothing masked could be read back at all,
+  # which for a template default the operator has never seen is the whole question.
+  describe "revealing a secret value" do
+    setup %{conn: conn} do
+      template =
+        insert(:app_template,
+          name: "Mailer",
+          slug: "mailer",
+          image: "mailer:latest",
+          default_env: %{"SMTP_PASS" => "from-the-template", "SMTP_HOST" => "mail.example.com"},
+          required_env: ["ADMIN_TOKEN"]
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/catalog?template=#{template.id}")
+      {:ok, view: view, template: template}
+    end
+
+    test "a template default that holds a credential is masked, and reveals on request", %{
+      view: view
+    } do
+      assert has_element?(view, ~s(input[name="env_overrides[SMTP_PASS]"][type="password"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "SMTP_PASS"})
+      assert has_element?(view, ~s(input[name="env_overrides[SMTP_PASS]"][type="text"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "SMTP_PASS"})
+      assert has_element?(view, ~s(input[name="env_overrides[SMTP_PASS]"][type="password"]))
+    end
+
+    test "a required credential is masked too", %{view: view} do
+      assert has_element?(view, ~s(input[name="env_overrides[ADMIN_TOKEN]"][type="password"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "ADMIN_TOKEN"})
+      assert has_element?(view, ~s(input[name="env_overrides[ADMIN_TOKEN]"][type="text"]))
+    end
+
+    test "SMTP_PASS is masked here, as it already was on the deployment page", %{view: view} do
+      refute has_element?(view, ~s(input[name="env_overrides[SMTP_PASS]"][type="text"])),
+             "the local PASSWORD-or-SECRET rule let a *_PASS variable render in the clear"
+
+      assert has_element?(view, ~s(input[name="env_overrides[SMTP_HOST]"][type="text"])),
+             "a hostname is not a credential"
+    end
+
+    # Reveal round-trips through the server, which re-renders the whole form. When the
+    # values lived only in the DOM, that meant the toggle — and add, and remove — reset
+    # every input to the template's default.
+    test "a typed value survives revealing another variable", %{view: view} do
+      render_change(view, "deploy_config_changed", %{
+        "env_overrides" => %{"SMTP_PASS" => "typed-by-hand", "ADMIN_TOKEN" => "tok"},
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "SMTP_PASS"})
+
+      assert has_element?(
+               view,
+               ~s(input[name="env_overrides[SMTP_PASS]"][value="typed-by-hand"])
+             )
+
+      assert has_element?(view, ~s(input[name="env_overrides[ADMIN_TOKEN]"][value="tok"]))
+    end
+
+    test "a typed value survives adding a variable", %{view: view} do
+      render_change(view, "deploy_config_changed", %{
+        "env_overrides" => %{"SMTP_PASS" => "typed-by-hand"},
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      render_click(view, "add_env_var", %{})
+
+      assert has_element?(
+               view,
+               ~s(input[name="env_overrides[SMTP_PASS]"][value="typed-by-hand"])
+             )
+    end
+
+    test "removing a variable takes its reveal with it", %{view: view} do
+      render_click(view, "toggle_env_visibility", %{"secret" => "SMTP_PASS"})
+      render_click(view, "remove_env_var", %{"key" => "SMTP_PASS"})
+
+      refute has_element?(view, ~s(input[name="env_overrides[SMTP_PASS]"]))
+    end
+  end
+
   describe "deploy modal required env and secret rendering" do
     setup %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/catalog")

@@ -1764,12 +1764,174 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end)
   end
 
+  # An app that terminates TLS itself — code-server, a Unifi controller, anything run with
+  # `--cert` — answers Traefik's plaintext request with `400 Bad Request`. Nothing about
+  # that is visible from outside: the route is up, the port is right, the container is
+  # healthy, and the browser gets a 400 with no explanation of whose it is.
+  describe "backend scheme" do
+    test "a plaintext backend is the default and emits no scheme label" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{domain: "nc.example.com", routed_port: 80})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.services.nc-example-com.loadbalancer.server.port"] == "80"
+
+      # Absent rather than written as "http", so shipping this feature does not change the
+      # label set of a single existing deployment. A label diff is what decides whether a
+      # container gets recreated.
+      refute Map.has_key?(
+               spec.labels,
+               "traefik.http.services.nc-example-com.loadbalancer.server.scheme"
+             )
+
+      refute Map.has_key?(
+               spec.labels,
+               "traefik.http.services.nc-example-com.loadbalancer.serverstransport"
+             )
+    end
+
+    test "an HTTPS backend gets the scheme and the transport that makes it work" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "code.example.com",
+          routed_port: 8443,
+          proxy_options: %{"backend_scheme" => "https"}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      assert spec.labels["traefik.http.services.code-example-com.loadbalancer.server.scheme"] ==
+               "https"
+
+      # Without the transport the 400 simply becomes a 500: the backend's certificate is
+      # self-signed and names something other than the container Traefik dialled.
+      assert spec.labels["traefik.http.services.code-example-com.loadbalancer.serverstransport"] ==
+               Homelab.Infrastructure.internal_tls_transport()
+    end
+
+    test "an unrecognised scheme is plaintext, never a half-configured TLS backend" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "nc.example.com",
+          routed_port: 80,
+          proxy_options: %{"backend_scheme" => "ssl"}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      refute Map.has_key?(
+               spec.labels,
+               "traefik.http.services.nc-example-com.loadbalancer.server.scheme"
+             )
+    end
+
+    # The sibling of "no router escapes the protection the base router carries", and it
+    # fails for the same class of reason: a future feature that emits another service and
+    # wires only its port leaves that route answering the exact 400 this setting exists to
+    # fix. There is one container behind all of these — a deployment cannot speak TLS on
+    # its base route and plaintext on its websocket path.
+    test "no service the spec emits escapes the scheme the deployment declared" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "code.example.com",
+          routed_port: 8443,
+          proxy_options: %{"backend_scheme" => "https"},
+          extra_routes: [%{"path_prefix" => "/proxy", "port" => 8444}],
+          additional_domains: [
+            %{"host" => "ide.example.com"},
+            %{"host" => "example.com", "path_prefix" => "/.well-known/code"}
+          ]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+
+      services = service_names(spec.labels)
+      assert length(services) > 1, "this test is only meaningful with sibling services"
+
+      for service <- services do
+        assert spec.labels["traefik.http.services.#{service}.loadbalancer.server.scheme"] ==
+                 "https",
+               "service #{service} reaches the container over plaintext while the " <>
+                 "deployment declared https"
+
+        assert spec.labels["traefik.http.services.#{service}.loadbalancer.serverstransport"] ==
+                 Homelab.Infrastructure.internal_tls_transport(),
+               "service #{service} speaks TLS with no transport, so it answers 500"
+      end
+    end
+
+    # The same 400, one layer down and reported as something else entirely: an operator
+    # who fixes their routing watches the deployment fail its healthcheck instead, for
+    # what reads as an unrelated reason.
+    test "the healthcheck probe follows the backend scheme" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public, health_check: %{"path" => "/healthz"}})
+
+      deployment =
+        build_deployment(tenant, template, %{
+          domain: "code.example.com",
+          routed_port: 8443,
+          proxy_options: %{"backend_scheme" => "https"}
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert ["CMD-SHELL", probe] = spec.health_check["Test"]
+
+      assert probe =~ "https://localhost:8443/healthz"
+      refute probe =~ "http://localhost"
+
+      # `localhost` is never the name on the certificate, so verifying it fails every time.
+      assert probe =~ "--no-check-certificate"
+      assert probe =~ "-k "
+    end
+
+    test "a plaintext healthcheck probe is unchanged" do
+      tenant = build_tenant()
+      template = build_template(%{exposure_mode: :public, health_check: %{"path" => "/healthz"}})
+
+      deployment =
+        build_deployment(tenant, template, %{domain: "nc.example.com", routed_port: 80})
+
+      assert {:ok, spec} = SpecBuilder.build(deployment)
+      assert ["CMD-SHELL", probe] = spec.health_check["Test"]
+
+      assert probe =~ "http://localhost:80/healthz"
+      refute probe =~ "--no-check-certificate"
+      refute probe =~ "-k "
+    end
+  end
+
   defp router_names(labels) do
     labels
     |> Map.keys()
     |> Enum.flat_map(fn key ->
       case String.split(key, ".") do
         ["traefik", "http", "routers", name | _] -> [name]
+        _ -> []
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  defp service_names(labels) do
+    labels
+    |> Map.keys()
+    |> Enum.flat_map(fn key ->
+      case String.split(key, ".") do
+        ["traefik", "http", "services", name | _] -> [name]
         _ -> []
       end
     end)

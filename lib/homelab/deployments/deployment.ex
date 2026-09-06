@@ -124,6 +124,7 @@ defmodule Homelab.Deployments.Deployment do
     |> validate_inclusion(:restart_policy_override, @restart_policies)
     |> validate_replicas()
     |> validate_extra_routes()
+    |> validate_proxy_options()
     |> normalize_additional_domains()
     |> validate_additional_domains()
     |> validate_duplicate_primary()
@@ -138,6 +139,22 @@ defmodule Homelab.Deployments.Deployment do
     |> foreign_key_constraint(:app_template_id)
     |> foreign_key_constraint(:network_parent_id)
     |> unique_constraint([:tenant_id, :app_template_id])
+  end
+
+  # `backend_scheme` decides whether Traefik dials the container over TLS. An unrecognised
+  # value there does not fail here -- `SpecBuilder.backend_scheme/1` matches on "https" and
+  # treats everything else as plaintext, so a typo ("HTTPS", "ssl") silently produces the
+  # exact 400 the setting exists to fix, and the settings page shows it as saved. The form
+  # only ever posts the two, so anything else arrived from the API or a hand-written
+  # payload; reject it where the operator can still see why.
+  defp validate_proxy_options(changeset) do
+    case get_change(changeset, :proxy_options) do
+      %{"backend_scheme" => scheme} when scheme not in ["http", "https"] ->
+        add_error(changeset, :proxy_options, "backend_scheme must be \"http\" or \"https\"")
+
+      _ ->
+        changeset
+    end
   end
 
   # "" is what an emptied form field posts, and it is NOT a value -- it means "go back to

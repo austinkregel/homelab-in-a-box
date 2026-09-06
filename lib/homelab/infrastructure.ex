@@ -199,6 +199,12 @@ defmodule Homelab.Infrastructure do
          # and logs -- there is no container to write into yet -- which is also the one
          # case where no app router exists to be disabled, and the write below covers.
          _ <- ensure_hold_ingress(),
+         # Same ordering, same reason: a service naming a serversTransport that does not
+         # resolve is an errored service, and the deployments that name it are exactly
+         # the ones whose backends speak TLS. Written before the proxy can come up so
+         # the name is already in the dynamic volume, and again below for the fresh
+         # install where there was no container to write into yet.
+         _ <- ensure_internal_tls_transport(),
          result when result in [{:ok, :already_running}, {:ok, :started}] <-
            ensure_traefik_current(template) do
       sync_traefik_networks()
@@ -207,6 +213,7 @@ defmodule Homelab.Infrastructure do
       _ = ensure_self_ingress()
       # The fresh-install path, where the write above had no container to reach.
       _ = ensure_hold_ingress()
+      _ = ensure_internal_tls_transport()
       result
     end
   end
@@ -288,6 +295,68 @@ defmodule Homelab.Infrastructure do
         "      loadBalancer:",
         "        servers:",
         "          - url: \"#{service_url}\""
+      ],
+      "\n"
+    ) <> "\n"
+  end
+
+  # The serversTransport a route uses when its backend speaks TLS. One name, defined by
+  # the file provider (like `hiab-hold`), referenced from generated Docker labels.
+  @internal_tls_transport "hiab-internal-tls"
+  @internal_tls_file "internal-tls.yml"
+
+  @doc """
+  The `serversTransport` reference a TLS backend's service label must carry.
+
+  Provider-qualified (`@file`) because that is how Traefik resolves a name defined by
+  one provider from a label written by another — the same shape the entrypoint's
+  `hiab-hold@file` middleware reference uses.
+  """
+  def internal_tls_transport, do: "#{@internal_tls_transport}@file"
+
+  @doc """
+  Registers the transport Traefik uses to reach a backend over HTTPS.
+
+  An app that terminates TLS itself (code-server, a Unifi controller, anything shipping
+  `--cert`) answers 400 to the plaintext request Traefik sends by default. Pointing the
+  service at `https` fixes that and immediately hits the second half of the problem:
+  the certificate is self-signed and issued for something other than the container name
+  Traefik dials, so verification fails and the 400 becomes a 500.
+
+  Verification is therefore off on this transport. That is not a shortcut — on this hop
+  there is nothing to verify. Traefik reaches the backend by container name on a private
+  Docker network, and no CA issues certificates for `homelab-code-server`; a name that
+  cannot be authenticated cannot be checked. What the hop still gets is encryption, and
+  what protects it is the network, which is the same protection the plaintext backends
+  beside it rely on entirely.
+
+  It is a named transport rather than Traefik's global `serversTransport.insecureSkipVerify`
+  for two reasons: the global form is STATIC config, so it would reach an existing install
+  only by recreating the proxy, and it would silently drop verification for every future
+  backend rather than the ones that asked. Idempotent (same file each time) and
+  best-effort.
+  """
+  def ensure_internal_tls_transport do
+    tar = dynamic_config_tar(@internal_tls_file, internal_tls_yaml())
+
+    case Client.upload_archive("homelab-traefik", @traefik_dynamic_dir, tar) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Infrastructure: internal-TLS transport upload failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  @doc "Pure Traefik dynamic-config (YAML) for the internal-TLS transport. Public for testing."
+  def internal_tls_yaml do
+    Enum.join(
+      [
+        "http:",
+        "  serversTransports:",
+        "    #{@internal_tls_transport}:",
+        "      insecureSkipVerify: true"
       ],
       "\n"
     ) <> "\n"

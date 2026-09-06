@@ -497,6 +497,101 @@ defmodule HomelabWeb.DeployWizardLiveTest do
     end
   end
 
+  # The wizard invents these values (a generated database password) or discovers them
+  # (a compose file's env block) and then masks them, so for a detected or generated
+  # credential the input was the only copy on screen and unreadable. Reveal has to be
+  # server state: every keystroke re-renders the row through `config_changed`, and a
+  # `type` flipped in the browser would be patched straight back to `password`.
+  describe "revealing a secret value" do
+    test "a required secret is masked until asked for, and re-masks on a second click", %{
+      conn: conn,
+      template: template
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      # APP_SECRET is the required var and sorts first.
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="password"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "0"})
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="text"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "0"})
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="password"]))
+    end
+
+    test "a revealed value survives the next keystroke", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "0"})
+
+      render_change(view, "config_changed", %{
+        "env" => %{"0" => %{"key" => "APP_SECRET", "value" => "hunter2"}},
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="text"][value="hunter2"])),
+             "the re-render put the mask back, which is what a client-only toggle would do"
+    end
+
+    test "a plain value renders as text with no toggle", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="text"]))
+
+      refute has_element?(
+               view,
+               ~s(button[phx-click="toggle_env_visibility"][phx-value-secret="1"])
+             )
+    end
+
+    test "a reveal follows its row when a row above it is deleted", %{
+      conn: conn,
+      template: template
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_change(view, "config_changed", %{
+        "env" => %{
+          "0" => %{"key" => "APP_SECRET", "value" => "hunter2"},
+          "1" => %{"key" => "APP_ENV", "value" => "production"},
+          "2" => %{"key" => "SMTP_PASS", "value" => "mailer"}
+        },
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "2"})
+      render_click(view, "remove_env_var", %{"index" => "0"})
+
+      assert has_element?(view, ~s(input[name="env[1][key]"][value="SMTP_PASS"]))
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="text"]))
+    end
+
+    # Review is the last screen before the value is written into a container, and the
+    # one an operator reads to check the generated password against the database that is
+    # about to receive it.
+    test "the review step can show a masked value too", %{conn: conn, template: template} do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_change(view, "config_changed", %{
+        "env" => %{"0" => %{"key" => "APP_SECRET", "value" => "hunter2"}},
+        "ports" => %{},
+        "volumes" => %{}
+      })
+
+      # The value is in the page either way — the hidden input that carries it to deploy
+      # is right there — so the question is only whether it is legible.
+      html = render_click(view, "go_step", %{"step" => "review"})
+      assert html =~ Homelab.SecretKeys.mask()
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "0"})
+
+      refute render(view) =~ Homelab.SecretKeys.mask()
+      assert has_element?(view, "span", "hunter2")
+    end
+  end
+
   # Discovery lands SECONDS after the operator reaches the config step — right when they
   # are typing. It used to rebuild the env list wholesale from the template, throwing away
   # everything entered so far. The form appeared to wipe itself, seemingly on whatever

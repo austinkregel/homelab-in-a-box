@@ -324,6 +324,91 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert Homelab.Deployments.get_deployment!(dep.id).env_overrides == %{}
     end
 
+    # A credential here often has no other copy: the wizard generates one, the compose
+    # import reads one out of a file the operator never sees. A masked input was then the
+    # only place the value existed on screen, and editing `type` in devtools the only way
+    # to read it back.
+    test "a secret value is masked until the operator reveals it", %{conn: conn, deployment: dep} do
+      {:ok, dep} =
+        Homelab.Deployments.update_deployment(dep, %{
+          env_overrides: %{"OPENVPN_PASSWORD" => "hunter2"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      # Rows sort by key: APP_ENV from the template first, then the password.
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="password"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "1"})
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="text"]))
+
+      render_click(view, "toggle_env_visibility", %{"secret" => "1"})
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="password"]))
+    end
+
+    test "a value that is not a credential is plain text with no toggle", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="text"]))
+
+      refute has_element?(
+               view,
+               ~s(button[phx-click="toggle_env_visibility"][phx-value-secret="0"])
+             ),
+             "APP_ENV holds no credential; an eye button there only invites the question"
+    end
+
+    # Reveal is addressed by row position, and deleting a row renumbers every row below
+    # it. Left alone the set keeps pointing at the old slots, so a delete unmasks
+    # whichever credential slid into one — a leak opened by the feature meant to make
+    # secrets legible only on request.
+    test "a reveal follows its row when a row above it is deleted", %{
+      conn: conn,
+      deployment: dep
+    } do
+      {:ok, dep} =
+        Homelab.Deployments.update_deployment(dep, %{
+          env_overrides: %{"OPENVPN_PASSWORD" => "hunter2", "SMTP_PASS" => "mailer"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+
+      # APP_ENV, OPENVPN_PASSWORD, SMTP_PASS.
+      render_click(view, "toggle_env_visibility", %{"secret" => "1"})
+      render_click(view, "remove_env_var", %{"index" => "0"})
+
+      assert has_element?(view, ~s(input[name="env[0][key]"][value="OPENVPN_PASSWORD"]))
+      assert has_element?(view, ~s(input[name="env[0][value]"][type="text"]))
+
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="password"])),
+             "SMTP_PASS was never revealed and must not be dragged into view by a delete"
+    end
+
+    test "leaving edit mode masks everything again", %{conn: conn, deployment: dep} do
+      {:ok, dep} =
+        Homelab.Deployments.update_deployment(dep, %{
+          env_overrides: %{"OPENVPN_PASSWORD" => "hunter2"}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "environment"})
+      render_click(view, "start_env_edit", %{})
+      render_click(view, "toggle_env_visibility", %{"secret" => "1"})
+      render_click(view, "cancel_env_edit", %{})
+      render_click(view, "start_env_edit", %{})
+
+      assert has_element?(view, ~s(input[name="env[1][value]"][type="password"]))
+    end
+
     test "add_env_var appends an empty row and remove_env_var drops one", %{
       conn: conn,
       deployment: dep

@@ -265,6 +265,114 @@ defmodule HomelabWeb.StorageLiveTest do
 
       assert html =~ "pick a deployment"
     end
+
+    test "the volume picker offers every volume on the daemon", %{conn: conn} do
+      # The point of the control: mounting a volume you did not create, into a deployment
+      # that does not own it, without having to know its name by heart.
+      stub_volumes([volume("music-library"), volume("media-cache")])
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=volumes")
+
+      assert has_element?(
+               view,
+               "button[phx-click='mount_volume'][phx-value-name='music-library']"
+             )
+
+      modal =
+        view
+        |> element("button[phx-click='mount_volume'][phx-value-name='music-library']")
+        |> render_click()
+
+      # Every volume on the daemon is offered, not just the one clicked.
+      assert modal =~ "music-library"
+      assert modal =~ "media-cache"
+
+      # Opened from the volume list, so it opens ON that volume rather than making the
+      # operator find it again in the picker.
+      assert has_element?(view, "option[value='music-library'][selected]")
+    end
+
+    test "the picked volume is what gets mounted, not the blank text field", %{conn: conn} do
+      # `source_choice` and `source` are two controls for one value, and the picker only
+      # means anything if the choice wins. A blank `source` reaching the row instead
+      # would derive a fresh tenant-scoped volume — a new empty directory where the
+      # operator asked for their library.
+      stub_volumes([volume("music-library")])
+      deployment = insert(:deployment)
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=volumes")
+
+      view
+      |> element("button[phx-click='mount_volume'][phx-value-name='music-library']")
+      |> render_click()
+
+      # No `source`: that field only renders in custom mode.
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{
+          "deployment_id" => to_string(deployment.id),
+          "type" => "volume",
+          "source_choice" => "music-library",
+          "container_path" => "/music",
+          "read_only" => "true"
+        }
+      )
+      |> render_submit()
+
+      # Asserted on the row rather than the flash: the mount is saved before the release
+      # is planned, and whether that plan succeeds in test is beside the point here.
+      volumes =
+        Homelab.Deployments.get_deployment!(deployment.id)
+        |> Homelab.Deployments.Access.effective_volumes()
+
+      assert Enum.any?(volumes, fn vol ->
+               vol["source"] == "music-library" and vol["container_path"] == "/music" and
+                 vol["read_only"] == true
+             end)
+    end
+
+    test "typing a name still reaches the row when the picker is set to custom",
+         %{conn: conn} do
+      # Docker creates a named volume on first mount, so a name that is not on the daemon
+      # yet has to stay expressible — the picker must not close that door.
+      stub_volumes([])
+      deployment = insert(:deployment)
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=mounts")
+
+      view |> element("button[phx-value-modal='mount']") |> render_click()
+
+      # The picker appears with "volume", its text field with "custom". Each is revealed
+      # by a change event, and the form rebuilds from blank, so each step resends the last.
+      view
+      |> form("form[phx-submit='attach_mount']", mount: %{"type" => "volume"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{"type" => "volume", "source_choice" => "__custom__"}
+      )
+      |> render_change()
+
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{
+          "deployment_id" => to_string(deployment.id),
+          "type" => "volume",
+          "source_choice" => "__custom__",
+          "source" => "brand-new-volume",
+          # Not /data: the template already mounts it, and two volumes cannot share a path.
+          "container_path" => "/srv/new"
+        }
+      )
+      |> render_submit()
+
+      volumes =
+        Homelab.Deployments.get_deployment!(deployment.id)
+        |> Homelab.Deployments.Access.effective_volumes()
+
+      assert Enum.any?(volumes, &(&1["source"] == "brand-new-volume"))
+    end
   end
 
   describe "authorization" do

@@ -11,6 +11,7 @@ defmodule HomelabWeb.DeployWizardAdvancedTest do
   import Mox
 
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.SpecBuilder
   alias Homelab.Repo
 
   @moduletag :capture_log
@@ -103,7 +104,17 @@ defmodule HomelabWeb.DeployWizardAdvancedTest do
   test "sticky sessions are set at create", %{conn: conn, template: template, tenant: tenant} do
     deployment = deploy_with(conn, template, tenant, %{"sticky" => "true"})
 
-    assert deployment.proxy_options == %{"sticky" => true}
+    assert deployment.proxy_options == %{"sticky" => true, "backend_scheme" => "http"}
+  end
+
+  # The 400 an app that terminates TLS itself answers to a plaintext request is invisible
+  # from the outside — the route is up, the port is right, the container is healthy — so
+  # it has to be answerable at create, not only after a deploy that looks fine and is not.
+  test "an HTTPS backend is set at create", %{conn: conn, template: template, tenant: tenant} do
+    deployment = deploy_with(conn, template, tenant, %{"backend_scheme" => "https"})
+
+    assert deployment.proxy_options["backend_scheme"] == "https"
+    assert SpecBuilder.backend_scheme(deployment) == "https"
   end
 
   test "an untouched panel leaves everything inheriting from the template", %{

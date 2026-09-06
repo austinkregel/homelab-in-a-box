@@ -13,6 +13,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Backups
   alias Homelab.Networking.Hostname
   alias Homelab.Services.BackupScheduler
+  alias HomelabWeb.SecretReveal
 
   @log_poll_interval 3_000
 
@@ -31,6 +32,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:env_edit_mode, false)
       |> assign(:env_form, nil)
       |> assign(:env_rows, [])
+      |> assign(:revealed_env, MapSet.new())
       |> assign(:settings_edit_mode, false)
       |> assign(:settings_domain, "")
       |> assign(:settings_access, "proxy")
@@ -49,6 +51,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
+      |> assign(:settings_backend_scheme, "http")
       |> assign(:settings_routed_port, nil)
       |> assign(:runtime_edit_mode, false)
       |> assign(:runtime_restart_policy, "on-failure")
@@ -326,7 +329,8 @@ defmodule HomelabWeb.DeploymentLive do
      socket
      |> assign(:env_edit_mode, true)
      |> assign(:env_form, to_form(%{}))
-     |> assign(:env_rows, env_rows(merged_env(deployment)))}
+     |> assign(:env_rows, env_rows(merged_env(deployment)))
+     |> assign(:revealed_env, MapSet.new())}
   end
 
   def handle_event("cancel_env_edit", _params, socket) do
@@ -334,7 +338,8 @@ defmodule HomelabWeb.DeploymentLive do
      socket
      |> assign(:env_edit_mode, false)
      |> assign(:env_form, nil)
-     |> assign(:env_rows, [])}
+     |> assign(:env_rows, [])
+     |> assign(:revealed_env, MapSet.new())}
   end
 
   # Keep the rows in assigns as the user types, so add/remove don't discard edits.
@@ -350,8 +355,18 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   def handle_event("remove_env_var", %{"index" => idx}, socket) do
-    rows = List.delete_at(socket.assigns.env_rows, String.to_integer(idx))
-    {:noreply, assign(socket, :env_rows, rows)}
+    idx = String.to_integer(idx)
+    rows = List.delete_at(socket.assigns.env_rows, idx)
+
+    {:noreply,
+     socket
+     |> assign(:env_rows, rows)
+     |> assign(:revealed_env, SecretReveal.drop_index(socket.assigns.revealed_env, idx))}
+  end
+
+  def handle_event("toggle_env_visibility", %{"secret" => idx}, socket) do
+    {:noreply,
+     assign(socket, :revealed_env, SecretReveal.toggle(socket.assigns.revealed_env, idx))}
   end
 
   # A real submission carries the form's rows, its marker, or both. Anything arriving
@@ -557,6 +572,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign_gpu_settings(limits)
      |> assign(:settings_health_path, health["path"] || "")
      |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)
+     |> assign(:settings_backend_scheme, SpecBuilder.backend_scheme(deployment))
      |> assign(
        :settings_network_parent_id,
        deployment.network_parent_id && to_string(deployment.network_parent_id)
@@ -578,9 +594,6 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("settings_changed", %{"settings" => settings}, socket) do
     {:noreply,
      socket
-     |> assign(:settings_domain, settings["domain"] || socket.assigns.settings_domain)
-     |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
-     |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
      |> assign(:settings_ports, ports_from_params(settings["ports"]))
      |> assign(:settings_routes, routes_from_params(settings["routes"]))
      |> assign(
@@ -588,35 +601,7 @@ defmodule HomelabWeb.DeploymentLive do
        domains_from_params(settings["domains"])
      )
      |> assign(:settings_sticky, settings["sticky"] == "true")
-     |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
-     |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
-     # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
-     # round-trip on every change or picking NVIDIA would collapse the form again.
-     |> assign(:settings_gpu_vendor, settings["gpu_vendor"] || socket.assigns.settings_gpu_vendor)
-     |> assign(:settings_gpu_count, settings["gpu_count"] || socket.assigns.settings_gpu_count)
-     |> assign(
-       :settings_gpu_devices,
-       settings["gpu_devices"] || socket.assigns.settings_gpu_devices
-     )
-     |> assign(:settings_gpu_kind, settings["gpu_kind"] || socket.assigns.settings_gpu_kind)
-     |> assign(
-       :settings_health_path,
-       settings["health_path"] || socket.assigns.settings_health_path
-     )
-     # Drives which access tiles are even selectable, so it has to round-trip on every
-     # change rather than only at save. `""` is a real value here — it is the operator
-     # choosing "its own network" — so it must not fall through to the previous one.
-     |> assign(
-       :settings_network_parent_id,
-       settings["network_parent_id"] || socket.assigns.settings_network_parent_id
-     )
-     # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
-     # persisted deployment on every render, so a new selection reverted on the next
-     # keystroke and the save wrote the old port.
-     |> assign(
-       :settings_routed_port,
-       settings["routed_port"] || socket.assigns.settings_routed_port
-     )}
+     |> carry_settings(settings)}
   end
 
   def handle_event("recheck_tls", _params, socket) do
@@ -2276,6 +2261,34 @@ defmodule HomelabWeb.DeploymentLive do
                     </div>
                   </div>
 
+                  <div class="space-y-1">
+                    <label
+                      for="settings-backend-scheme"
+                      class="text-xs font-medium text-base-content"
+                    >
+                      Backend protocol
+                    </label>
+                    <select
+                      id="settings-backend-scheme"
+                      name="settings[backend_scheme]"
+                      class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="http" selected={@settings_backend_scheme != "https"}>
+                        HTTP — the proxy terminates TLS (almost every app)
+                      </option>
+                      <option value="https" selected={@settings_backend_scheme == "https"}>
+                        HTTPS — the container serves TLS itself
+                      </option>
+                    </select>
+                    <p class="text-[10px] text-base-content/40 leading-snug">
+                      How Traefik talks to the container, not how browsers reach it — the
+                      public side is HTTPS either way. An app that terminates TLS itself
+                      (code-server, a Unifi controller, anything started with <code>--cert</code>) answers a plaintext request with <span class="font-mono">400 Bad Request</span>.
+                      The certificate is not verified on this hop: it is a container name on a
+                      private network, and nothing issues certificates for those.
+                    </p>
+                  </div>
+
                   <label class="flex items-start gap-2 cursor-pointer">
                     <input type="hidden" name="settings[sticky]" value="false" />
                     <input
@@ -2691,12 +2704,17 @@ defmodule HomelabWeb.DeploymentLive do
                     placeholder="VARIABLE"
                     class="w-2/5 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
-                  <input
-                    type={if secret_key?(row["key"]), do: "password", else: "text"}
+                  <.secret_input
                     name={"env[#{idx}][value]"}
                     value={row["value"]}
+                    secret={secret_key?(row["key"])}
+                    revealed={MapSet.member?(@revealed_env, idx)}
+                    toggle="toggle_env_visibility"
+                    toggle_value={idx}
+                    field_label={row["key"]}
                     placeholder="value"
-                    class="flex-1 rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    wrapper_class="flex-1"
+                    class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
                   <button
                     type="button"
@@ -3741,8 +3759,60 @@ defmodule HomelabWeb.DeploymentLive do
   # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
   # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
   # different container drops the session.
-  defp proxy_options(settings, "proxy"), do: %{"sticky" => settings["sticky"] == "true"}
+  # The settings fields that simply round-trip: whatever the form posted, or what the
+  # assigns already held when it posted nothing for them.
+  #
+  # A table rather than one `||` per field in `settings_changed`. Written out, that
+  # handler was a single function with fourteen branches — past what Credo will pass,
+  # and past what anyone reads line by line to find the one field behaving oddly.
+  #
+  # `""` survives, which matters: it is a real value for `network_parent_id`, where it
+  # means the operator chose "its own network" and must not fall back to the previous
+  # parent.
+  @round_tripped_settings [
+    {:settings_domain, "domain"},
+    {:settings_access, "access"},
+    {:settings_auth, "auth"},
+    {:settings_backend_scheme, "backend_scheme"},
+    {:settings_memory_mb, "memory_mb"},
+    {:settings_cpu_shares, "cpu_shares"},
+    # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
+    # round-trip on every change or picking NVIDIA would collapse the form again.
+    {:settings_gpu_vendor, "gpu_vendor"},
+    {:settings_gpu_count, "gpu_count"},
+    {:settings_gpu_devices, "gpu_devices"},
+    {:settings_gpu_kind, "gpu_kind"},
+    {:settings_health_path, "health_path"},
+    # Drives which access tiles are even selectable, so it has to round-trip on every
+    # change rather than only at save.
+    {:settings_network_parent_id, "network_parent_id"},
+    # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
+    # persisted deployment on every render, so a new selection reverted on the next
+    # keystroke and the save wrote the old port.
+    {:settings_routed_port, "routed_port"}
+  ]
+
+  defp carry_settings(socket, settings) do
+    Enum.reduce(@round_tripped_settings, socket, fn {key, param}, acc ->
+      assign(acc, key, settings[param] || acc.assigns[key])
+    end)
+  end
+
+  defp proxy_options(settings, "proxy") do
+    %{
+      "sticky" => settings["sticky"] == "true",
+      "backend_scheme" => backend_scheme_param(settings["backend_scheme"])
+    }
+  end
+
   defp proxy_options(_settings, _access), do: %{}
+
+  # The select posts one of two values, but a stale tab or a hand-built payload can post
+  # anything -- and "anything" would fail the changeset's validation rather than quietly
+  # meaning plaintext, taking the whole settings save with it. Everything unrecognised is
+  # the default here, and only the deliberate choice survives.
+  defp backend_scheme_param("https"), do: "https"
+  defp backend_scheme_param(_value), do: "http"
 
   defp blank_to_nil(v) when v in [nil, ""], do: nil
   defp blank_to_nil(v), do: v
