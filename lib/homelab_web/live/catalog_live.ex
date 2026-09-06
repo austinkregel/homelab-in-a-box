@@ -10,6 +10,7 @@ defmodule HomelabWeb.CatalogLive do
   alias Homelab.Catalog.MetadataEnricher
 
   alias Homelab.Tenants
+  alias HomelabWeb.SecretReveal
 
   @impl true
   def mount(_params, _session, socket) do
@@ -30,6 +31,8 @@ defmodule HomelabWeb.CatalogLive do
       |> assign(:selected_entry, nil)
       |> assign(:enriching, false)
       |> assign(:deploy_form, nil)
+      |> assign(:deploy_env, %{})
+      |> assign(:revealed_env, MapSet.new())
       |> assign(:custom_form, to_form(%{"image" => "", "tag" => "latest", "name" => ""}))
       |> assign(:search_loading, false)
       |> assign(:curated_entries, [])
@@ -59,6 +62,8 @@ defmodule HomelabWeb.CatalogLive do
              socket
              |> assign(:selected_template, template)
              |> assign(:deploy_form, build_deploy_form(template))
+             |> assign(:deploy_env, deploy_env(template))
+             |> assign(:revealed_env, MapSet.new())
              |> assign(:deploy_ports, template.ports || [])
              |> assign(:deploy_volumes, template.volumes || [])}
 
@@ -114,6 +119,7 @@ defmodule HomelabWeb.CatalogLive do
      |> assign(:selected_entry, enriched_entry)
      |> assign(:selected_template, template)
      |> assign(:deploy_form, deploy_form)
+     |> assign(:deploy_env, deploy_env(template, socket.assigns.deploy_env))
      |> assign(:deploy_ports, template.ports || [])
      |> assign(:deploy_volumes, template.volumes || [])
      |> assign(:enriching, false)}
@@ -195,6 +201,8 @@ defmodule HomelabWeb.CatalogLive do
       |> assign(:selected_entry, entry)
       |> assign(:selected_template, template)
       |> assign(:deploy_form, deploy_form)
+      |> assign(:deploy_env, deploy_env(template))
+      |> assign(:revealed_env, MapSet.new())
       |> assign(:deploy_ports, template.ports || [])
       |> assign(:deploy_volumes, template.volumes || [])
 
@@ -242,6 +250,8 @@ defmodule HomelabWeb.CatalogLive do
          socket
          |> assign(:selected_template, template)
          |> assign(:deploy_form, deploy_form)
+         |> assign(:deploy_env, deploy_env(template))
+         |> assign(:revealed_env, MapSet.new())
          |> assign(:deploy_ports, template.ports || [])
          |> assign(:deploy_volumes, template.volumes || [])
          |> assign(:tab, "curated")}
@@ -266,7 +276,11 @@ defmodule HomelabWeb.CatalogLive do
     {:noreply,
      socket
      |> assign(:deploy_ports, sync_rows(params["ports"], socket.assigns.deploy_ports))
-     |> assign(:deploy_volumes, sync_rows(params["volumes"], socket.assigns.deploy_volumes))}
+     |> assign(:deploy_volumes, sync_rows(params["volumes"], socket.assigns.deploy_volumes))
+     |> assign(
+       :deploy_env,
+       Map.merge(socket.assigns.deploy_env, params["env_overrides"] || %{})
+     )}
   end
 
   def handle_event("add_port", _params, socket) do
@@ -320,8 +334,12 @@ defmodule HomelabWeb.CatalogLive do
     new_key = "NEW_VAR_#{map_size(default_env) + 1}"
     updated_env = Map.put(default_env, new_key, "")
     updated_template = struct(template, %{default_env: updated_env})
-    deploy_form = build_deploy_form(updated_template)
-    {:noreply, assign(socket, selected_template: updated_template, deploy_form: deploy_form)}
+
+    {:noreply,
+     socket
+     |> assign(:selected_template, updated_template)
+     |> assign(:deploy_form, build_deploy_form(updated_template))
+     |> assign(:deploy_env, deploy_env(updated_template, socket.assigns.deploy_env))}
   end
 
   def handle_event("remove_env_var", %{"key" => key}, socket) do
@@ -329,8 +347,18 @@ defmodule HomelabWeb.CatalogLive do
     default_env = Map.delete(template.default_env || %{}, key)
     required_env = Enum.reject(template.required_env || [], &(&1 == key))
     updated_template = struct(template, %{default_env: default_env, required_env: required_env})
-    deploy_form = build_deploy_form(updated_template)
-    {:noreply, assign(socket, selected_template: updated_template, deploy_form: deploy_form)}
+
+    {:noreply,
+     socket
+     |> assign(:selected_template, updated_template)
+     |> assign(:deploy_form, build_deploy_form(updated_template))
+     |> assign(:deploy_env, deploy_env(updated_template, socket.assigns.deploy_env))
+     |> assign(:revealed_env, MapSet.delete(socket.assigns.revealed_env, key))}
+  end
+
+  def handle_event("toggle_env_visibility", %{"secret" => key}, socket) do
+    {:noreply,
+     assign(socket, :revealed_env, SecretReveal.toggle(socket.assigns.revealed_env, key))}
   end
 
   def handle_event("deploy", %{"tenant_id" => tenant_id} = params, socket) do
@@ -1117,13 +1145,14 @@ defmodule HomelabWeb.CatalogLive do
                         </button>
                       </div>
                     </div>
-                    <input
-                      type={
-                        if String.contains?(env, "PASSWORD") or String.contains?(env, "SECRET"),
-                          do: "password",
-                          else: "text"
-                      }
+                    <.secret_input
                       name={"env_overrides[#{env}]"}
+                      value={@deploy_env[env]}
+                      secret={sensitive_key?(env)}
+                      revealed={MapSet.member?(@revealed_env, env)}
+                      toggle="toggle_env_visibility"
+                      toggle_value={env}
+                      field_label={env}
                       required
                       placeholder={"Enter #{humanize_env(env)}"}
                       class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-1.5 px-2.5 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
@@ -1154,14 +1183,14 @@ defmodule HomelabWeb.CatalogLive do
                         <.icon name="hero-x-mark-mini" class="size-4" />
                       </button>
                     </div>
-                    <input
-                      type={
-                        if String.contains?(key, "PASSWORD") or String.contains?(key, "SECRET"),
-                          do: "password",
-                          else: "text"
-                      }
+                    <.secret_input
                       name={"env_overrides[#{key}]"}
-                      value={val}
+                      value={Map.get(@deploy_env, key, val)}
+                      secret={sensitive_key?(key)}
+                      revealed={MapSet.member?(@revealed_env, key)}
+                      toggle="toggle_env_visibility"
+                      toggle_value={key}
+                      field_label={key}
                       class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-1.5 px-2.5 placeholder:text-base-content/25 focus:ring-2 focus:ring-primary/50"
                     />
                   </div>
@@ -1318,22 +1347,25 @@ defmodule HomelabWeb.CatalogLive do
   end
 
   defp build_deploy_form(template) do
-    all_env_keys =
-      Map.keys(template.default_env || %{}) ++ (template.required_env || [])
-
-    env_defaults =
-      all_env_keys
-      |> Enum.uniq()
-      |> Enum.map(fn key ->
-        {key, Map.get(template.default_env || %{}, key, "")}
-      end)
-      |> Map.new()
-
     to_form(%{
       "tenant_id" => "",
       "domain" => "",
-      "env_overrides" => env_defaults
+      "env_overrides" => deploy_env(template)
     })
+  end
+
+  # The env values behind the inputs, held in assigns rather than left in the DOM.
+  # Revealing a secret, adding or removing a variable and background enrichment all
+  # re-render this form, and a value that existed only in the browser would be replaced
+  # by the template's default the moment any of them fired. `keep` carries the
+  # operator's edits across, for the keys the template still has.
+  defp deploy_env(template, keep \\ %{}) do
+    defaults =
+      (Map.keys(template.default_env || %{}) ++ (template.required_env || []))
+      |> Enum.uniq()
+      |> Map.new(fn key -> {key, Map.get(template.default_env || %{}, key, "")} end)
+
+    Map.merge(defaults, Map.take(keep, Map.keys(defaults)))
   end
 
   defp update_template_from_enrichment(template, enriched_entry) do
@@ -1639,6 +1671,11 @@ defmodule HomelabWeb.CatalogLive do
   defp app_icon("wireguard"), do: "hero-shield-check"
   defp app_icon("freshrss"), do: "hero-rss"
   defp app_icon(_), do: "hero-cube"
+
+  # `PASSWORD or SECRET` was a fourth, narrower copy of a rule Homelab.SecretKeys already
+  # owns — it left SMTP_PASS and DATABASE_URL rendering in plain text here while the
+  # deployment page masked them.
+  defp sensitive_key?(key), do: Homelab.SecretKeys.sensitive?(key)
 
   defp humanize_env(env_var) do
     env_var

@@ -333,6 +333,81 @@ defmodule HomelabWeb.CoreComponents do
     """
   end
 
+  @doc """
+  Renders an environment-variable value input with a reveal toggle.
+
+  A masked value is unreadable, and an operator often has no other copy of it — the
+  wizard and the compose import generate and detect these values without ever showing
+  them, so "is this the password the database actually got?" was a question you could
+  only answer by editing the input's `type` in devtools. The eye button answers it.
+
+  Reveal is server state, not a class the button flips, because these inputs live in
+  `phx-change` forms: every keystroke re-renders the row, and a patched attribute would
+  snap straight back to `password`. The caller therefore owns a set of revealed
+  identifiers and handles `toggle`, which arrives as `%{"secret" => toggle_value}`.
+
+  `secret` stays the caller's decision (`Homelab.SecretKeys.sensitive?/1` for a variable
+  name) so a plainly non-secret value renders as a bare input with no toggle to explain.
+
+  ## Examples
+
+      <.secret_input
+        name={"env[\#{idx}][value]"}
+        value={row["value"]}
+        secret={sensitive?(row["key"])}
+        revealed={idx in @revealed_env}
+        toggle="toggle_env_visibility"
+        toggle_value={idx}
+        field_label={row["key"]}
+        class="w-full rounded-lg bg-base-200 ..."
+      />
+  """
+  attr :name, :string, required: true
+  attr :value, :any, default: nil
+  attr :secret, :boolean, required: true, doc: "whether this value is masked at all"
+  attr :revealed, :boolean, default: false
+  attr :toggle, :string, required: true, doc: "the phx-click event the eye button pushes"
+
+  attr :toggle_value, :any,
+    required: true,
+    doc: "identifies the row to the handler; sent as `phx-value-secret`"
+
+  attr :field_label, :string, default: nil, doc: "variable name, to name the button for readers"
+  attr :class, :any, default: nil, doc: "classes for the input itself"
+  attr :wrapper_class, :any, default: nil, doc: "classes for the positioning wrapper"
+  attr :icon_class, :any, default: "size-4", doc: "sized to match the surrounding row"
+  attr :rest, :global, include: ~w(id placeholder required readonly disabled)
+
+  def secret_input(assigns) do
+    ~H"""
+    <div class={["relative", @wrapper_class]}>
+      <input
+        type={if @secret and not @revealed, do: "password", else: "text"}
+        name={@name}
+        value={@value}
+        class={[@class, @secret && "pr-9"]}
+        {@rest}
+      />
+      <button
+        :if={@secret}
+        type="button"
+        phx-click={@toggle}
+        phx-value-secret={@toggle_value}
+        aria-pressed={to_string(@revealed)}
+        aria-label={
+          if @revealed,
+            do: "Hide #{@field_label || "value"}",
+            else: "Show #{@field_label || "value"}"
+        }
+        title={if @revealed, do: "Hide value", else: "Show value"}
+        class="absolute inset-y-0 right-0 flex items-center px-2.5 text-base-content/30 hover:text-base-content/70 transition-colors cursor-pointer"
+      >
+        <.icon name={if @revealed, do: "hero-eye-slash", else: "hero-eye"} class={@icon_class} />
+      </button>
+    </div>
+    """
+  end
+
   # Helper used by inputs to generate form errors
   defp error(assigns) do
     ~H"""

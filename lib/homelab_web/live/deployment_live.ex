@@ -13,6 +13,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Backups
   alias Homelab.Networking.Hostname
   alias Homelab.Services.BackupScheduler
+  alias HomelabWeb.SecretReveal
 
   @log_poll_interval 3_000
 
@@ -31,6 +32,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:env_edit_mode, false)
       |> assign(:env_form, nil)
       |> assign(:env_rows, [])
+      |> assign(:revealed_env, MapSet.new())
       |> assign(:settings_edit_mode, false)
       |> assign(:settings_domain, "")
       |> assign(:settings_access, "proxy")
@@ -327,7 +329,8 @@ defmodule HomelabWeb.DeploymentLive do
      socket
      |> assign(:env_edit_mode, true)
      |> assign(:env_form, to_form(%{}))
-     |> assign(:env_rows, env_rows(merged_env(deployment)))}
+     |> assign(:env_rows, env_rows(merged_env(deployment)))
+     |> assign(:revealed_env, MapSet.new())}
   end
 
   def handle_event("cancel_env_edit", _params, socket) do
@@ -335,7 +338,8 @@ defmodule HomelabWeb.DeploymentLive do
      socket
      |> assign(:env_edit_mode, false)
      |> assign(:env_form, nil)
-     |> assign(:env_rows, [])}
+     |> assign(:env_rows, [])
+     |> assign(:revealed_env, MapSet.new())}
   end
 
   # Keep the rows in assigns as the user types, so add/remove don't discard edits.
@@ -351,8 +355,18 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   def handle_event("remove_env_var", %{"index" => idx}, socket) do
-    rows = List.delete_at(socket.assigns.env_rows, String.to_integer(idx))
-    {:noreply, assign(socket, :env_rows, rows)}
+    idx = String.to_integer(idx)
+    rows = List.delete_at(socket.assigns.env_rows, idx)
+
+    {:noreply,
+     socket
+     |> assign(:env_rows, rows)
+     |> assign(:revealed_env, SecretReveal.drop_index(socket.assigns.revealed_env, idx))}
+  end
+
+  def handle_event("toggle_env_visibility", %{"secret" => idx}, socket) do
+    {:noreply,
+     assign(socket, :revealed_env, SecretReveal.toggle(socket.assigns.revealed_env, idx))}
   end
 
   # A real submission carries the form's rows, its marker, or both. Anything arriving
@@ -2725,12 +2739,17 @@ defmodule HomelabWeb.DeploymentLive do
                     placeholder="VARIABLE"
                     class="w-2/5 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
-                  <input
-                    type={if secret_key?(row["key"]), do: "password", else: "text"}
+                  <.secret_input
                     name={"env[#{idx}][value]"}
                     value={row["value"]}
+                    secret={secret_key?(row["key"])}
+                    revealed={MapSet.member?(@revealed_env, idx)}
+                    toggle="toggle_env_visibility"
+                    toggle_value={idx}
+                    field_label={row["key"]}
                     placeholder="value"
-                    class="flex-1 rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    wrapper_class="flex-1"
+                    class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
                   />
                   <button
                     type="button"

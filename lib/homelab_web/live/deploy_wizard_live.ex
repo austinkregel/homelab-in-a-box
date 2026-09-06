@@ -14,6 +14,7 @@ defmodule HomelabWeb.DeployWizardLive do
   alias Homelab.Catalog.Enrichers.InfraDetector
   alias Homelab.Networking.Hostname
   alias Homelab.Tenants
+  alias HomelabWeb.SecretReveal
 
   @steps ~w(type app network config review)
 
@@ -50,6 +51,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:adv_cpu_shares, "")
       |> assign(:adv_routed_port, "")
       |> assign(:adv_sticky, false)
+      |> assign(:adv_backend_scheme, "http")
       |> assign(:adv_restart_policy, "on-failure")
       # Kernel privileges, at CREATE time. An app that needs NET_ADMIN or a device to
       # function at all cannot be deployed first and fixed afterwards — it fails its
@@ -73,6 +75,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign(:ports, [])
       |> assign(:volumes, [])
       |> assign(:env_vars, [])
+      |> assign(:revealed_env, MapSet.new())
       |> assign(:db_suggestions, [])
       |> assign(:infra_suggestions, [])
       |> assign(:view_mode, :form)
@@ -377,6 +380,7 @@ defmodule HomelabWeb.DeployWizardLive do
      |> assign(:adv_routed_port, advanced["routed_port"] || "")
      |> assign(:adv_restart_policy, advanced["restart_policy"] || "on-failure")
      |> assign(:adv_sticky, advanced["sticky"] == "true")
+     |> assign(:adv_backend_scheme, advanced["backend_scheme"] || "http")
      |> assign(:adv_capabilities_add, advanced["capabilities_add"] || "")
      |> assign(:adv_devices, advanced["devices"] || "")
      |> assign(:adv_sysctls, advanced["sysctls"] || "")}
@@ -480,8 +484,18 @@ defmodule HomelabWeb.DeployWizardLive do
   end
 
   def handle_event("remove_env_var", %{"index" => idx}, socket) do
-    env_vars = List.delete_at(socket.assigns.env_vars, String.to_integer(idx))
-    {:noreply, assign(socket, :env_vars, env_vars)}
+    idx = String.to_integer(idx)
+    env_vars = List.delete_at(socket.assigns.env_vars, idx)
+
+    {:noreply,
+     socket
+     |> assign(:env_vars, env_vars)
+     |> assign(:revealed_env, SecretReveal.drop_index(socket.assigns.revealed_env, idx))}
+  end
+
+  def handle_event("toggle_env_visibility", %{"secret" => idx}, socket) do
+    {:noreply,
+     assign(socket, :revealed_env, SecretReveal.toggle(socket.assigns.revealed_env, idx))}
   end
 
   # --- Events: Database suggestions ---
@@ -1386,6 +1400,7 @@ defmodule HomelabWeb.DeployWizardLive do
             adv_routed_port={@adv_routed_port}
             adv_restart_policy={@adv_restart_policy}
             adv_sticky={@adv_sticky}
+            adv_backend_scheme={@adv_backend_scheme}
             adv_capabilities_add={@adv_capabilities_add}
             adv_devices={@adv_devices}
             adv_sysctls={@adv_sysctls}
@@ -1435,6 +1450,7 @@ defmodule HomelabWeb.DeployWizardLive do
               adv_routed_port={@adv_routed_port}
               volumes={@volumes}
               env_vars={@env_vars}
+              revealed_env={@revealed_env}
               db_suggestions={@db_suggestions}
               infra_suggestions={@infra_suggestions}
               compose_services={@compose_services}
@@ -1449,6 +1465,7 @@ defmodule HomelabWeb.DeployWizardLive do
               ports={@ports}
               volumes={@volumes}
               env_vars={@env_vars}
+              revealed_env={@revealed_env}
               domain={@domain}
               exposure_mode={@exposure_mode}
               tenant_id={@tenant_id}
@@ -1459,6 +1476,7 @@ defmodule HomelabWeb.DeployWizardLive do
               adv_routed_port={@adv_routed_port}
               adv_restart_policy={@adv_restart_policy}
               adv_sticky={@adv_sticky}
+              adv_backend_scheme={@adv_backend_scheme}
               adv_capabilities_add={@adv_capabilities_add}
               adv_devices={@adv_devices}
               adv_sysctls={@adv_sysctls}
@@ -2285,11 +2303,16 @@ defmodule HomelabWeb.DeployWizardLive do
                     placeholder="VARIABLE_NAME"
                     class="w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono font-medium text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
                   />
-                  <input
-                    type={if(sensitive_key?(env["key"]), do: "password", else: "text")}
+                  <.secret_input
                     name={"env[#{idx}][value]"}
                     value={env["value"]}
+                    secret={sensitive_key?(env["key"])}
+                    revealed={MapSet.member?(@revealed_env, idx)}
+                    toggle="toggle_env_visibility"
+                    toggle_value={idx}
+                    field_label={env["key"]}
                     placeholder={if(env["required"], do: "Required", else: "")}
+                    icon_class="size-3.5"
                     class={[
                       "w-full rounded-md bg-base-200/60 border-0 text-[11px] font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50",
                       if(env["required"] && (env["value"] == nil || env["value"] == ""),
@@ -2876,6 +2899,7 @@ defmodule HomelabWeb.DeployWizardLive do
   attr :routed_port, :string, required: true
   attr :restart_policy, :string, required: true
   attr :sticky, :boolean, required: true
+  attr :backend_scheme, :string, required: true
   attr :capabilities_add, :string, required: true
   attr :devices, :string, required: true
   attr :sysctls, :string, required: true
@@ -2954,6 +2978,26 @@ defmodule HomelabWeb.DeployWizardLive do
             </option>
           </select>
         </div>
+        <div class="flex flex-col gap-1 sm:col-span-2">
+          <label class="text-xs font-medium text-base-content/50">Backend protocol</label>
+          <select
+            name="advanced[backend_scheme]"
+            class="rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
+          >
+            <option value="http" selected={@backend_scheme != "https"}>
+              HTTP — the proxy terminates TLS
+            </option>
+            <option value="https" selected={@backend_scheme == "https"}>
+              HTTPS — the container serves TLS itself
+            </option>
+          </select>
+          <p class="text-[10px] text-base-content/40 leading-snug">
+            How Traefik reaches the container, not how browsers reach the app. Pick HTTPS for
+            an app that terminates TLS itself — code-server, a Unifi controller, anything run
+            with <code>--cert</code> — which answers a plaintext request with 400.
+          </p>
+        </div>
+
         <label class="flex items-center gap-2 text-sm text-base-content/70 sm:col-span-2">
           <input type="hidden" name="advanced[sticky]" value="false" />
           <input
@@ -3041,6 +3085,7 @@ defmodule HomelabWeb.DeployWizardLive do
         routed_port={@adv_routed_port}
         restart_policy={@adv_restart_policy}
         sticky={@adv_sticky}
+        backend_scheme={@adv_backend_scheme}
         capabilities_add={@adv_capabilities_add}
         devices={@adv_devices}
         sysctls={@adv_sysctls}
@@ -3226,15 +3271,28 @@ defmodule HomelabWeb.DeployWizardLive do
                 <input type="hidden" name={"env_overrides[#{env["key"]}]"} value={env["value"] || ""} />
                 <span class="font-mono font-medium text-base-content/60">{env["key"]}</span>
                 <span class="text-base-content/20">=</span>
+                <% secret? = sensitive_key?(env["key"]) %>
+                <% shown? = not secret? or MapSet.member?(@revealed_env, idx) %>
                 <span class={[
                   "font-mono truncate max-w-xs",
-                  if(sensitive_key?(env["key"]),
-                    do: "text-base-content/20",
-                    else: "text-base-content/50"
-                  )
+                  if(shown?, do: "text-base-content/50", else: "text-base-content/20")
                 ]}>
-                  {if(sensitive_key?(env["key"]), do: "••••••", else: env["value"] || "")}
+                  {if(shown?, do: env["value"] || "", else: Homelab.SecretKeys.mask())}
                 </span>
+                <%!-- This is the last screen before the value is written into a container,
+                     and it is the one an operator reads to check that the password the
+                     wizard generated is the password the database is about to get. --%>
+                <button
+                  :if={secret?}
+                  type="button"
+                  phx-click="toggle_env_visibility"
+                  phx-value-secret={idx}
+                  aria-pressed={to_string(shown?)}
+                  aria-label={if(shown?, do: "Hide #{env["key"]}", else: "Show #{env["key"]}")}
+                  class="text-base-content/25 hover:text-base-content/60 transition-colors cursor-pointer"
+                >
+                  <.icon name={if(shown?, do: "hero-eye-slash", else: "hero-eye")} class="size-3" />
+                </button>
               </div>
             </div>
             <p :if={@env_vars == []} class="text-[11px] text-base-content/30 italic">
@@ -3351,6 +3409,7 @@ defmodule HomelabWeb.DeployWizardLive do
           routed_port={@adv_routed_port}
           restart_policy={@adv_restart_policy}
           sticky={@adv_sticky}
+          backend_scheme={@adv_backend_scheme}
           capabilities_add={@adv_capabilities_add}
           devices={@adv_devices}
           sysctls={@adv_sysctls}
@@ -3832,7 +3891,7 @@ defmodule HomelabWeb.DeployWizardLive do
         else: socket.assigns.adv_restart_policy
       )
     )
-    |> put_if(:proxy_options, if(socket.assigns.adv_sticky, do: %{"sticky" => true}))
+    |> put_if(:proxy_options, wizard_proxy_options(socket.assigns))
     # Left absent when blank rather than stored as [], so the template still wins —
     # same rule the rest of this function follows. An operator who wants to CLEAR what
     # the template grants does it on the Runtime card, which can express [].
@@ -3845,6 +3904,18 @@ defmodule HomelabWeb.DeployWizardLive do
       blank_to_nil_list(parse_device_lines(socket.assigns.adv_devices))
     )
     |> put_if(:sysctls_override, blank_to_nil_map(parse_sysctl_lines(socket.assigns.adv_sysctls)))
+  end
+
+  # `nil` when neither option was touched, so `put_if/3` leaves `proxy_options` out
+  # entirely and the deployment keeps the schema default — the shape this had when sticky
+  # was the only option. Writing `%{"backend_scheme" => "http"}` unconditionally would
+  # instead make every wizard deploy carry a proxy_options map saying nothing.
+  defp wizard_proxy_options(%{adv_sticky: false, adv_backend_scheme: scheme})
+       when scheme != "https",
+       do: nil
+
+  defp wizard_proxy_options(assigns) do
+    %{"sticky" => assigns.adv_sticky, "backend_scheme" => assigns.adv_backend_scheme}
   end
 
   # `/dev/net/tun` or `/dev/sda:/dev/xvda:rw`, one per line — the compose spelling, so
