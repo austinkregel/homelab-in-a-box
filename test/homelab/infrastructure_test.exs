@@ -28,6 +28,26 @@ defmodule Homelab.InfrastructureTest do
     end
   end
 
+  describe "internal_tls_yaml/0" do
+    test "defines the transport the HTTPS-backend label names" do
+      yaml = Infrastructure.internal_tls_yaml()
+
+      assert yaml =~ "serversTransports:"
+      assert yaml =~ "insecureSkipVerify: true"
+    end
+
+    # The label and the definition are two halves of one name, written in two modules. A
+    # service naming a transport the file provider does not define is an errored service,
+    # so a rename on either side has to fail here rather than in Traefik's log.
+    test "the name the labels reference is the name this file defines" do
+      transport = Infrastructure.internal_tls_transport()
+      assert String.ends_with?(transport, "@file")
+
+      name = String.trim_trailing(transport, "@file")
+      assert Infrastructure.internal_tls_yaml() =~ "    #{name}:"
+    end
+  end
+
   # async: false would be needed to mutate app env; these two only read the override
   # they set and restore, and no other test in this file touches :containerized.
   describe "containerized?/0" do

@@ -212,7 +212,8 @@ defmodule Homelab.Deployments.SpecBuilder do
         health_check:
           build_health_check(
             Access.effective_health_check(deployment),
-            routed_port(deployment)
+            routed_port(deployment),
+            backend_scheme(deployment)
           )
       }
 
@@ -294,18 +295,23 @@ defmodule Homelab.Deployments.SpecBuilder do
   running-and-stable readiness window. Never guesses an HTTP probe.
   """
   def declares_healthcheck?(%{health_check: hc}), do: declares_healthcheck?(hc)
-  def declares_healthcheck?(hc) when is_map(hc), do: health_test(hc, nil) != nil
+  def declares_healthcheck?(hc) when is_map(hc), do: health_test(hc, nil, "http") != nil
   def declares_healthcheck?(_), do: false
 
   @doc """
   Builds a Docker `Healthcheck` payload from a declared healthcheck map, or `nil`
   when none is declared. HTTP `path` checks become a `wget`/`curl` probe against
   the routed port; `test`/`command` checks pass through.
+
+  `scheme` is the deployment's `backend_scheme/1`. A path probe that assumed plaintext
+  against a TLS-terminating app got the same `400 Bad Request` Traefik did, one layer
+  down and reported as an unhealthy container — so an operator who fixed their routing
+  would watch the deployment fail anyway, for what looks like an unrelated reason.
   """
-  def build_health_check(health_check, port) do
+  def build_health_check(health_check, port, scheme \\ "http") do
     hc = health_check || %{}
 
-    case health_test(hc, port) do
+    case health_test(hc, port, scheme) do
       nil ->
         nil
 
@@ -320,7 +326,7 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
-  defp health_test(hc, port) do
+  defp health_test(hc, port, scheme) do
     cond do
       is_list(hc["test"]) and hc["test"] != [] ->
         hc["test"]
@@ -329,11 +335,12 @@ defmodule Homelab.Deployments.SpecBuilder do
         ["CMD-SHELL", hc["command"]]
 
       is_binary(hc["path"]) and hc["path"] != "" and not is_nil(port) ->
-        url = "http://localhost:#{port}#{hc["path"]}"
+        url = "#{scheme}://localhost:#{port}#{hc["path"]}"
 
         [
           "CMD-SHELL",
-          "wget -qO- #{url} >/dev/null 2>&1 || curl -fsS #{url} >/dev/null 2>&1 || exit 1"
+          "wget -qO- #{probe_flags(scheme, :wget)}#{url} >/dev/null 2>&1 || " <>
+            "curl -fsS #{probe_flags(scheme, :curl)}#{url} >/dev/null 2>&1 || exit 1"
         ]
 
       is_binary(hc["path"]) and hc["path"] != "" ->
@@ -344,6 +351,13 @@ defmodule Homelab.Deployments.SpecBuilder do
         nil
     end
   end
+
+  # The probe dials `localhost`, so a certificate issued for the app's real hostname
+  # never matches it and a self-signed one has no chain to follow. Same hop, same
+  # reasoning as the proxy's transport — there is nothing here to verify.
+  defp probe_flags("https", :wget), do: "--no-check-certificate "
+  defp probe_flags("https", :curl), do: "-k "
+  defp probe_flags(_scheme, _tool), do: ""
 
   defp seconds_to_ns(seconds) when is_integer(seconds), do: seconds * 1_000_000_000
   defp seconds_to_ns(_), do: 30_000_000_000
@@ -727,11 +741,11 @@ defmodule Homelab.Deployments.SpecBuilder do
       # rejects the whole workload and the app loses its WORKING route too. Emitting it
       # unconditionally means adding a route can never break the route that already
       # worked.
-      "traefik.http.routers.#{router}.service" => router,
-      "traefik.http.services.#{router}.loadbalancer.server.port" => to_string(port)
+      "traefik.http.routers.#{router}.service" => router
     }
 
     base
+    |> Map.merge(backend_labels(router, to_string(port), backend_scheme(deployment)))
     |> Map.merge(wildcard_cert_labels(router, domain))
     |> Map.merge(exposure_middleware_labels(router, exposure))
     |> Map.merge(sticky_labels(router, deployment))
@@ -826,6 +840,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   """
   def extra_route_labels(deployment, router, domain) do
     exposure = to_string(Access.effective_exposure(deployment))
+    scheme = backend_scheme(deployment)
 
     deployment
     |> Map.get(:extra_routes)
@@ -845,9 +860,9 @@ defmodule Homelab.Deployments.SpecBuilder do
           {"traefik.http.routers.#{name}.entrypoints", "web,websecure"},
           {"traefik.http.routers.#{name}.tls", "true"},
           {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
-          {"traefik.http.routers.#{name}.service", name},
-          {"traefik.http.services.#{name}.loadbalancer.server.port", to_string(port)}
+          {"traefik.http.routers.#{name}.service", name}
         ] ++
+          Map.to_list(backend_labels(name, to_string(port), scheme)) ++
           Map.to_list(router_middleware_labels(name, router, exposure)) ++
           Map.to_list(wildcard_cert_labels(name, domain))
       else
@@ -886,6 +901,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   def additional_domain_labels(deployment, base_router) do
     exposure = to_string(Access.effective_exposure(deployment))
     default_port = routed_port(deployment)
+    scheme = backend_scheme(deployment)
 
     deployment
     |> Map.get(:additional_domains)
@@ -908,9 +924,9 @@ defmodule Homelab.Deployments.SpecBuilder do
           {"traefik.http.routers.#{name}.entrypoints", "web,websecure"},
           {"traefik.http.routers.#{name}.tls", "true"},
           {"traefik.http.routers.#{name}.tls.certresolver", "letsencrypt"},
-          {"traefik.http.routers.#{name}.service", name},
-          {"traefik.http.services.#{name}.loadbalancer.server.port", backend}
+          {"traefik.http.routers.#{name}.service", name}
         ] ++
+          Map.to_list(backend_labels(name, backend, scheme)) ++
           Map.to_list(router_middleware_labels(name, base_router, exposure)) ++
           Map.to_list(wildcard_cert_labels(name, host))
       else
@@ -1030,6 +1046,53 @@ defmodule Homelab.Deployments.SpecBuilder do
   defp exposure_middleware_definitions(_router, "service"), do: %{}
 
   defp exposure_middleware_definitions(_router, _public), do: %{}
+
+  @doc """
+  Which protocol Traefik speaks to this deployment's containers: `"http"` or `"https"`.
+
+  Plaintext is the default and the overwhelming majority — a containerised app usually
+  lets the proxy in front of it terminate TLS. Some do not: code-server, a Unifi
+  controller and anything started with a `--cert` flag serve TLS on their own port and
+  answer a plaintext request with `400 Bad Request`. That 400 is the whole reason this
+  setting exists, and it is unreadable from the outside — the route is up, the port is
+  right, the container is healthy, and the browser gets a 400 with no explanation.
+
+  A DECISION, like `routed_port/1`, never a guess. A backend's protocol cannot be
+  inferred from its port (8443 is a convention, not a promise) and probing it at deploy
+  time would answer for the container running now rather than the one the spec builds.
+  """
+  @spec backend_scheme(Deployment.t()) :: String.t()
+  def backend_scheme(%Deployment{proxy_options: %{"backend_scheme" => "https"}}), do: "https"
+  def backend_scheme(_deployment), do: "http"
+
+  # Everything a router's SERVICE needs to reach the container: the port, and — only when
+  # the backend speaks TLS — the scheme and the transport that makes it work.
+  #
+  # One function, called by all three of the places that emit a service, because a
+  # deployment whose base route reaches an HTTPS backend has no route that reaches a
+  # plaintext one: it is one container, and the extra paths and host aliases land on the
+  # same server. Splitting the scheme across the three emitters is how the base route
+  # ends up fixed and the websocket path left answering 400.
+  #
+  # `scheme` is omitted rather than written as `http` when it is plaintext, so an
+  # existing deployment's labels do not all change the first time this ships — a label
+  # diff is what decides whether a container gets recreated.
+  defp backend_labels(service, port, "https") do
+    %{
+      "traefik.http.services.#{service}.loadbalancer.server.port" => port,
+      "traefik.http.services.#{service}.loadbalancer.server.scheme" => "https",
+      # Without this the 400 becomes a 500: the backend's certificate is self-signed and
+      # names something other than the container Traefik dialled. See
+      # `Homelab.Infrastructure.ensure_internal_tls_transport/0` for why there is nothing
+      # to verify on this hop.
+      "traefik.http.services.#{service}.loadbalancer.serverstransport" =>
+        Homelab.Infrastructure.internal_tls_transport()
+    }
+  end
+
+  defp backend_labels(service, port, _http) do
+    %{"traefik.http.services.#{service}.loadbalancer.server.port" => port}
+  end
 
   @doc """
   The container port the proxy forwards to, and the port an HTTP healthcheck probes.

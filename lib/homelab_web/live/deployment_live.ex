@@ -49,6 +49,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:gpu_advertised_kinds, [])
       |> assign(:settings_health_path, "")
       |> assign(:settings_sticky, false)
+      |> assign(:settings_backend_scheme, "http")
       |> assign(:settings_routed_port, nil)
       |> assign(:runtime_edit_mode, false)
       |> assign(:runtime_restart_policy, "on-failure")
@@ -557,6 +558,7 @@ defmodule HomelabWeb.DeploymentLive do
      |> assign_gpu_settings(limits)
      |> assign(:settings_health_path, health["path"] || "")
      |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)
+     |> assign(:settings_backend_scheme, SpecBuilder.backend_scheme(deployment))
      |> assign(
        :settings_network_parent_id,
        deployment.network_parent_id && to_string(deployment.network_parent_id)
@@ -588,6 +590,10 @@ defmodule HomelabWeb.DeploymentLive do
        domains_from_params(settings["domains"])
      )
      |> assign(:settings_sticky, settings["sticky"] == "true")
+     |> assign(
+       :settings_backend_scheme,
+       settings["backend_scheme"] || socket.assigns.settings_backend_scheme
+     )
      |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
      |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
      # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
@@ -2276,6 +2282,34 @@ defmodule HomelabWeb.DeploymentLive do
                     </div>
                   </div>
 
+                  <div class="space-y-1">
+                    <label
+                      for="settings-backend-scheme"
+                      class="text-xs font-medium text-base-content"
+                    >
+                      Backend protocol
+                    </label>
+                    <select
+                      id="settings-backend-scheme"
+                      name="settings[backend_scheme]"
+                      class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="http" selected={@settings_backend_scheme != "https"}>
+                        HTTP — the proxy terminates TLS (almost every app)
+                      </option>
+                      <option value="https" selected={@settings_backend_scheme == "https"}>
+                        HTTPS — the container serves TLS itself
+                      </option>
+                    </select>
+                    <p class="text-[10px] text-base-content/40 leading-snug">
+                      How Traefik talks to the container, not how browsers reach it — the
+                      public side is HTTPS either way. An app that terminates TLS itself
+                      (code-server, a Unifi controller, anything started with <code>--cert</code>) answers a plaintext request with <span class="font-mono">400 Bad Request</span>.
+                      The certificate is not verified on this hop: it is a container name on a
+                      private network, and nothing issues certificates for those.
+                    </p>
+                  </div>
+
                   <label class="flex items-start gap-2 cursor-pointer">
                     <input type="hidden" name="settings[sticky]" value="false" />
                     <input
@@ -3741,8 +3775,21 @@ defmodule HomelabWeb.DeploymentLive do
   # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
   # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
   # different container drops the session.
-  defp proxy_options(settings, "proxy"), do: %{"sticky" => settings["sticky"] == "true"}
+  defp proxy_options(settings, "proxy") do
+    %{
+      "sticky" => settings["sticky"] == "true",
+      "backend_scheme" => backend_scheme_param(settings["backend_scheme"])
+    }
+  end
+
   defp proxy_options(_settings, _access), do: %{}
+
+  # The select posts one of two values, but a stale tab or a hand-built payload can post
+  # anything -- and "anything" would fail the changeset's validation rather than quietly
+  # meaning plaintext, taking the whole settings save with it. Everything unrecognised is
+  # the default here, and only the deliberate choice survives.
+  defp backend_scheme_param("https"), do: "https"
+  defp backend_scheme_param(_value), do: "http"
 
   defp blank_to_nil(v) when v in [nil, ""], do: nil
   defp blank_to_nil(v), do: v

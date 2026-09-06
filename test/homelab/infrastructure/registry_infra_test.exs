@@ -46,6 +46,11 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
           {:error, {:not_found, %{}}}
       end)
 
+      # `ensure_traefik/0` drops the internal-TLS serversTransport into the proxy's
+      # dynamic dir on both sides of the recreate. Incidental to what this test reads
+      # (the Cmd), but it is a real Docker call and Mox has to know about it.
+      stub(Homelab.Mocks.DockerClient, :upload_archive, fn _name, _path, _tar -> :ok end)
+
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
@@ -102,6 +107,11 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, {:not_found, %{}}} end)
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
+      # `ensure_traefik/0` drops the internal-TLS serversTransport into the proxy's
+      # dynamic dir on both sides of the recreate. Incidental to what this test reads
+      # (the Cmd), but it is a real Docker call and Mox has to know about it.
+      stub(Homelab.Mocks.DockerClient, :upload_archive, fn _name, _path, _tar -> :ok end)
+
       stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
         cond do
           path == "/containers/create?name=homelab-traefik" ->
@@ -147,6 +157,11 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       end)
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      # `ensure_traefik/0` drops the internal-TLS serversTransport into the proxy's
+      # dynamic dir on both sides of the recreate. Incidental to what this test reads
+      # (the Cmd), but it is a real Docker call and Mox has to know about it.
+      stub(Homelab.Mocks.DockerClient, :upload_archive, fn _name, _path, _tar -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :delete, fn path, _opts ->
         send(test_pid, {:deleted, path})
