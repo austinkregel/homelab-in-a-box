@@ -31,6 +31,9 @@ defmodule HomelabWeb.SharedTemplateRewriteTest do
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
     |> stub(:list_services, fn -> {:ok, []} end)
+    # The wizard's config step reads the host's volumes to suggest names for a
+    # managed volume row.
+    |> stub(:list_volumes, fn -> {:ok, []} end)
     |> stub(:get_service, fn _id -> {:error, :not_found} end)
 
     %{tenant: insert(:tenant)}

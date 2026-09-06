@@ -26,6 +26,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
     |> stub(:display_name, fn -> "Docker" end)
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
+    # The Volumes editor reads the host's volumes to suggest names for a managed row;
+    # the test about that list overrides this with volumes of its own.
+    |> stub(:list_volumes, fn -> {:ok, []} end)
     # Config edits (env/settings) recreate the container; tests that assert the
     # exact recreate calls override these with `expect`.
     |> stub(:undeploy, fn _id -> :ok end)
@@ -777,6 +780,63 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "/data"
     end
 
+    # The name column read `description || container_path`, and "" is truthy, so a volume
+    # with an empty description — which is every volume the wizard writes — rendered a
+    # blank cell.
+    test "names the volume a row actually mounts", %{conn: conn, tenant: tenant} do
+      template =
+        insert(:app_template,
+          slug: "plex",
+          volumes: [
+            %{"container_path" => "/music", "source" => "homelab-media-plex-music"},
+            %{"container_path" => "/config", "description" => ""}
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_5"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "volumes"})
+
+      assert html =~ "homelab-media-plex-music"
+      # The one with no name of its own is shown under the name it will be given.
+      assert html =~ "homelab-#{tenant.slug}-plex-config"
+    end
+
+    # Read-only was visible only inside the editor, so the tab could not answer "can this
+    # app write to that library" without clicking Edit.
+    test "marks a read-only mount in the list", %{conn: conn, tenant: tenant} do
+      template =
+        insert(:app_template,
+          volumes: [
+            %{
+              "container_path" => "/music",
+              "source" => "homelab-media-plex-music",
+              "read_only" => true
+            }
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_6"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "volumes"})
+
+      assert html =~ "read-only"
+    end
+
     test "shows no volumes message for template without volumes", %{
       conn: conn,
       tenant: tenant
@@ -875,6 +935,89 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
       assert vol["source"] == "homelab-managed-pg-var-lib-postgresql-data"
+    end
+
+    # The test above submits params it wrote itself, so it proved the HANDLER keeps the
+    # name — while the form rendered no field to carry it, and the name was lost on the
+    # way in. This one submits the form as the browser would.
+    test "keeps a managed volume's source name through the rendered form", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn -> {:ok, []} end)
+
+      template =
+        insert(:app_template,
+          volumes: [
+            %{
+              "container_path" => "/var/lib/postgresql/data",
+              "source" => "homelab-managed-pg-var-lib-postgresql-data",
+              "type" => "volume"
+            }
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_4"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      view |> form("#volumes-form") |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == "homelab-managed-pg-var-lib-postgresql-data"
+    end
+
+    test "offers the volumes on the host as names for a managed row", %{
+      conn: conn,
+      deployment: dep
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "homelab-media-plex-music", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      html = render_click(view, "start_volumes_edit", %{})
+
+      assert html =~ ~s(<datalist id="known-volumes">)
+      assert html =~ "homelab-media-plex-music"
+    end
+
+    # Any volume on this host may go into any deployment — one library serving several
+    # apps is the point of naming it here rather than only on the storage page.
+    test "mounts an existing volume named in the form", %{conn: conn, deployment: dep} do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "homelab-media-plex-music", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      view
+      |> form("#volumes-form",
+        volumes: %{
+          "0" => %{
+            "type" => "volume",
+            "source" => "homelab-media-plex-music",
+            "container_path" => "/music",
+            "read_only" => "true"
+          }
+        }
+      )
+      |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == "homelab-media-plex-music"
+      assert vol["read_only"] == true
     end
   end
 

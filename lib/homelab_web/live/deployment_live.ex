@@ -13,6 +13,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Backups
   alias Homelab.Networking.Hostname
   alias Homelab.Services.BackupScheduler
+  alias Homelab.Storage
   alias HomelabWeb.SecretReveal
 
   @log_poll_interval 3_000
@@ -42,6 +43,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:settings_additional_domains, [])
       |> assign(:volumes_edit_mode, false)
       |> assign(:volumes_rows, [])
+      |> assign(:known_volumes, [])
       |> assign(:settings_memory_mb, "")
       |> assign(:settings_cpu_shares, "")
       |> assign(:settings_gpu_vendor, "")
@@ -629,10 +631,14 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("start_volumes_edit", _params, socket) do
     rows = volume_rows(Access.effective_volumes(socket.assigns.deployment))
 
+    # The daemon's volume list is read when the editor OPENS, not on mount: it is only
+    # ever needed to suggest names in this one form, and every other tab on the page
+    # would pay for it.
     {:noreply,
      socket
      |> assign(:volumes_edit_mode, true)
-     |> assign(:volumes_rows, rows)}
+     |> assign(:volumes_rows, rows)
+     |> assign(:known_volumes, Storage.volume_names())}
   end
 
   def handle_event("cancel_volumes_edit", _params, socket) do
@@ -2815,15 +2821,22 @@ defmodule HomelabWeb.DeploymentLive do
                   <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
                   <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
                 </select>
+                <%!-- The source is editable for a MANAGED volume too, not only a bind.
+                      Rendering it for binds alone meant a managed row posted no source
+                      at all: the name of an adopted volume — or of one attached from the
+                      storage page — was dropped on the next save of this form, and
+                      SpecBuilder derived a synthetic name in its place, mounting an empty
+                      volume next to the real data. It is also what puts an existing
+                      volume within reach here, rather than only on the storage page. --%>
                 <input
-                  :if={vol["type"] == "bind"}
                   type="text"
                   name={"volumes[#{idx}][source]"}
                   value={vol["source"]}
-                  placeholder="/home/you/.homelab/app/data"
+                  list={vol["type"] != "bind" && "known-volumes"}
+                  placeholder={volume_source_placeholder(vol, @deployment)}
                   class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
                 />
-                <span :if={vol["type"] == "bind"} class="text-[10px] text-base-content/40">→</span>
+                <span class="text-[10px] text-base-content/40">→</span>
                 <input
                   type="text"
                   name={"volumes[#{idx}][container_path]"}
@@ -2866,6 +2879,13 @@ defmodule HomelabWeb.DeploymentLive do
                 </button>
               </div>
 
+              <%!-- Every volume the daemon has, offered to each managed row's name field.
+                    One list for the whole form: a datalist is referenced by id, so the
+                    rows share it rather than each repeating the host's volumes. --%>
+              <datalist id="known-volumes">
+                <option :for={name <- @known_volumes} value={name}></option>
+              </datalist>
+
               <button
                 type="button"
                 phx-click="add_volume"
@@ -2877,9 +2897,12 @@ defmodule HomelabWeb.DeploymentLive do
               <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2">
                 <p class="text-[11px] text-base-content/70 leading-snug">
                   <strong>Managed</strong>
-                  — Docker owns the data in a named volume. Its name is derived from the mount
-                  path, so <strong>changing that path does not move the data</strong>: it mounts
-                  a new, empty volume and leaves the old one behind.
+                  — Docker owns the data in a named volume. Name an existing volume to mount
+                  it here — any volume on this host can go into any deployment, which is how
+                  one media library serves several apps. Leave the name blank and one is
+                  derived from the mount path, so <strong>changing that path does not move
+                  the data</strong>: it mounts a new, empty volume and leaves the old one
+                  behind.
                 </p>
                 <p class="text-[11px] text-base-content/70 leading-snug">
                   <strong>Folder</strong>
@@ -2907,15 +2930,35 @@ defmodule HomelabWeb.DeploymentLive do
                 </tr>
               </thead>
               <tbody>
+                <%!-- The name column read `description || container_path`, and a volume
+                      whose description is "" — which is every volume the wizard and the
+                      storage page write — took the empty string, since "" is truthy. The
+                      column was blank for every row on the page. It now says what is
+                      actually mounted: the volume's name, or the host path for a folder
+                      mount, deriving the name the same way SpecBuilder will when the row
+                      does not carry one. --%>
                 <tr
                   :for={vol <- Access.effective_volumes(@deployment)}
                   class="border-b border-base-content/5"
                 >
                   <td class="py-2 font-mono text-base-content/70">
-                    {vol["description"] || vol["container_path"] || "—"}
+                    {volume_source_name(vol, @deployment)}
+                    <span
+                      :if={vol["description"] not in [nil, ""]}
+                      class="ml-2 font-sans text-xs text-base-content/40"
+                    >
+                      {vol["description"]}
+                    </span>
                   </td>
                   <td class="py-2 font-mono text-base-content">
                     {vol["container_path"] || vol["target"] || "—"}
+                    <span
+                      :if={vol["read_only"] == true}
+                      class="ml-2 font-sans text-xs text-base-content/40"
+                      title="The container cannot write through this mount"
+                    >
+                      read-only
+                    </span>
                   </td>
                 </tr>
               </tbody>
@@ -3641,6 +3684,32 @@ defmodule HomelabWeb.DeploymentLive do
   defp volume_rows(volumes), do: VolumeSpec.parse_rows(List.wrap(volumes))
 
   defp volume_rows_from_params(params), do: VolumeSpec.parse_rows(params)
+
+  # What is actually mounted at a row: the name it carries, or — for a managed row that
+  # carries none — the name SpecBuilder will derive, through SpecBuilder itself so the
+  # page cannot show a name the deployment does not use.
+  defp volume_source_name(vol, deployment) do
+    case vol["source"] do
+      source when is_binary(source) and source != "" -> source
+      _ -> derived_volume_name(deployment, vol["container_path"] || vol["path"]) || "—"
+    end
+  end
+
+  # The placeholder is the derived name rather than a generic hint, so a blank field
+  # says which volume leaving it blank will mount.
+  defp volume_source_placeholder(%{"type" => "bind"}, _deployment),
+    do: "/home/you/.homelab/app/data"
+
+  defp volume_source_placeholder(vol, deployment) do
+    derived_volume_name(deployment, vol["container_path"]) || "named after this deployment"
+  end
+
+  defp derived_volume_name(%{tenant: %{slug: tenant_slug}, app_template: %{slug: app_slug}}, path)
+       when is_binary(path) and path != "" do
+    SpecBuilder.volume_name(tenant_slug, app_slug, path)
+  end
+
+  defp derived_volume_name(_deployment, _path), do: nil
 
   # Extra path routes, as the form holds them (strings) and as the DB holds them (a
   # path plus an integer port).
