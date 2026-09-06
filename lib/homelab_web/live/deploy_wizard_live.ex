@@ -908,7 +908,7 @@ defmodule HomelabWeb.DeployWizardLive do
 
       env_overrides = build_env_overrides(params)
       ports = parse_port_params(params["ports"])
-      volumes = parse_volume_params(params["volumes"])
+      volumes = parse_volume_params(params["volumes"], socket, template)
 
       template_updates =
         %{
@@ -962,7 +962,7 @@ defmodule HomelabWeb.DeployWizardLive do
       main_template = socket.assigns.selected_template
       env_overrides = build_env_overrides(params)
       ports = parse_port_params(params["ports"])
-      volumes = parse_volume_params(params["volumes"])
+      volumes = parse_volume_params(params["volumes"], socket, main_template)
 
       # The config step edits a FLATTENED, deduped view of every service's ports, volumes
       # and env — and this handler used to read each service's RAW parsed values instead,
@@ -2204,6 +2204,11 @@ defmodule HomelabWeb.DeployWizardLive do
                     >
                       Volume {idx + 1}
                     </span>
+                    <input
+                      type="hidden"
+                      name={"volumes[#{idx}][borrowed]"}
+                      value={to_string(vol["borrowed"] == true)}
+                    />
                     <%!-- Whether the container may write through this mount, decided at
                           DEPLOY time. There was no control here at all, so every mount
                           came up writable — including a compose service that declared
@@ -2290,13 +2295,29 @@ defmodule HomelabWeb.DeployWizardLive do
                     it is. Must be an absolute path: Docker reads a bare name as a named
                     volume and would mount an empty one instead.
                   </p>
+                  <%!-- The two answers a typed name can have, said out loud. They differ
+                        in what the app OWNS, and the difference is invisible otherwise: a
+                        typo'd library name is a valid new volume, and Docker mints it
+                        empty at first mount with nothing to suggest the app is not
+                        looking at the data the operator meant. --%>
                   <p
-                    :if={vol["type"] != "bind" && vol["source"] not in [nil, ""]}
+                    :if={vol["type"] != "bind" && vol["source"] in @known_volumes}
                     class="mt-1 text-[10px] text-base-content/40 leading-snug"
                   >
-                    Mounts the existing <span class="font-mono">{vol["source"]}</span>
-                    rather than a new volume of its own. Any volume on this host can go into
-                    any deployment — that is how one library serves several apps.
+                    Borrows the existing <span class="font-mono">{vol["source"]}</span>
+                    — one library serving several apps. Removing this app later leaves that
+                    data where it is.
+                  </p>
+                  <p
+                    :if={
+                      vol["type"] != "bind" && vol["source"] not in [nil, ""] &&
+                        vol["source"] not in @known_volumes
+                    }
+                    class="mt-1 text-[10px] text-warning/70 leading-snug"
+                  >
+                    No volume named <span class="font-mono">{vol["source"]}</span>
+                    on this host yet. Docker creates it empty on first mount and this app
+                    owns it — if you meant an existing one, check the spelling.
                   </p>
                 </div>
 
@@ -3318,6 +3339,11 @@ defmodule HomelabWeb.DeployWizardLive do
                   name={"volumes[#{idx}][read_only]"}
                   value={to_string(vol["read_only"] in [true, "true"])}
                 />
+                <input
+                  type="hidden"
+                  name={"volumes[#{idx}][borrowed]"}
+                  value={to_string(vol["borrowed"] == true)}
+                />
                 <.icon name="hero-circle-stack-mini" class="size-2.5 text-secondary" />
                 <span :if={vol["type"] == "bind"} class="text-base-content/40">
                   {vol["source"]} →
@@ -3560,6 +3586,12 @@ defmodule HomelabWeb.DeployWizardLive do
               type="hidden"
               name={"volumes[#{idx}][read_only]"}
               value={to_string(vol["read_only"] in [true, "true"])}
+            />
+            <input
+              :for={{vol, idx} <- Enum.with_index(@volumes)}
+              type="hidden"
+              name={"volumes[#{idx}][borrowed]"}
+              value={to_string(vol["borrowed"] == true)}
             />
             <input
               :for={env <- @env_vars}
@@ -3842,6 +3874,7 @@ defmodule HomelabWeb.DeployWizardLive do
       |> put_present(p, "type")
       |> put_present(p, "source")
       |> put_present(p, "read_only")
+      |> put_present(p, "borrowed")
     end)
   end
 
@@ -4322,5 +4355,15 @@ defmodule HomelabWeb.DeployWizardLive do
   # container_path alone and write the result back to the SHARED template (see
   # deploy/deploy_compose) -- which erased the host path of every folder mount
   # on that template, for every deployment of it, on one visit to the wizard.
-  defp parse_volume_params(volumes), do: VolumeSpec.parse(volumes)
+  # A row that names a volume the daemon ALREADY has is borrowed: this deployment did not
+  # create it, and deleting the app must not read as deleting that data. Compared against
+  # the template's own rows so a volume this app already owns is not re-read as borrowed
+  # the second time it is deployed.
+  defp parse_volume_params(volumes, socket, template) do
+    VolumeSpec.mark_borrowed(
+      VolumeSpec.parse(volumes),
+      (template && template.volumes) || [],
+      socket.assigns.known_volumes
+    )
+  end
 end

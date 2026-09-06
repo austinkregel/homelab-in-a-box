@@ -558,8 +558,18 @@ defmodule HomelabWeb.StorageLive do
                 {consumer.name}
                 <span class="text-base-content/30 font-mono">{consumer.container_path}</span>
                 <span :if={consumer.read_only} class="text-base-content/30">· ro</span>
+                <%!-- Which of these deployments the data belongs to. Every consumer read
+                      the same before, so "safe to delete" was a guess about which app
+                      would lose its data rather than only its mount. --%>
+                <span :if={consumer.borrowed} class="text-base-content/30">· borrowed</span>
               </.link>
             </div>
+            <p
+              :if={volume.consumers != [] and Enum.all?(volume.consumers, & &1.borrowed)}
+              class="mt-1 text-[11px] text-base-content/30"
+            >
+              Every deployment here only borrows this volume — nothing on this page owns it.
+            </p>
           </div>
 
           <div class="shrink-0 text-right">

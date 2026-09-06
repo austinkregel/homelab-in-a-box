@@ -364,6 +364,79 @@ defmodule HomelabWeb.StorageLiveTest do
              end)
     end
 
+    # The point of recording it: attaching from this page is borrowing by definition --
+    # the volume was picked off the daemon's own list, so it existed before this
+    # deployment mounted it.
+    test "a volume attached from the daemon's list is recorded as borrowed", %{conn: conn} do
+      stub_volumes([volume("music-library")])
+      deployment = insert(:deployment)
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=volumes")
+
+      view
+      |> element("button[phx-click='mount_volume'][phx-value-name='music-library']")
+      |> render_click()
+
+      view
+      |> form("form[phx-submit='attach_mount']",
+        mount: %{
+          "deployment_id" => to_string(deployment.id),
+          "type" => "volume",
+          "source_choice" => "music-library",
+          "container_path" => "/music"
+        }
+      )
+      |> render_submit()
+
+      volumes =
+        Homelab.Deployments.get_deployment!(deployment.id)
+        |> Homelab.Deployments.Access.effective_volumes()
+
+      assert Enum.any?(volumes, fn vol ->
+               vol["source"] == "music-library" and vol["borrowed"] == true
+             end)
+    end
+
+    test "the volume list says which deployment owns the data", %{conn: conn} do
+      stub_volumes([volume("music-library")])
+      tenant = insert(:tenant, slug: "media")
+      owner_template = insert(:app_template, slug: "plex", name: "Plex", volumes: [])
+      borrower_template = insert(:app_template, slug: "sonarr", name: "Sonarr", volumes: [])
+
+      insert(:deployment,
+        tenant: tenant,
+        app_template: owner_template,
+        volumes_override: [
+          %{"container_path" => "/music", "type" => "volume", "source" => "music-library"}
+        ]
+      )
+
+      insert(:deployment,
+        tenant: tenant,
+        app_template: borrower_template,
+        volumes_override: [
+          %{
+            "container_path" => "/music",
+            "type" => "volume",
+            "source" => "music-library",
+            "borrowed" => true
+          }
+        ]
+      )
+
+      {:ok, view, _html} = live(conn, ~p"/storage?tab=volumes")
+      html = render(view)
+
+      assert html =~ "Plex"
+      assert html =~ "Sonarr"
+      assert html =~ "borrowed"
+
+      # And the refusal to delete names them apart, since only one loses its data.
+      assert {:error, message} = Storage.delete_volume("music-library")
+      assert message =~ "Plex"
+      assert message =~ "borrowed by Sonarr"
+    end
+
     test "typing a name still reaches the row when the picker is set to custom",
          %{conn: conn} do
       # Docker creates a named volume on first mount, so a name that is not on the daemon
@@ -404,7 +477,12 @@ defmodule HomelabWeb.StorageLiveTest do
         Homelab.Deployments.get_deployment!(deployment.id)
         |> Homelab.Deployments.Access.effective_volumes()
 
-      assert Enum.any?(volumes, &(&1["source"] == "brand-new-volume"))
+      # And a name Docker has not created yet is a volume this deployment will own, not
+      # one it borrows.
+      assert Enum.any?(
+               volumes,
+               &(&1["source"] == "brand-new-volume" and &1["borrowed"] == false)
+             )
     end
   end
 

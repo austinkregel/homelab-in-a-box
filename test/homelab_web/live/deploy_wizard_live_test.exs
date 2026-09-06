@@ -547,6 +547,71 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert vol["read_only"] == true
     end
 
+    test "a volume the daemon already has is deployed as borrowed", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_submit(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "app.example.com",
+        "exposure_mode" => "public",
+        "volumes" => %{
+          "0" => %{
+            "container_path" => "/music",
+            "type" => "volume",
+            "source" => "music-library"
+          },
+          "1" => %{
+            "container_path" => "/data",
+            "type" => "volume",
+            "source" => "its-own-data"
+          }
+        },
+        "ports" => %{},
+        "env" => %{}
+      })
+
+      {:ok, reloaded} = Homelab.Catalog.get_app_template_by_slug(template.slug)
+      borrowed = Map.new(reloaded.volumes, &{&1["source"], &1["borrowed"]})
+
+      assert borrowed["music-library"] == true
+      # A name the daemon does not have is a volume this app is about to own.
+      assert borrowed["its-own-data"] == false
+    end
+
+    test "an unknown volume name is called out rather than quietly created", %{
+      conn: conn,
+      template: template
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      html =
+        render_change(view, "config_changed", %{
+          "volumes" => %{"0" => %{"container_path" => "/music", "source" => "music-libary"}}
+        })
+
+      assert html =~ "No volume named"
+
+      html =
+        render_change(view, "config_changed", %{
+          "volumes" => %{"0" => %{"container_path" => "/music", "source" => "music-library"}}
+        })
+
+      assert html =~ "Borrows the existing"
+      refute html =~ "No volume named"
+    end
+
     # The wizard had no read-only control at all, so every mount it created was writable —
     # including a compose service that declared `:ro`, whose flag the parser captured and
     # this form then dropped.

@@ -1045,6 +1045,13 @@ defmodule HomelabWeb.CatalogLive do
                         class="flex items-center gap-1.5 text-[11px] text-base-content/60 whitespace-nowrap pt-4"
                         title="Mount read-only — the container cannot write through it"
                       >
+                        <%!-- Carried so editing a template does not silently re-own a
+                              volume it only borrows. --%>
+                        <input
+                          type="hidden"
+                          name={"volumes[#{idx}][borrowed]"}
+                          value={to_string(vol["borrowed"] == true)}
+                        />
                         <input type="hidden" name={"volumes[#{idx}][read_only]"} value="false" />
                         <input
                           type="checkbox"

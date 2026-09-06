@@ -55,6 +55,7 @@ defmodule Homelab.Storage do
           tenant: String.t(),
           container_path: String.t(),
           read_only: boolean(),
+          borrowed: boolean(),
           status: atom()
         }
 
@@ -300,6 +301,10 @@ defmodule Homelab.Storage do
           tenant: deployment.tenant && deployment.tenant.slug,
           container_path: vol["container_path"],
           read_only: vol["read_only"],
+          # A borrower mounts data it does not own. Without this the volume list could
+          # say which deployments touch a volume but not which one it belongs to, which
+          # is the question that decides whether deleting it is safe.
+          borrowed: vol["borrowed"],
           status: deployment.status
         }
       }
@@ -481,6 +486,10 @@ defmodule Homelab.Storage do
   counts *running* containers, so deleting on that signal alone destroys the data of every
   app that happens to be down. Pass `force: true` to override once the operator has seen
   the consumer list.
+
+  The refusal names the OWNER apart from the deployments that only borrow the volume.
+  Both lose their mount, but only one loses its data, and a list that reads them the same
+  way makes the operator guess at exactly the moment the guess is expensive.
   """
   @spec delete_volume(String.t(), keyword()) :: :ok | {:error, String.t()}
   def delete_volume(name, opts \\ []) do
@@ -488,7 +497,7 @@ defmodule Homelab.Storage do
 
     if consumers != [] and not Keyword.get(opts, :force, false) do
       {:error,
-       "#{name} is still mounted by #{Enum.map_join(consumers, ", ", & &1.name)} — remove the " <>
+       "#{name} is still mounted by #{consumer_sentence(consumers)} — remove the " <>
          "mount from those deployments first, or confirm the delete"}
     else
       case Client.delete("/volumes/#{name}") do
@@ -496,6 +505,16 @@ defmodule Homelab.Storage do
         {:error, {:not_found, _}} -> :ok
         {:error, reason} -> {:error, "Docker refused the delete: #{inspect(reason)}"}
       end
+    end
+  end
+
+  defp consumer_sentence(consumers) do
+    {borrowers, owners} = Enum.split_with(consumers, & &1.borrowed)
+
+    case {Enum.map_join(owners, ", ", & &1.name), Enum.map_join(borrowers, ", ", & &1.name)} do
+      {"", borrowed} -> "#{borrowed} (borrowed — nothing here owns this data)"
+      {owned, ""} -> owned
+      {owned, borrowed} -> "#{owned}, and borrowed by #{borrowed}"
     end
   end
 
@@ -519,7 +538,16 @@ defmodule Homelab.Storage do
   def attach_mount(deployment_id, row) do
     with {:ok, deployment} <- fetch_deployment(deployment_id),
          existing = Access.effective_volumes(deployment),
-         volumes = VolumeSpec.parse(existing ++ [row]),
+         # Attaching from this page is the clearest case of borrowing there is: the
+         # volume was picked off the daemon's own list, so it existed before this
+         # deployment did. Decided here rather than in the form so every caller of
+         # `attach_mount/2` records it the same way.
+         volumes =
+           VolumeSpec.mark_borrowed(
+             VolumeSpec.parse(existing ++ [row]),
+             existing,
+             volume_names()
+           ),
          {:ok, updated} <- update_volumes(deployment, volumes),
          {:ok, _} <- reconverge(updated) do
       {:ok, Deployments.get_deployment!(updated.id)}

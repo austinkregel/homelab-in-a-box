@@ -287,7 +287,9 @@ defmodule HomelabWeb.DeployWizardComposeRuntimeTest do
                  "source" => "/srv/sonarr/config",
                  "description" => "",
                  "optional" => false,
-                 "read_only" => false
+                 "read_only" => false,
+                 # A host directory was never this deployment's to own.
+                 "borrowed" => false
                },
                %{
                  "container_path" => "/tv",
@@ -295,7 +297,8 @@ defmodule HomelabWeb.DeployWizardComposeRuntimeTest do
                  "source" => "/srv/media/tv",
                  "description" => "",
                  "optional" => false,
-                 "read_only" => false
+                 "read_only" => false,
+                 "borrowed" => false
                }
              ]
     end

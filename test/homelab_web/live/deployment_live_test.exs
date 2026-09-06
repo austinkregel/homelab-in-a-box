@@ -991,6 +991,67 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "homelab-media-plex-music"
     end
 
+    test "naming an existing volume records the row as borrowed", %{conn: conn, deployment: dep} do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      view
+      |> form("#volumes-form",
+        volumes: %{
+          "0" => %{
+            "type" => "volume",
+            "source" => "music-library",
+            "container_path" => "/music"
+          }
+        }
+      )
+      |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["borrowed"] == true
+    end
+
+    # The flag has to survive a save that did not touch the name, or a volume this app
+    # owns would become borrowed the moment the daemon knows about it.
+    test "a volume this deployment owns stays owned across an edit", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "app-data", driver: "local", labels: %{}}]}
+      end)
+
+      template =
+        insert(:app_template,
+          volumes: [
+            %{"container_path" => "/data", "source" => "app-data", "type" => "volume"}
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_7"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      view |> form("#volumes-form") |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == "app-data"
+      assert vol["borrowed"] == false
+    end
+
     # Any volume on this host may go into any deployment — one library serving several
     # apps is the point of naming it here rather than only on the storage page.
     test "mounts an existing volume named in the form", %{conn: conn, deployment: dep} do

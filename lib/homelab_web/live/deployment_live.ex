@@ -672,7 +672,15 @@ defmodule HomelabWeb.DeploymentLive do
     # volume it moved the data into (PermanentHome), and dropping that name here would
     # make SpecBuilder derive a synthetic one -- mounting an empty volume and orphaning
     # the adopted data. A blank source is the only one that gets derived.
-    volumes = VolumeSpec.parse(params["volumes"])
+    # Which rows borrow their data is decided against what this deployment mounted
+    # BEFORE this save, so re-pointing a row at an existing volume marks it while editing
+    # any other field leaves the answer alone.
+    volumes =
+      VolumeSpec.mark_borrowed(
+        VolumeSpec.parse(params["volumes"]),
+        Access.effective_volumes(deployment),
+        socket.assigns.known_volumes
+      )
 
     case apply_config(deployment, %{volumes_override: volumes}) do
       {:ok, updated, _release} ->
@@ -2836,6 +2844,14 @@ defmodule HomelabWeb.DeploymentLive do
                   placeholder={volume_source_placeholder(vol, @deployment)}
                   class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
                 />
+                <%!-- Carried rather than re-derived: a row is only re-decided when its
+                      name changes, and a form that posted nothing here would hand `save`
+                      a row that looks brand new. --%>
+                <input
+                  type="hidden"
+                  name={"volumes[#{idx}][borrowed]"}
+                  value={to_string(vol["borrowed"] == true)}
+                />
                 <span class="text-[10px] text-base-content/40">→</span>
                 <input
                   type="text"
@@ -2913,6 +2929,14 @@ defmodule HomelabWeb.DeploymentLive do
                   Saving recreates the container. Removing a row detaches the volume; it does
                   not delete it.
                 </p>
+                <p
+                  :if={Enum.any?(@volumes_rows, &(&1["borrowed"] == true))}
+                  class="text-[11px] text-base-content/70 leading-snug"
+                >
+                  <strong>Borrowed</strong>
+                  — a volume another deployment owns. Pointing the row somewhere else leaves
+                  that data untouched, and so does removing the row.
+                </p>
               </div>
 
               <.button
@@ -2943,6 +2967,13 @@ defmodule HomelabWeb.DeploymentLive do
                 >
                   <td class="py-2 font-mono text-base-content/70">
                     {volume_source_name(vol, @deployment)}
+                    <span
+                      :if={vol["borrowed"] == true}
+                      class="ml-2 font-sans text-xs text-warning/70"
+                      title="This deployment does not own this data — removing the row detaches it, it does not delete it"
+                    >
+                      borrowed
+                    </span>
                     <span
                       :if={vol["description"] not in [nil, ""]}
                       class="ml-2 font-sans text-xs text-base-content/40"

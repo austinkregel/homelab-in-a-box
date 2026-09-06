@@ -62,6 +62,70 @@ defmodule Homelab.Deployments.VolumeSpecTest do
     end
   end
 
+  describe "mark_borrowed/3" do
+    test "a row naming a volume the daemon already has is borrowed" do
+      rows = VolumeSpec.parse([%{"container_path" => "/music", "source" => "music-library"}])
+
+      assert [%{"borrowed" => true}] = VolumeSpec.mark_borrowed(rows, [], ["music-library"])
+    end
+
+    test "a name the daemon does not have yet is this deployment's own" do
+      rows = VolumeSpec.parse([%{"container_path" => "/data", "source" => "app-data"}])
+
+      assert [%{"borrowed" => false}] = VolumeSpec.mark_borrowed(rows, [], ["music-library"])
+    end
+
+    # The failure this exists to prevent: a volume the deployment created is on the daemon
+    # by its next save, so re-deciding would turn every owned volume into a borrowed one
+    # and the ownership picture would converge on "nobody owns anything".
+    test "an owned volume stays owned once the daemon has it" do
+      previous = [
+        %{"container_path" => "/data", "source" => "app-data", "borrowed" => false}
+      ]
+
+      rows = VolumeSpec.parse([%{"container_path" => "/data", "source" => "app-data"}])
+
+      assert [%{"borrowed" => false}] = VolumeSpec.mark_borrowed(rows, previous, ["app-data"])
+    end
+
+    test "re-pointing a row at another volume decides again" do
+      previous = [
+        %{"container_path" => "/data", "source" => "app-data", "borrowed" => false}
+      ]
+
+      rows = VolumeSpec.parse([%{"container_path" => "/data", "source" => "music-library"}])
+
+      assert [%{"borrowed" => true}] =
+               VolumeSpec.mark_borrowed(rows, previous, ["app-data", "music-library"])
+    end
+
+    # A host directory was never this deployment's to own, and a blank source is a volume
+    # derived FOR it. Neither is a thing that can be borrowed.
+    test "a folder mount and a derived volume are never borrowed" do
+      rows =
+        VolumeSpec.parse([
+          %{"container_path" => "/media", "type" => "bind", "source" => "/mnt/tank"},
+          %{"container_path" => "/data"}
+        ])
+
+      assert [%{"borrowed" => false}, %{"borrowed" => false}] =
+               VolumeSpec.mark_borrowed(rows, [], ["/mnt/tank"])
+    end
+
+    test "normalize refuses to carry the flag on a row that cannot mean it" do
+      assert VolumeSpec.normalize(%{
+               "container_path" => "/media",
+               "type" => "bind",
+               "source" => "/mnt/tank",
+               "borrowed" => true
+             })["borrowed"] == false
+
+      assert VolumeSpec.normalize(%{"container_path" => "/data", "borrowed" => true})[
+               "borrowed"
+             ] == false
+    end
+  end
+
   describe "parse/1 vs parse_rows/1" do
     test "parse drops blank rows; parse_rows keeps them for a live form" do
       params = %{

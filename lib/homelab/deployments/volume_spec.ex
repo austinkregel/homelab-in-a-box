@@ -13,6 +13,11 @@ defmodule Homelab.Deployments.VolumeSpec do
       stack is entirely folder mounts, so adopting or matching it is impossible
       without these.
 
+  Either kind may additionally be **borrowed** (`borrowed: true`) -- a named volume whose
+  data belongs to another deployment, mounted here so one library can serve several apps.
+  Docker has no such distinction, so `mark_borrowed/3` decides it when a mount is made and
+  every producer carries the answer from there; see the key's comment in `normalize/1`.
+
   Every producer of a volume map (the deploy wizard, the compose parser, the adoption
   planner, the post-deploy Volumes tab) normalizes through here, and both schemas that
   persist one (`AppTemplate.volumes`, `Deployment.volumes_override`) validate through
@@ -82,8 +87,57 @@ defmodule Homelab.Deployments.VolumeSpec do
       #
       # Defaults to false (writable), which is Docker's own default and what every
       # existing stored volume means.
-      "read_only" => vol["read_only"] in [true, "true"]
+      "read_only" => vol["read_only"] in [true, "true"],
+      # Whether the data behind this mount belongs to some other deployment.
+      #
+      # `type` is Docker's mount type and is passed to the daemon verbatim, so it cannot
+      # carry this: to Docker there is one kind of named volume, and a library shared by
+      # four apps is mounted exactly like a database's own data directory. Ownership is
+      # ours to know, and nothing recorded it -- a deliberately shared media tree, a
+      # volume adoption named, and a typo that minted an empty volume were the same row.
+      #
+      # Only a named volume can be borrowed. A bind mounts a host directory that this
+      # deployment never owned in the first place, and a blank source is a volume derived
+      # for THIS deployment, so both normalize to false rather than being refused: the
+      # combination is meaningless, not dangerous.
+      "borrowed" =>
+        infer_type(vol["type"], source) == "volume" and source not in [nil, ""] and
+          vol["borrowed"] in [true, "true"]
     }
+  end
+
+  @doc """
+  Decides which rows are BORROWED, given what the deployment mounted before and the
+  volumes the daemon already has.
+
+  The decision is made once, when a mount is created or re-pointed, and carried from then
+  on. Re-deciding on every save would be wrong in the one direction that matters: a
+  volume this deployment created exists on the daemon by the next save, so an owned
+  volume would quietly become a borrowed one, and the ownership picture would converge on
+  "nobody owns anything".
+
+  Rows are matched to their previous selves by mount path, the same key the rest of the
+  wizard reconciles a service's rows on, and the one two volumes may not share.
+  """
+  def mark_borrowed(rows, previous, existing_names) do
+    previous = Map.new(List.wrap(previous), &{normalize(&1)["container_path"], normalize(&1)})
+    existing = MapSet.new(existing_names)
+
+    Enum.map(rows, fn row ->
+      row = normalize(row)
+      before = previous[row["container_path"]]
+
+      cond do
+        row["type"] != "volume" or row["source"] in [nil, ""] ->
+          Map.put(row, "borrowed", false)
+
+        before && before["source"] == row["source"] ->
+          Map.put(row, "borrowed", before["borrowed"])
+
+        true ->
+          Map.put(row, "borrowed", MapSet.member?(existing, row["source"]))
+      end
+    end)
   end
 
   defp infer_type(type, _source) when type in ["bind", "volume"], do: type
