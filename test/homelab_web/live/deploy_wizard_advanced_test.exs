@@ -11,6 +11,7 @@ defmodule HomelabWeb.DeployWizardAdvancedTest do
   import Mox
 
   alias Homelab.Deployments.Deployment
+  alias Homelab.Deployments.SpecBuilder
   alias Homelab.Repo
 
   @moduletag :capture_log
@@ -113,7 +114,7 @@ defmodule HomelabWeb.DeployWizardAdvancedTest do
     deployment = deploy_with(conn, template, tenant, %{"backend_scheme" => "https"})
 
     assert deployment.proxy_options["backend_scheme"] == "https"
-    assert Homelab.Deployments.SpecBuilder.backend_scheme(deployment) == "https"
+    assert SpecBuilder.backend_scheme(deployment) == "https"
   end
 
   test "an untouched panel leaves everything inheriting from the template", %{

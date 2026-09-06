@@ -594,9 +594,6 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("settings_changed", %{"settings" => settings}, socket) do
     {:noreply,
      socket
-     |> assign(:settings_domain, settings["domain"] || socket.assigns.settings_domain)
-     |> assign(:settings_access, settings["access"] || socket.assigns.settings_access)
-     |> assign(:settings_auth, settings["auth"] || socket.assigns.settings_auth)
      |> assign(:settings_ports, ports_from_params(settings["ports"]))
      |> assign(:settings_routes, routes_from_params(settings["routes"]))
      |> assign(
@@ -604,39 +601,7 @@ defmodule HomelabWeb.DeploymentLive do
        domains_from_params(settings["domains"])
      )
      |> assign(:settings_sticky, settings["sticky"] == "true")
-     |> assign(
-       :settings_backend_scheme,
-       settings["backend_scheme"] || socket.assigns.settings_backend_scheme
-     )
-     |> assign(:settings_memory_mb, settings["memory_mb"] || socket.assigns.settings_memory_mb)
-     |> assign(:settings_cpu_shares, settings["cpu_shares"] || socket.assigns.settings_cpu_shares)
-     # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
-     # round-trip on every change or picking NVIDIA would collapse the form again.
-     |> assign(:settings_gpu_vendor, settings["gpu_vendor"] || socket.assigns.settings_gpu_vendor)
-     |> assign(:settings_gpu_count, settings["gpu_count"] || socket.assigns.settings_gpu_count)
-     |> assign(
-       :settings_gpu_devices,
-       settings["gpu_devices"] || socket.assigns.settings_gpu_devices
-     )
-     |> assign(:settings_gpu_kind, settings["gpu_kind"] || socket.assigns.settings_gpu_kind)
-     |> assign(
-       :settings_health_path,
-       settings["health_path"] || socket.assigns.settings_health_path
-     )
-     # Drives which access tiles are even selectable, so it has to round-trip on every
-     # change rather than only at save. `""` is a real value here — it is the operator
-     # choosing "its own network" — so it must not fall through to the previous one.
-     |> assign(
-       :settings_network_parent_id,
-       settings["network_parent_id"] || socket.assigns.settings_network_parent_id
-     )
-     # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
-     # persisted deployment on every render, so a new selection reverted on the next
-     # keystroke and the save wrote the old port.
-     |> assign(
-       :settings_routed_port,
-       settings["routed_port"] || socket.assigns.settings_routed_port
-     )}
+     |> carry_settings(settings)}
   end
 
   def handle_event("recheck_tls", _params, socket) do
@@ -3794,6 +3759,45 @@ defmodule HomelabWeb.DeploymentLive do
   # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
   # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
   # different container drops the session.
+  # The settings fields that simply round-trip: whatever the form posted, or what the
+  # assigns already held when it posted nothing for them.
+  #
+  # A table rather than one `||` per field in `settings_changed`. Written out, that
+  # handler was a single function with fourteen branches — past what Credo will pass,
+  # and past what anyone reads line by line to find the one field behaving oddly.
+  #
+  # `""` survives, which matters: it is a real value for `network_parent_id`, where it
+  # means the operator chose "its own network" and must not fall back to the previous
+  # parent.
+  @round_tripped_settings [
+    {:settings_domain, "domain"},
+    {:settings_access, "access"},
+    {:settings_auth, "auth"},
+    {:settings_backend_scheme, "backend_scheme"},
+    {:settings_memory_mb, "memory_mb"},
+    {:settings_cpu_shares, "cpu_shares"},
+    # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
+    # round-trip on every change or picking NVIDIA would collapse the form again.
+    {:settings_gpu_vendor, "gpu_vendor"},
+    {:settings_gpu_count, "gpu_count"},
+    {:settings_gpu_devices, "gpu_devices"},
+    {:settings_gpu_kind, "gpu_kind"},
+    {:settings_health_path, "health_path"},
+    # Drives which access tiles are even selectable, so it has to round-trip on every
+    # change rather than only at save.
+    {:settings_network_parent_id, "network_parent_id"},
+    # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
+    # persisted deployment on every render, so a new selection reverted on the next
+    # keystroke and the save wrote the old port.
+    {:settings_routed_port, "routed_port"}
+  ]
+
+  defp carry_settings(socket, settings) do
+    Enum.reduce(@round_tripped_settings, socket, fn {key, param}, acc ->
+      assign(acc, key, settings[param] || acc.assigns[key])
+    end)
+  end
+
   defp proxy_options(settings, "proxy") do
     %{
       "sticky" => settings["sticky"] == "true",
