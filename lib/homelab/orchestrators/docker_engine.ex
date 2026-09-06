@@ -333,18 +333,95 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   def unpublish(_container_id, _network), do: :ok
 
-  # 403 on connect means two very different things, and they must not be conflated.
+  # 403 on connect covers three states, and only one of them is success.
   #
-  # "already exists in network" is success. But the daemon also answers 403 for a
-  # container sharing another's network namespace, which cannot be attached at all —
-  # and swallowing THAT would be the "report success having done nothing" pattern this
-  # code exists to avoid. `Deployments.publish_deployment/1` already declines to call
-  # this for such a workload; this is the backstop if something else does.
+  # A container sharing another's network namespace cannot be attached at all, and
+  # swallowing THAT would be the "report success having done nothing" pattern this code
+  # exists to avoid. `Deployments.publish_deployment/1` already declines to call this
+  # for such a workload; this is the backstop if something else does.
+  #
+  # The other two both answer "already exists in network", and the message cannot tell
+  # them apart. Either this container is on the network — a real no-op — or an endpoint
+  # of the same NAME is, left by the container this one replaced. Docker names an
+  # endpoint after its container, so a redeploy collides with its own predecessor's
+  # leftovers whenever the old container went away without its endpoint. Reading that
+  # second case as success is the same silent no-op in a quieter costume: the workload
+  # is not on ingress, Traefik resolves no backend, and the release reports a route that
+  # 502s. So ask the network who is actually on it rather than trusting the string.
   defp already_attached_or_error(container_id, network, body) do
-    if body |> error_message() |> String.downcase() =~ "already exists" do
+    cond do
+      not (body |> error_message() |> String.downcase() =~ "already exists") ->
+        {:error, {:publish_failed, container_id, network, {:http_error, 403, body}}}
+
+      attached?(container_id, network) ->
+        :ok
+
+      true ->
+        reclaim_stale_endpoint(container_id, network, body)
+    end
+  end
+
+  # The network's own `Containers` map is the daemon's answer to "is this attached",
+  # as opposed to the error string's. Keyed by full container id; matched loosely
+  # because `publish/2` accepts a short id or a name as readily as the full one.
+  #
+  # An unreadable network answers false: the reclaim below fails closed, so a daemon
+  # we cannot question ends as a failed publish rather than a fabricated success.
+  defp attached?(container_id, network) do
+    case Client.get("/networks/#{network}") do
+      {:ok, %{"Containers" => containers}} when is_map(containers) ->
+        Enum.any?(containers, fn {id, info} ->
+          String.starts_with?(id, container_id) or
+            (is_map(info) and info["Name"] == container_id)
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  # Drop the leftover endpoint, then connect again.
+  #
+  # Disconnect by NAME: the endpoint has no container behind it, so the id we hold does
+  # not address it, but the daemon accepts an endpoint name wherever it accepts a
+  # container. `Force` is required because a plain disconnect declines an endpoint whose
+  # container it cannot find — precisely the state being cleaned up.
+  #
+  # One attempt, then give up. If the connect still fails the endpoint was never the
+  # obstacle, and retrying would only postpone the rollback that should already be
+  # running.
+  defp reclaim_stale_endpoint(container_id, network, body) do
+    require Logger
+
+    with {:ok, name} <- endpoint_name(container_id),
+         {:ok, _} <-
+           Client.post("/networks/#{network}/disconnect", %{
+             "Container" => name,
+             "Force" => true
+           }),
+         {:ok, _} <- Client.post("/networks/#{network}/connect", %{"Container" => container_id}) do
+      Logger.info(
+        "[DockerEngine] cleared a stale #{name} endpoint on #{network} and reattached #{container_id}"
+      )
+
       :ok
     else
-      {:error, {:publish_failed, container_id, network, {:http_error, 403, body}}}
+      _ ->
+        Logger.warning(
+          "[DockerEngine] #{container_id} is not on #{network} and its endpoint could not be reclaimed"
+        )
+
+        {:error, {:publish_failed, container_id, network, {:stale_endpoint, body}}}
+    end
+  end
+
+  # The endpoint's name is the container's. Read from the daemon rather than assumed
+  # from the id, since that is the only place the two are tied together.
+  defp endpoint_name(container_id) do
+    case Client.get("/containers/#{container_id}/json") do
+      {:ok, %{"Name" => "/" <> name}} when name != "" -> {:ok, name}
+      {:ok, %{"Name" => name}} when is_binary(name) and name != "" -> {:ok, name}
+      _ -> :error
     end
   end
 

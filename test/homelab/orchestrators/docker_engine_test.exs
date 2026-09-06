@@ -676,7 +676,16 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "both are idempotent against a container already in the target state" do
       # The daemon answers 403 for an already-attached container, and 404 when the
       # container or network is gone. Both mean "already in the state we wanted".
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      #
+      # The network reports the container among its own, which is what makes the 403 a
+      # genuine no-op rather than the stale endpoint tested below.
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        if String.starts_with?(path, "/networks/") do
+          {:ok, %{"Containers" => %{"container-abc" => %{"Name" => "authair-web"}}}}
+        else
+          {:ok, %{}}
+        end
+      end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
         cond do
@@ -723,7 +732,13 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       # never the bare string. Matching that shape with `to_string/1` raised
       # Protocol.String.Chars mid-deploy instead of recognising an already-attached
       # container, turning a no-op into a crash.
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        if String.starts_with?(path, "/networks/") do
+          {:ok, %{"Containers" => %{"container-abc" => %{"Name" => "authair-web"}}}}
+        else
+          {:ok, %{}}
+        end
+      end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
         if String.ends_with?(path, "/connect") do
@@ -740,6 +755,137 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       end)
 
       assert :ok = DockerEngine.publish("container-abc", "homelab-iab-internal")
+    end
+
+    test "a stale endpoint of the same name is cleared, and the container really attached" do
+      # "already exists" does not prove THIS container is on the network. Docker names an
+      # endpoint after its container, so a redeploy that replaced
+      # `homelab_identity_authair-web` collides with the endpoint its predecessor left
+      # behind — and the new container is not attached at all. Reading that as success
+      # would leave Traefik with no backend on a release that reported a working route.
+      {:ok, connects} = Agent.start_link(fn -> 0 end)
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        cond do
+          # The network holds the endpoint's NAME, but nothing of ours is attached.
+          String.starts_with?(path, "/networks/") ->
+            {:ok, %{"Containers" => %{"someone-else" => %{"Name" => "homelab-traefik"}}}}
+
+          String.starts_with?(path, "/containers/") ->
+            {:ok, %{"Name" => "/homelab_identity_authair-web"}}
+
+          # `/info`, read while picking a driver for the network.
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        cond do
+          String.ends_with?(path, "/connect") ->
+            attempt = Agent.get_and_update(connects, &{&1, &1 + 1})
+
+            if attempt == 0 do
+              {:error,
+               {:http_error, 403,
+                %{
+                  "message" =>
+                    "endpoint with name homelab_identity_authair-web already exists in " <>
+                      "network homelab-iab-internal"
+                }}}
+            else
+              {:ok, %{}}
+            end
+
+          String.ends_with?(path, "/disconnect") ->
+            send(test_pid, {:disconnect, body})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      assert :ok = DockerEngine.publish("container-abc", "homelab-iab-internal")
+
+      # Cleared by endpoint NAME and forcibly: the container id addresses no live
+      # endpoint, and a plain disconnect declines one whose container is gone.
+      assert_received {:disconnect,
+                       %{"Container" => "homelab_identity_authair-web", "Force" => true}}
+
+      # The retry is the point — success here means attached, not merely tidied up.
+      assert Agent.get(connects, & &1) == 2
+    end
+
+    test "a stale endpoint that cannot be reclaimed fails the publish" do
+      # Fail closed. The workload is not on the network and we could not put it there,
+      # so the release must roll back rather than report a route that will 502.
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        cond do
+          String.starts_with?(path, "/networks/") -> {:ok, %{"Containers" => %{}}}
+          String.starts_with?(path, "/containers/") -> {:ok, %{"Name" => "/authair-web"}}
+          true -> {:ok, %{}}
+        end
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.ends_with?(path, "/connect") ->
+            {:error,
+             {:http_error, 403,
+              %{"message" => "endpoint with name authair-web already exists in network x"}}}
+
+          String.ends_with?(path, "/disconnect") ->
+            {:error, {:http_error, 500, %{"message" => "endpoint not found"}}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      assert {:error,
+              {:publish_failed, "container-abc", "homelab-iab-internal", {:stale_endpoint, _}}} =
+               DockerEngine.publish("container-abc", "homelab-iab-internal")
+    end
+
+    test "a network that cannot be read fails the publish rather than assuming success" do
+      # An unreadable network is not evidence of attachment. Guessing :ok here would be
+      # the same silent no-op in a quieter costume.
+      #
+      # `ensure_network/1` reads the network before the connect, and the attachment check
+      # reads it again afterwards. Only the second read fails, so the failure lands on
+      # the branch under test instead of short-circuiting the publish before it starts.
+      {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        cond do
+          String.starts_with?(path, "/networks/") ->
+            case Agent.get_and_update(reads, &{&1, &1 + 1}) do
+              0 -> {:ok, %{"Driver" => "bridge"}}
+              _ -> {:error, {:connection_error, :closed}}
+            end
+
+          String.starts_with?(path, "/containers/") ->
+            {:ok, %{"Name" => "/authair-web"}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        if String.ends_with?(path, "/connect") do
+          {:error,
+           {:http_error, 403,
+            %{"message" => "endpoint with name authair-web already exists in network x"}}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:error, {:publish_failed, "container-abc", "homelab-iab-internal", _}} =
+               DockerEngine.publish("container-abc", "homelab-iab-internal")
     end
 
     test "a decoded 403 body that is NOT 'already exists' still errors" do
