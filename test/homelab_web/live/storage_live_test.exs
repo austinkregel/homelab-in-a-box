@@ -361,7 +361,8 @@ defmodule HomelabWeb.StorageLiveTest do
           "type" => "volume",
           "source_choice" => "__custom__",
           "source" => "brand-new-volume",
-          "container_path" => "/data"
+          # Not /data: the template already mounts it, and two volumes cannot share a path.
+          "container_path" => "/srv/new"
         }
       )
       |> render_submit()
