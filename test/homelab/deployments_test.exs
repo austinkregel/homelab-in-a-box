@@ -247,6 +247,122 @@ defmodule Homelab.DeploymentsTest do
     end
   end
 
+  describe "redeploy/1 on a network-namespace stack" do
+    setup do
+      tenant = insert(:tenant)
+      donor = insert(:deployment, tenant: tenant, status: :running, external_id: "gluetun-1")
+
+      # Distinct ports: everything in one namespace shares a port space, and the
+      # changeset refuses a collision — the same reason a real *arr stack gives each
+      # app its own port.
+      children =
+        for {slug, port} <- [{"sonarr", 8989}, {"radarr", 7878}, {"lidarr", 8686}] do
+          insert(:deployment,
+            tenant: tenant,
+            app_template:
+              insert(:app_template,
+                slug: slug,
+                ports: [%{"container" => port, "protocol" => "tcp"}]
+              ),
+            status: :pending,
+            external_id: nil,
+            network_parent_id: donor.id
+          )
+        end
+
+      %{donor: donor, children: children}
+    end
+
+    defp child_targets(release) do
+      release.steps
+      |> Enum.filter(&(&1.type == :netns_child_container))
+      |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
+      |> Enum.sort()
+    end
+
+    # The bug this covers: pressing "Re-run deploy" on a tunneled app resolved the
+    # DONOR-anchored stack release, took its `deployment_id` as the app, and found no
+    # companions — a stack release records children as `:netns_child_container`, and the
+    # extraction only looked at `:dependency_container`. So it planned a release that
+    # re-created gluetun on its own: the donor came back with a NEW container id, every
+    # child still named the old one, and the release reported success having deployed
+    # nothing the operator pressed the button about.
+    test "re-driving a child re-drives the whole stack", %{donor: donor, children: children} do
+      [sonarr | _] = children
+
+      assert {:ok, release} = Deployments.redeploy(sonarr)
+
+      # Anchored on the donor: its container id is what the children are pinned to, so it
+      # has to be created first and the children after it.
+      assert release.deployment_id == donor.id
+
+      assert child_targets(release) == Enum.sort(Enum.map(children, & &1.id))
+    end
+
+    test "re-driving the donor re-drives the same stack", %{donor: donor, children: children} do
+      assert {:ok, release} = Deployments.redeploy(donor)
+
+      assert release.deployment_id == donor.id
+      assert child_targets(release) == Enum.sort(Enum.map(children, & &1.id))
+    end
+
+    # The precise regression guard. A release that creates the donor and stops is the
+    # shape that leaves the stack unstartable, so assert it is never planned.
+    test "never plans a donor-only release from inside a stack", %{children: children} do
+      [sonarr | _] = children
+
+      assert {:ok, release} = Deployments.redeploy(sonarr)
+
+      refute release.steps
+             |> Enum.map(& &1.type)
+             |> Enum.filter(&(&1 in [:app_container, :netns_child_container]))
+             |> Kernel.==([:app_container])
+    end
+
+    test "a deployment outside any namespace still takes the standalone path" do
+      solo = insert(:deployment, status: :failed, external_id: "solo-1")
+
+      assert {:ok, release} = Deployments.redeploy(solo)
+
+      assert release.deployment_id == solo.id
+      refute :netns_child_container in Enum.map(release.steps, & &1.type)
+    end
+  end
+
+  describe "list_stranded_pending/1" do
+    test "finds a pending deployment with no container, older than the bound" do
+      old = insert(:deployment, status: :pending, external_id: nil)
+      backdate(old, -600)
+
+      assert [found] = Deployments.list_stranded_pending(minutes_ago(2))
+      assert found.id == old.id
+    end
+
+    test "ignores a row that is still within the grace window" do
+      insert(:deployment, status: :pending, external_id: nil)
+
+      assert Deployments.list_stranded_pending(minutes_ago(2)) == []
+    end
+
+    test "ignores rows that already have a container, or are not pending" do
+      backdate(insert(:deployment, status: :pending, external_id: "c1"), -600)
+      backdate(insert(:deployment, status: :running, external_id: nil), -600)
+
+      assert Deployments.list_stranded_pending(minutes_ago(2)) == []
+    end
+  end
+
+  defp minutes_ago(n), do: DateTime.add(DateTime.utc_now(), -n * 60, :second)
+
+  # `updated_at` is the bound, and the factory stamps it as now.
+  defp backdate(deployment, seconds) do
+    at = NaiveDateTime.add(NaiveDateTime.utc_now(), seconds, :second)
+
+    deployment
+    |> Ecto.Changeset.change(updated_at: NaiveDateTime.truncate(at, :second))
+    |> Homelab.Repo.update!()
+  end
+
   describe "list_deployments/0" do
     test "returns all deployments with preloaded associations" do
       insert(:deployment)

@@ -25,13 +25,25 @@ defmodule Homelab.Deployments.ReleaseStepReasonMigrationTest do
 
     {:ok, _} = Releases.transition_step(step, :failed, [:pending], reason: {"error", "boom"})
 
+    # `migration_lock: false` is load-bearing, not tidying. With the lock on,
+    # `Ecto.Migrator` opens a transaction on the connection to `LOCK TABLE
+    # schema_migrations`, and then runs the migration itself in a `Task.async` it
+    # `await`s forever. Under the SQL sandbox there is exactly one connection: the test
+    # process holds it inside that lock transaction while blocking on the await, and the
+    # task cannot check it out. That is a deadlock, and it resolves only when the
+    # checkout queue gives up — the test failed after 20s with a
+    # `DBConnection.ConnectionError`, every time, not just under CI load.
+    #
+    # Skipping the lock is safe precisely here: the lock exists to stop two nodes
+    # migrating at once, and this is one sandboxed test owning its own transaction.
+
     # Back to the pre-rename shape: one `error_message` column and no type at all.
-    assert :ok = Ecto.Migrator.down(Repo, @version, @migration, log: false)
+    assert :ok = Ecto.Migrator.down(Repo, @version, @migration, log: false, migration_lock: false)
 
     assert %{rows: [["boom"]]} =
              SQL.query!(Repo, "SELECT error_message FROM release_steps WHERE id = $1", [step.id])
 
-    assert :ok = Ecto.Migrator.up(Repo, @version, @migration, log: false)
+    assert :ok = Ecto.Migrator.up(Repo, @version, @migration, log: false, migration_lock: false)
 
     assert %{rows: [["boom", "error"]]} =
              SQL.query!(

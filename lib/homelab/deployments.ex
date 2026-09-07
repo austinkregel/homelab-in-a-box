@@ -35,6 +35,23 @@ defmodule Homelab.Deployments do
     |> Repo.all()
   end
 
+  @doc """
+  Deployments that are waiting to be deployed and have no container to converge against:
+  `:pending`, no `external_id`, untouched since `before`.
+
+  The time bound is the caller's, and it is not optional — every planner creates rows
+  and then plans, so a healthy deploy passes through exactly this shape for a moment.
+  See `Reconciler.adopt_stranded_pending/1`, which pairs it with "no release has ever
+  named this".
+  """
+  def list_stranded_pending(%DateTime{} = before) do
+    Deployment
+    |> where([d], d.status == :pending and is_nil(d.external_id))
+    |> where([d], d.updated_at < ^DateTime.to_naive(before))
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
   def list_desired_states do
     Deployment
     |> where([d], d.status in [:pending, :deploying, :running, :failed])

@@ -48,6 +48,9 @@ defmodule Homelab.Services.Reconciler do
   @default_interval_ms 20_000
   @deploying_timeout_ms 120_000
   @orphan_grace_ms 120_000
+  # How long a `:pending` row with no release is left alone before it is treated as
+  # stranded rather than as a deploy that is still being planned.
+  @stranded_grace_ms 120_000
   @stable_ms 10_000
   @sweep_mode_setting "reconciler_sweep_mode"
 
@@ -196,6 +199,7 @@ defmodule Homelab.Services.Reconciler do
             leased = Releases.leased_deployment_ids()
 
             resume_stuck_releases()
+            adopt_stranded_pending(leased)
             converge(actual_by_id, leased)
             sweep_deploying_timeouts(leased)
             sweep_stale_netns(leased)
@@ -220,6 +224,62 @@ defmodule Homelab.Services.Reconciler do
     Releases.list_resumable_releases()
     |> Enum.each(&ReleaseRunner.enqueue/1)
   end
+
+  # 1b. Deployments no release ever covered.
+  #
+  # `converge_one/2` returns immediately on `external_id: nil` — correctly, since there is
+  # no container to compare against — and every other sweep here is likewise about
+  # workloads that EXIST. So a row sitting `:pending` with no container and no release is
+  # invisible to all of them: nothing deploys it, nothing times it out, nothing complains.
+  # It reads on the page as "waiting on a deploy" forever, with an empty Releases tab
+  # because there is genuinely nothing to show.
+  #
+  # It is reachable whenever a planner creates rows and then fails to plan for some of
+  # them — a bundle whose second release is refused while the first is in flight is the
+  # everyday shape — and the deployment is then stranded even though the whole system is
+  # healthy.
+  #
+  # Three guards, and each is load-bearing:
+  #
+  #   * NO release has ever named it, in any state. Not "no ACTIVE release": a release
+  #     that failed or rolled back is a decision the operator should see and re-run
+  #     deliberately, and re-planning it here would loop forever on a deploy that cannot
+  #     succeed. Once this plans one, the row has a release and is never picked up again.
+  #   * Untouched for `@stranded_grace_ms`. Planners create rows and then plan, so there
+  #     is always a window in which a perfectly healthy deploy looks exactly like this.
+  #   * Not leased, like every other sweep.
+  defp adopt_stranded_pending(leased) do
+    Deployments.list_stranded_pending(stranded_before())
+    # `or` short-circuits, so the lease check (a MapSet lookup) runs before the release
+    # lookup (a query) and a leased deployment costs nothing to skip.
+    |> Enum.reject(
+      &(MapSet.member?(leased, &1.id) or not is_nil(Releases.driving_release(&1.id)))
+    )
+    |> Enum.each(fn deployment ->
+      case Deployments.redeploy(deployment) do
+        {:ok, _release} ->
+          alert(
+            :warning,
+            "Deployment had no release",
+            "#{label(deployment)} was waiting to be deployed with nothing driving it; " <>
+              "planning one now.",
+            deployment.id
+          )
+
+        {:error, reason} ->
+          Logger.error(
+            "[Reconciler] stranded pending #{deployment.id} could not be planned: " <>
+              "#{inspect(reason)}"
+          )
+      end
+    end)
+  end
+
+  defp stranded_before,
+    do: DateTime.add(DateTime.utc_now(), -stranded_grace_ms(), :millisecond)
+
+  defp stranded_grace_ms,
+    do: Application.get_env(:homelab, :reconciler_stranded_grace_ms, @stranded_grace_ms)
 
   # 1. Status convergence
   defp converge(actual_by_id, leased) do
