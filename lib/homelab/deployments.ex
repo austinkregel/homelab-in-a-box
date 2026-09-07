@@ -35,6 +35,23 @@ defmodule Homelab.Deployments do
     |> Repo.all()
   end
 
+  @doc """
+  Deployments that are waiting to be deployed and have no container to converge against:
+  `:pending`, no `external_id`, untouched since `before`.
+
+  The time bound is the caller's, and it is not optional — every planner creates rows
+  and then plans, so a healthy deploy passes through exactly this shape for a moment.
+  See `Reconciler.adopt_stranded_pending/1`, which pairs it with "no release has ever
+  named this".
+  """
+  def list_stranded_pending(%DateTime{} = before) do
+    Deployment
+    |> where([d], d.status == :pending and is_nil(d.external_id))
+    |> where([d], d.updated_at < ^DateTime.to_naive(before))
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
   def list_desired_states do
     Deployment
     |> where([d], d.status in [:pending, :deploying, :running, :failed])
@@ -1068,6 +1085,39 @@ defmodule Homelab.Deployments do
   release, deploys the single deployment standalone.
   """
   def redeploy(%Deployment{} = deployment) do
+    if netns_stack_member?(deployment) do
+      redeploy_netns_stack(deployment, plan: %{"kind" => "redeploy"})
+    else
+      redeploy_standalone(deployment)
+    end
+  end
+
+  # A member of a network-namespace group is re-driven as a GROUP, whichever member the
+  # operator pressed the button on.
+  #
+  # Without this, "Re-run deploy" on a tunneled app did the one thing the whole netns
+  # cascade exists to prevent. `driving_release/1` resolves a stack release from either
+  # end, so pressing it on Sonarr returned the release anchored on gluetun; the branch
+  # below then took `release.deployment_id` as the app — the DONOR — and looked for
+  # companions among `:dependency_container` steps, of which a stack release has none
+  # (its children are `:netns_child_container`). So it planned a release that re-created
+  # gluetun ALONE.
+  #
+  # Which is worse than doing nothing. Re-creating the donor mints a new container id,
+  # and every child's `NetworkMode` still names the old one — so the button whose job is
+  # to un-stick a stack left every app in it unstartable, and the release it planned
+  # reached `:running` having deployed nothing the operator asked about.
+  #
+  # The children are deliberately NOT folded into the companion list as a fix: a
+  # companion is deployed BEFORE the app, and a netns child must be created AFTER the
+  # donor whose container id it names. They are different orderings, which is why
+  # `redeploy_netns_stack/2` exists rather than a longer companion list.
+  defp netns_stack_member?(%Deployment{network_parent_id: parent_id}) when not is_nil(parent_id),
+    do: true
+
+  defp netns_stack_member?(%Deployment{} = deployment), do: Netns.donor?(deployment)
+
+  defp redeploy_standalone(%Deployment{} = deployment) do
     case Releases.driving_release(deployment.id) do
       nil ->
         with {:ok, app} <- reset_to_pending(deployment) do

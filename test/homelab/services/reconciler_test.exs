@@ -154,6 +154,82 @@ defmodule Homelab.Services.ReconcilerTest do
     end
   end
 
+  describe "stranded pending deployments" do
+    # `converge_one/2` returns on `external_id: nil`, and every other sweep is about
+    # workloads that exist — so a `:pending` row that no release ever covered is invisible
+    # to all of them. It reads on the page as "waiting on a deploy" forever, with an empty
+    # Releases tab because there is genuinely nothing to show, and no amount of waiting
+    # changes it.
+    defp backdate!(deployment, seconds) do
+      at =
+        NaiveDateTime.utc_now()
+        |> NaiveDateTime.add(seconds, :second)
+        |> NaiveDateTime.truncate(:second)
+
+      deployment |> Ecto.Changeset.change(updated_at: at) |> Repo.update!()
+    end
+
+    defp no_services do
+      stub(Homelab.Mocks.Orchestrator, :list_services, fn -> {:ok, []} end)
+    end
+
+    test "plans a release for a pending deployment nothing is driving" do
+      no_services()
+      dep = insert(:deployment, status: :pending, external_id: nil)
+      backdate!(dep, -600)
+
+      refute Releases.driving_release(dep.id)
+
+      start_and_sync!()
+
+      release = Releases.driving_release(dep.id)
+      assert release, "the stranded deployment should have been given a release"
+      assert release.deployment_id == dep.id
+    end
+
+    # The guard that stops this becoming a redeploy loop. A release that failed is a
+    # decision for the operator to look at and re-run deliberately; re-planning it every
+    # 20s would hammer a deploy that cannot succeed.
+    test "leaves a deployment whose release already failed alone" do
+      no_services()
+      dep = insert(:deployment, status: :pending, external_id: nil)
+      backdate!(dep, -600)
+
+      {:ok, release} = Releases.plan_release(dep, [%{type: :app_container}])
+      {:ok, _} = Releases.transition_release(release, :failed, [:planning])
+
+      start_and_sync!()
+
+      assert Releases.driving_release(dep.id).id == release.id
+      assert Repo.aggregate(Homelab.Deployments.Release, :count) == 1
+    end
+
+    # Every planner creates rows and THEN plans, so a healthy deploy passes through
+    # exactly this shape for a moment. Adopting it there would plan a second release for
+    # a deployment that is already about to get one.
+    test "leaves a freshly created deployment inside the grace window alone" do
+      no_services()
+      dep = insert(:deployment, status: :pending, external_id: nil)
+
+      start_and_sync!()
+
+      refute Releases.driving_release(dep.id)
+    end
+
+    test "skips a deployment an in-flight release already holds the lease on" do
+      no_services()
+      dep = insert(:deployment, status: :pending, external_id: nil)
+      backdate!(dep, -600)
+
+      {:ok, release} = Releases.plan_release(dep, [%{type: :app_container}])
+      {:ok, _} = Releases.acquire_lease(release, "someone-else", 120)
+
+      start_and_sync!()
+
+      assert Repo.aggregate(Homelab.Deployments.Release, :count) == 1
+    end
+  end
+
   describe "deploying timeout" do
     test "fails a deployment stuck in :deploying beyond the threshold" do
       Application.put_env(:homelab, :reconciler, deploying_timeout_ms: 0)
