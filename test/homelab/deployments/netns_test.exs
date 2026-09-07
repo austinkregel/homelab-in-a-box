@@ -707,7 +707,56 @@ defmodule Homelab.Deployments.NetnsTest do
       steps = Repo.preload(release, :steps).steps
 
       assert Deployments.get_deployment!(donor.id).domain == "vpn.example.com"
-      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 0
+      assert Enum.count(steps, &(&1.type == :publish_ingress)) == 1
+      assert skips?(PublishIngress, donor)
+    end
+
+    # "Re-run deploy" on any member takes the GROUP round: re-creating one member mints
+    # a container id the others are pinned to.
+    test "re-running a donor drives the whole stack", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      assert {:ok, release} = Deployments.redeploy(Deployments.get_deployment!(ctx.donor.id))
+      release = Repo.preload(release, :steps)
+
+      assert release.deployment_id == ctx.donor.id
+
+      assert Enum.any?(
+               release.steps,
+               &(&1.type == :netns_child_container and
+                   &1.resource_handle == %{"deployment_id" => child.id})
+             )
+    end
+
+    test "re-running a child drives the stack from its donor", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      assert {:ok, release} = Deployments.redeploy(Deployments.get_deployment!(child.id))
+      release = Repo.preload(release, :steps)
+
+      assert release.deployment_id == ctx.donor.id
+
+      # The donor is the release's own workload, not a companion re-created behind the
+      # child while its siblings stay pinned to the old id.
+      types = Enum.map(release.steps, & &1.type)
+      assert :app_container in types
+      refute :dependency_container in types
+    end
+
+    test "re-running a member is still refused while its stack has a release in flight",
+         ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, _in_flight} =
+        Deployments.Releases.plan_release(ctx.donor, [
+          %{
+            type: :netns_child_container,
+            resource_handle: %{"deployment_id" => child.id}
+          }
+        ])
+
+      assert {:error, :release_active} =
+               Deployments.redeploy(Deployments.get_deployment!(child.id))
     end
 
     test "driving the stack from the DONOR gives the same release", ctx do

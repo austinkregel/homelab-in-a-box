@@ -999,40 +999,54 @@ defmodule Homelab.Deployments do
   the one-active-per-deployment constraint would reject a new plan, and
   re-driving a live release would race the running saga. When there is no prior
   release, deploys the single deployment standalone.
+
+  A member of a network-namespace group goes round as a GROUP, through
+  `redeploy_netns_stack/1`. Re-creating any member mints a container id the others are
+  pinned to, so re-running a donor alone leaves its children naming a container that no
+  longer exists, and re-running a child alone does the same to its siblings.
   """
   def redeploy(%Deployment{} = deployment) do
-    case Releases.driving_release(deployment.id) do
-      nil ->
-        with {:ok, app} <- reset_to_pending(deployment) do
-          deploy_release(app)
-        end
+    release = Releases.driving_release(deployment.id)
 
-      %{__struct__: Release} = release ->
-        if Release.terminal?(release) do
-          app = get_deployment!(release.deployment_id)
+    cond do
+      release && not Release.terminal?(release) -> {:error, :release_active}
+      netns_member?(deployment) -> redeploy_netns_stack(deployment)
+      is_nil(release) -> deploy_standalone(deployment)
+      true -> replay(release)
+    end
+  end
 
-          companions =
-            release.steps
-            |> Enum.filter(&(&1.type == :dependency_container))
-            |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
-            |> Enum.reject(&is_nil/1)
-            |> Enum.uniq()
-            |> Enum.map(&get_deployment!/1)
+  defp netns_member?(%Deployment{} = deployment),
+    do: Netns.child?(deployment) or Netns.donor?(deployment)
 
-          with {:ok, app} <- reset_to_pending(app),
-               {:ok, companions} <- reset_all_to_pending(companions) do
-            deploy_release(app, companions)
-          end
-        else
-          {:error, :release_active}
-        end
+  defp deploy_standalone(deployment) do
+    with {:ok, app} <- reset_to_pending(deployment) do
+      deploy_release(app)
+    end
+  end
+
+  # The same app and companion set the prior release drove, reset and planned afresh.
+  defp replay(%Release{} = release) do
+    app = get_deployment!(release.deployment_id)
+
+    companions =
+      release.steps
+      |> Enum.filter(&(&1.type == :dependency_container))
+      |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.map(&get_deployment!/1)
+
+    with {:ok, app} <- reset_to_pending(app),
+         {:ok, companions} <- reset_all_to_pending(companions) do
+      deploy_release(app, companions)
     end
   end
 
   @doc """
   Re-drives ONE deployment through the release saga after its configuration changed:
-  plans `ingress_proxy → app_container → await_health → ingress` against the row as it
-  now stands, resets it to `:pending`, and enqueues `ReleaseRunner`.
+  plans the lifecycle backbone with no companions against the row as it now stands,
+  resets it to `:pending`, and enqueues `ReleaseRunner`.
 
   This is what a config save runs. It replaces `recreate_deployment/1` on that path,
   which called `start_deployment/1` synchronously inside the LiveView process — the
