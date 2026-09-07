@@ -932,8 +932,10 @@ defmodule HomelabWeb.DeployWizardLive do
         |> Map.merge(advanced_attrs(socket))
         |> Map.merge(netns_attrs(socket))
 
-      case Homelab.Deployments.deploy_now(attrs) do
-        {:ok, _deployment} ->
+      # The saga, not `deploy_now/1`: it re-deploys the netns donor first (re-deriving
+      # its kill-switch env from the new child) and records `netns_parent_external_id`.
+      case Homelab.Deployments.create_and_deploy_release(attrs) do
+        {:ok, %{deployment: _deployment, release: _release}} ->
           {:noreply,
            socket
            |> put_flash(:info, "#{template.name} deployment started!")
@@ -946,7 +948,8 @@ defmodule HomelabWeb.DeployWizardLive do
            put_flash(socket, :error, "Deployment failed: #{changeset_message(changeset)}")}
 
         {:error, reason} ->
-          {:noreply, put_flash(socket, :error, "Deployment failed: #{inspect(reason)}")}
+          {:noreply,
+           put_flash(socket, :error, "Deployment failed: #{deploy_error_message(reason)}")}
       end
     end
   end
@@ -1018,13 +1021,20 @@ defmodule HomelabWeb.DeployWizardLive do
       # deployment", leaving orphaned `:pending` rows and planning no release at all. The
       # import dead-ended at exactly the point it looked like it had worked.
       primary_name =
-        if main_result, do: nil, else: ComposeParser.primary_name(socket.assigns.compose_services)
+        if main_result, do: nil, else: compose_primary_name(socket.assigns.compose_services)
+
+      services_by_name =
+        Map.new(socket.assigns.compose_services, &{to_string(&1[:name]), &1})
 
       # Create the compose deployment ROWS. Companions carry no domain — they are internal
       # dependencies, never ingress-published. The release saga deploys them.
-      compose_deployments =
+      #
+      # Donors first, threading their ids through the fold: a child needs its donor's row
+      # to point at, and `deploy_release/2` deploys companions in this order.
+      {compose_deployments, _created_ids} =
         socket.assigns.compose_services
-        |> Enum.map(fn svc ->
+        |> order_netns_donors_first()
+        |> Enum.map_reduce(%{}, fn svc, created ->
           primary? = primary_name != nil and svc[:name] == primary_name
           slug = slugify(svc[:name] || "compose-service")
           image = svc[:image] || ""
@@ -1056,7 +1066,7 @@ defmodule HomelabWeb.DeployWizardLive do
               |> Enum.filter(fn %{"value" => v} -> v == "" end)
               |> Enum.map(fn %{"key" => k} -> k end),
             depends_on: svc[:depends_on] || [],
-            exposure_mode: String.to_existing_atom(exposure_mode),
+            exposure_mode: compose_exposure_mode(exposure_mode, svc),
             # What the service is allowed to ask the KERNEL for. Dropping these was the
             # difference between an import that looks complete and a container that
             # cannot do its job — a VPN client with no NET_ADMIN starts, fails to open
@@ -1070,7 +1080,8 @@ defmodule HomelabWeb.DeployWizardLive do
             entrypoint: svc[:entrypoint]
           }
 
-          with {:ok, template} <- resolve_compose_template(slug, template_attrs) do
+          with {:ok, netns_parent_id} <- netns_parent_id(svc, services_by_name, created),
+               {:ok, template} <- resolve_compose_template(slug, template_attrs) do
             svc_env_overrides =
               svc_env
               |> Enum.reject(fn %{"value" => v} -> v == "" end)
@@ -1088,7 +1099,8 @@ defmodule HomelabWeb.DeployWizardLive do
                 # `restart:` has a home (`restart_policy_override`) but has never been
                 # imported, so every compose service arrived on the platform default
                 # regardless of what its file said.
-                restart_policy_override: svc[:restart]
+                restart_policy_override: svc[:restart],
+                network_parent_id: netns_parent_id
               }
               # The Advanced panel describes ONE workload, so it applies to the app and
               # not to its companions — a routed port or memory ceiling copied onto five
@@ -1103,13 +1115,15 @@ defmodule HomelabWeb.DeployWizardLive do
 
             case Homelab.Deployments.create_deployment(attrs) do
               {:ok, deployment} ->
-                {:ok, {primary?, deployment}}
+                # Keyed by COMPOSE service name — what a sibling's `network_mode` names.
+                {{:ok, {primary?, deployment}},
+                 Map.put(created, to_string(svc[:name]), deployment.id)}
 
               {:error, changeset} ->
-                {:error, {svc[:name] || slug, changeset_message(changeset)}}
+                {{:error, {svc[:name] || slug, changeset_message(changeset)}}, created}
             end
           else
-            {:error, message} -> {:error, {svc[:name] || slug, message}}
+            {:error, message} -> {{:error, {svc[:name] || slug, message}}, created}
           end
         end)
 
@@ -1181,11 +1195,120 @@ defmodule HomelabWeb.DeployWizardLive do
       {[{_primary?, app} | extra], companions} ->
         {app, Enum.map(extra ++ companions, fn {_primary?, d} -> d end)}
 
-      {[], [{_primary?, app} | companions]} ->
-        {app, Enum.map(companions, fn {_primary?, d} -> d end)}
-
       {[], []} ->
         {nil, []}
+
+      {[], rows} ->
+        fallback_compose_app(rows)
+    end
+  end
+
+  # The primary service could not be imported. Prefers a row nothing else lives inside:
+  # the app is deployed last, so a namespace donor picked here would come up after the
+  # containers that need it.
+  defp fallback_compose_app(rows) do
+    donor_ids = MapSet.new(rows, fn {_primary?, d} -> d.network_parent_id end)
+
+    {app, companions} =
+      case Enum.split_with(rows, fn {_primary?, d} -> not MapSet.member?(donor_ids, d.id) end) do
+        {[{_primary?, app} | rest], donors} -> {app, donors ++ rest}
+        {[], [{_primary?, app} | rest]} -> {app, rest}
+      end
+
+    {app, Enum.map(companions, fn {_primary?, d} -> d end)}
+  end
+
+  # The compose service whose network namespace this one runs in, or nil. `container:x`
+  # is resolved against the bundle's service names too, and refused when it misses.
+  defp netns_target(svc) do
+    case svc[:network_mode] do
+      {_kind, target} -> to_string(target)
+      _mode -> nil
+    end
+  end
+
+  defp netns_donor_names(services) do
+    services
+    |> Enum.map(&netns_target/1)
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new()
+  end
+
+  # Donors ahead of their children, stable otherwise. One partition is enough: depth is
+  # one, so a donor is never itself a child.
+  defp order_netns_donors_first(services) do
+    donor_names = netns_donor_names(services)
+
+    Enum.sort_by(services, fn svc ->
+      if MapSet.member?(donor_names, to_string(svc[:name])), do: 0, else: 1
+    end)
+  end
+
+  # The service the release is about. Never a namespace donor: the app is deployed last,
+  # and a donor deployed after the containers living in its namespace leaves them with
+  # nothing to join.
+  defp compose_primary_name(services) do
+    donor_names = netns_donor_names(services)
+
+    services
+    |> Enum.reject(&MapSet.member?(donor_names, to_string(&1[:name])))
+    |> ComposeParser.primary_name()
+    |> Kernel.||(ComposeParser.primary_name(services))
+  end
+
+  # The deployment id this service's `network_mode` points at, or a refusal. A child
+  # that cannot be placed in its donor's namespace is skipped rather than created on
+  # the space's network, where it would look healthy while running outside the tunnel.
+  defp netns_parent_id(svc, services_by_name, created) do
+    case netns_target(svc) do
+      nil -> {:ok, nil}
+      target -> resolve_netns_target(to_string(svc[:name]), target, services_by_name, created)
+    end
+  end
+
+  defp resolve_netns_target(name, target, services_by_name, created) do
+    donor = Map.get(services_by_name, target)
+
+    cond do
+      target == name ->
+        {:error,
+         "its network mode points at itself, so there is no other container's network " <>
+           "for it to join"}
+
+      is_nil(donor) ->
+        {:error,
+         "it runs inside #{target}'s network, and no service called #{target} is in " <>
+           "this file. Importing it on the space's network instead would take it outside " <>
+           "whatever that container provides — for a service behind a VPN, outside the tunnel"}
+
+      netns_target(donor) != nil ->
+        {:error,
+         "it runs inside #{target}'s network and #{target} runs inside another " <>
+           "container's. Only one level of this is supported: a re-created container in " <>
+           "the middle of a chain orphans everything downstream with nothing to say so"}
+
+      true ->
+        case Map.fetch(created, target) do
+          {:ok, donor_id} ->
+            {:ok, donor_id}
+
+          :error ->
+            {:error,
+             "#{target}, whose network it runs inside, could not be imported — so there " <>
+               "is no namespace for it to join"}
+        end
+    end
+  end
+
+  # A child has no ports of its own to bind, so `Netns` refuses both host modes. The
+  # proxy modes stand: its Traefik labels are emitted onto the donor.
+  defp compose_exposure_mode(exposure_mode, svc) do
+    mode = String.to_existing_atom(exposure_mode)
+
+    cond do
+      is_nil(netns_target(svc)) -> mode
+      mode in [:host, :host_network] -> :service
+      true -> mode
     end
   end
 
@@ -2763,19 +2886,28 @@ defmodule HomelabWeb.DeployWizardLive do
               {host}<span :if={idx == 0} class="ml-1 opacity-50">main</span>
             </span>
           </div>
+          <%!-- A warning, not a block: reaching a VPN client's own control UI is a real
+                thing to want, just not what most people typing here mean. --%>
+          <div
+            :if={netns_donor_domain?(@selected_template, @domain)}
+            class="rounded-md bg-warning/10 border border-warning/20 p-2.5 mt-2 text-[11px] text-base-content/70 leading-relaxed"
+          >
+            {@selected_template.name} is a network container. A domain here routes to it
+            rather than to anything running inside its network, and attaches it to the proxy
+            network as a second interface its firewall was not told about. Apps behind it
+            carry their own domains — leave this blank unless you mean to reach {@selected_template.name} itself.
+          </div>
         </div>
 
         <%!-- Whose network stack this container uses. Offered here rather than only
               after deploying, because an app meant to run behind a VPN must never come
               up outside it even once. --%>
-        <div
-          :if={@netns_candidates != []}
-          class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2"
-        >
+        <div class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2">
           <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
             <.icon name="hero-lock-closed-mini" class="size-4 text-warning" /> Network
           </h3>
           <select
+            :if={@netns_candidates != []}
             id="netns-select"
             name="network[network_parent_id]"
             class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
@@ -2788,15 +2920,23 @@ defmodule HomelabWeb.DeployWizardLive do
               value={to_string(candidate.id)}
               selected={to_string(candidate.id) == to_string(@network_parent_id)}
             >
-              Through {candidate.app_template.name}
+              Through {candidate.app_template.name}{netns_donor_label_suffix(candidate)}
             </option>
           </select>
+          <%!-- With nothing else deployed the control is absent, which reads as the
+                feature not existing rather than as having nothing to point at. --%>
+          <p :if={@netns_candidates == []} class="text-[11px] text-base-content/40 leading-relaxed">
+            Nothing in this space can share its network yet. Deploy a VPN client such as
+            Gluetun first, and anything deployed afterwards can send every packet through it
+            — no traffic goes around it, and it needs no configuration of its own here.
+          </p>
           <p
-            :if={@network_parent_id in [nil, ""]}
+            :if={@netns_candidates != [] and @network_parent_id in [nil, ""]}
             class="text-[10px] text-base-content/30 mt-1.5"
           >
             Route all of this container's traffic through another container — how an app is
-            put behind a VPN client.
+            put behind a VPN client. Entries marked VPN client derive their own firewall rules
+            from whatever is behind them.
           </p>
           <div
             :if={@network_parent_id not in [nil, ""]}
@@ -2807,6 +2947,14 @@ defmodule HomelabWeb.DeployWizardLive do
             network reaches it on <code phx-no-curly-interpolation>localhost</code>, and Traefik reaches it via the other
             container. Host ports and host networking are not available.
           </div>
+          <p
+            :if={plain_netns_donor?(@netns_candidates, @network_parent_id)}
+            class="text-[11px] text-base-content/40 mt-2 leading-relaxed"
+          >
+            That container is not a VPN client, so its network is shared as-is and no
+            kill-switch or firewall rules are derived for it. Sharing a namespace with an
+            ordinary container is supported; it just does not tunnel anything.
+          </p>
         </div>
       </.form>
 
@@ -4078,7 +4226,9 @@ defmodule HomelabWeb.DeployWizardLive do
           |> Enum.filter(fn candidate ->
             is_nil(candidate.network_parent_id) and not Access.host_network_mode?(candidate)
           end)
-          |> Enum.sort_by(& &1.app_template.name)
+          # VPN clients first: every other container in the space is a legitimate but
+          # much rarer choice, and the list gives no other clue which is which.
+          |> Enum.sort_by(&{netns_donor_rank(&1), &1.app_template.name})
       end
 
     socket
@@ -4112,6 +4262,31 @@ defmodule HomelabWeb.DeployWizardLive do
     do: access in ["host", "host_network"]
 
   defp netns_forbidden_access?(_parent_id, _access), do: false
+
+  defp netns_donor_rank(%{app_template: %{netns_donor_kind: kind}}) when is_binary(kind), do: 0
+  defp netns_donor_rank(_candidate), do: 1
+
+  defp netns_donor_label_suffix(%{app_template: %{netns_donor_kind: kind}}) when is_binary(kind),
+    do: " — VPN client"
+
+  defp netns_donor_label_suffix(_candidate), do: ""
+
+  # True when a donor is selected and it derives no firewall rules of its own.
+  defp plain_netns_donor?(_candidates, parent_id) when parent_id in [nil, ""], do: false
+
+  defp plain_netns_donor?(candidates, parent_id) do
+    case Enum.find(candidates, &(to_string(&1.id) == to_string(parent_id))) do
+      nil -> false
+      candidate -> netns_donor_rank(candidate) == 1
+    end
+  end
+
+  # A namespace donor being given a hostname of its own.
+  defp netns_donor_domain?(%{netns_donor_kind: kind}, domain)
+       when is_binary(kind) and is_binary(domain),
+       do: String.trim(domain) != ""
+
+  defp netns_donor_domain?(_template, _domain), do: false
 
   defp netns_attrs(socket) do
     case socket.assigns.network_parent_id do
@@ -4176,6 +4351,27 @@ defmodule HomelabWeb.DeployWizardLive do
   # reads as "network parent id Docker Swarm cannot share a network namespace".
   defp changeset_message(%Ecto.Changeset{} = changeset),
     do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
+
+  # The typed reasons `create_and_deploy_release/2` refuses with, in words. Anything
+  # else keeps its shape via `inspect/1`.
+  defp deploy_error_message({:missing_required_env, keys}),
+    do: "these environment variables have no value: #{Enum.join(keys, ", ")}"
+
+  defp deploy_error_message({:release_in_flight, _deployment_id}),
+    do:
+      "another deployment in this stack is already being provisioned. Wait for that " <>
+        "release to finish and deploy again."
+
+  defp deploy_error_message({:netns_donor_not_running, _donor_id}),
+    do:
+      "the container this one routes through has no running container yet, so there is " <>
+        "no network namespace to join. Deploy it first."
+
+  defp deploy_error_message({:netns_donor_missing, _donor_id}),
+    do:
+      "the container this one routes through no longer exists. Pick another on the Network step."
+
+  defp deploy_error_message(reason), do: inspect(reason)
 
   # Indexes the config step's edited rows by the key the flattening deduped on.
   defp index_by(rows, key) do

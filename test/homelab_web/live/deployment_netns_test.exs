@@ -29,6 +29,7 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
     |> stub(:list_services, fn -> {:ok, []} end)
+    |> stub(:list_volumes, fn -> {:ok, []} end)
     |> stub(:get_service, fn _id -> {:error, :not_found} end)
 
     Homelab.Mocks.DnsProvider
@@ -147,6 +148,30 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     assert html =~ "localhost"
   end
 
+  # Multi-homing a VPN client onto the proxy network is what broke a real stack, and
+  # nothing on the form said it was happening.
+  test "giving a network container a domain of its own is flagged, not blocked", %{
+    conn: conn,
+    donor: donor
+  } do
+    view = settings_form(conn, donor)
+
+    html =
+      render_change(view, "settings_changed", %{
+        "settings" => %{"access" => "proxy", "domain" => "vpn.example.com"}
+      })
+
+    assert html =~ "is a network container"
+    # A warning: the field is still there and still takes the value.
+    assert html =~ "settings[domain]"
+  end
+
+  test "an ordinary deployment's domain is not flagged", %{conn: conn, app: app} do
+    html = render(settings_form(conn, app))
+
+    refute html =~ "is a network container"
+  end
+
   test "host ports and host networking are disabled once a container is chosen", %{
     conn: conn,
     app: app,
@@ -239,5 +264,85 @@ defmodule HomelabWeb.DeploymentNetnsTest do
 
     assert html =~ "Through Gluetun"
     refute html =~ "Through Sonarr"
+  end
+
+  defp wizard_network_step(conn, template, tenant, params \\ %{}) do
+    {:ok, view, _html} = live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
+
+    render_change(view, "update_network", %{
+      "network" => Map.merge(%{"tenant_id" => to_string(tenant.id)}, params)
+    })
+  end
+
+  # The picker offered every container in the space with nothing to say which of them
+  # can actually tunnel anything, so routing an app through Postgres looked like a
+  # supported choice.
+  describe "the wizard's Network step" do
+    setup do
+      %{
+        template:
+          insert(:app_template,
+            name: "Prowlarr",
+            slug: "prowlarr",
+            required_env: [],
+            default_env: %{},
+            volumes: [],
+            ports: []
+          )
+      }
+    end
+
+    test "a VPN client is marked as one and offered first", ctx do
+      insert(:deployment,
+        tenant: ctx.tenant,
+        app_template: insert(:app_template, name: "Postgres", slug: "pg-donor", ports: []),
+        domain: nil,
+        status: :running,
+        external_id: "pg-1"
+      )
+
+      html = wizard_network_step(ctx.conn, ctx.template, ctx.tenant)
+
+      assert html =~ "Through Gluetun — VPN client"
+      assert html =~ "Through Postgres"
+      refute html =~ "Through Postgres — VPN client"
+
+      {gluetun_at, _} = :binary.match(html, "Through Gluetun")
+      {postgres_at, _} = :binary.match(html, "Through Postgres")
+      assert gluetun_at < postgres_at
+    end
+
+    test "with nothing to route through, the step still explains the choice", ctx do
+      html = wizard_network_step(ctx.conn, ctx.template, insert(:tenant))
+
+      assert html =~ "Nothing in this space can share its network yet"
+      refute html =~ "netns-select"
+    end
+
+    test "a domain on a network container is flagged, not blocked", ctx do
+      vpn =
+        insert(:app_template,
+          name: "Gluetun VPN",
+          slug: "gluetun-wizard",
+          netns_donor_kind: "gluetun",
+          required_env: [],
+          default_env: %{},
+          volumes: [],
+          ports: []
+        )
+
+      html =
+        wizard_network_step(ctx.conn, vpn, ctx.tenant, %{"domain" => "vpn.example.com"})
+
+      assert html =~ "is a network container"
+      assert html =~ "network[domain]"
+    end
+
+    test "an ordinary app's domain is not flagged", ctx do
+      html =
+        wizard_network_step(ctx.conn, ctx.template, ctx.tenant, %{"domain" => "prowlarr.test"})
+
+      refute html =~ "is a network container"
+    end
   end
 end

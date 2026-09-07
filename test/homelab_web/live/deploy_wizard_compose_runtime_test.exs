@@ -414,4 +414,108 @@ defmodule HomelabWeb.DeployWizardComposeRuntimeTest do
     assert deployment.resource_limits_override == %{"memory_mb" => 2048}
     assert deployment.capabilities_add_override == ["NET_RAW"]
   end
+
+  # `network_mode: service:x` was never read, so a VPN'd bundle imported cleanly with
+  # every child on the tenant network — outside the tunnel, and green while doing it.
+  describe "a service in another container's network namespace" do
+    @vpn_stack """
+    services:
+      gluetun:
+        image: qmcgaw/gluetun
+      sonarr:
+        image: linuxserver/sonarr
+        network_mode: "service:gluetun"
+    """
+
+    test "the child is imported inside the donor's namespace", %{conn: conn, tenant: tenant} do
+      import_compose(conn, tenant, @vpn_stack)
+
+      assert imported_deployment("sonarr").network_parent_id == imported_deployment("gluetun").id
+      assert imported_deployment("gluetun").network_parent_id == nil
+    end
+
+    test "the donor is the dependency and the child is the app", %{conn: conn, tenant: tenant} do
+      import_compose(conn, tenant, @vpn_stack)
+
+      release = Repo.one!(Homelab.Deployments.Release) |> Repo.preload(:steps)
+
+      # A donor picked as the app would be deployed LAST, after the container that needs
+      # its namespace to already exist.
+      assert release.deployment_id == imported_deployment("sonarr").id
+
+      donor_step = Enum.find(release.steps, &(&1.type == :dependency_container))
+      app_step = Enum.find(release.steps, &(&1.type == :app_container))
+
+      assert donor_step.resource_handle == %{"deployment_id" => imported_deployment("gluetun").id}
+      assert donor_step.position < app_step.position
+    end
+
+    test "a child cannot bind host ports, so it is imported as an internal service", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=app&type=compose")
+
+      view
+      |> form("form[phx-submit=parse_compose]", %{"compose_yaml" => @vpn_stack})
+      |> render_submit()
+
+      render_click(view, "deploy_compose", %{
+        "tenant_id" => to_string(tenant.id),
+        "exposure_mode" => "host",
+        "domain" => ""
+      })
+
+      assert imported_template("sonarr").exposure_mode == :service
+      assert imported_template("gluetun").exposure_mode == :host
+    end
+
+    test "a namespace that is not in the file skips the service rather than leaking it", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      view =
+        import_compose(conn, tenant, """
+        services:
+          sonarr:
+            image: linuxserver/sonarr
+            network_mode: "service:vpn"
+          web:
+            image: nginx:latest
+        """)
+
+      flash = assert_redirect(view, "/")
+
+      assert flash["error"] =~ "sonarr"
+      assert flash["error"] =~ "no service called vpn"
+
+      # Not imported at all, rather than imported onto the space's network.
+      refute Repo.get_by(AppTemplate, slug: "sonarr")
+      assert Repo.get_by(AppTemplate, slug: "web")
+    end
+
+    test "a chain is refused, because only one level is supported", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      view =
+        import_compose(conn, tenant, """
+        services:
+          gluetun:
+            image: qmcgaw/gluetun
+          middle:
+            image: middle:latest
+            network_mode: "service:gluetun"
+          leaf:
+            image: leaf:latest
+            network_mode: "service:middle"
+        """)
+
+      flash = assert_redirect(view, "/")
+
+      assert flash["error"] =~ "leaf"
+      assert flash["error"] =~ "Only one level"
+      refute Repo.get_by(AppTemplate, slug: "leaf")
+    end
+  end
 end
