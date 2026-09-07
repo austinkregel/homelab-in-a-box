@@ -2886,19 +2886,28 @@ defmodule HomelabWeb.DeployWizardLive do
               {host}<span :if={idx == 0} class="ml-1 opacity-50">main</span>
             </span>
           </div>
+          <%!-- A warning, not a block: reaching a VPN client's own control UI is a real
+                thing to want, just not what most people typing here mean. --%>
+          <div
+            :if={netns_donor_domain?(@selected_template, @domain)}
+            class="rounded-md bg-warning/10 border border-warning/20 p-2.5 mt-2 text-[11px] text-base-content/70 leading-relaxed"
+          >
+            {@selected_template.name} is a network container. A domain here routes to it
+            rather than to anything running inside its network, and attaches it to the proxy
+            network as a second interface its firewall was not told about. Apps behind it
+            carry their own domains — leave this blank unless you mean to reach {@selected_template.name} itself.
+          </div>
         </div>
 
         <%!-- Whose network stack this container uses. Offered here rather than only
               after deploying, because an app meant to run behind a VPN must never come
               up outside it even once. --%>
-        <div
-          :if={@netns_candidates != []}
-          class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2"
-        >
+        <div class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2">
           <h3 class="text-sm font-semibold text-base-content flex items-center gap-2 mb-2">
             <.icon name="hero-lock-closed-mini" class="size-4 text-warning" /> Network
           </h3>
           <select
+            :if={@netns_candidates != []}
             id="netns-select"
             name="network[network_parent_id]"
             class="w-full rounded-md bg-base-200 border-0 text-sm text-base-content py-2 px-2.5 focus:ring-2 focus:ring-primary/50"
@@ -2911,15 +2920,23 @@ defmodule HomelabWeb.DeployWizardLive do
               value={to_string(candidate.id)}
               selected={to_string(candidate.id) == to_string(@network_parent_id)}
             >
-              Through {candidate.app_template.name}
+              Through {candidate.app_template.name}{netns_donor_label_suffix(candidate)}
             </option>
           </select>
+          <%!-- With nothing else deployed the control is absent, which reads as the
+                feature not existing rather than as having nothing to point at. --%>
+          <p :if={@netns_candidates == []} class="text-[11px] text-base-content/40 leading-relaxed">
+            Nothing in this space can share its network yet. Deploy a VPN client such as
+            Gluetun first, and anything deployed afterwards can send every packet through it
+            — no traffic goes around it, and it needs no configuration of its own here.
+          </p>
           <p
-            :if={@network_parent_id in [nil, ""]}
+            :if={@netns_candidates != [] and @network_parent_id in [nil, ""]}
             class="text-[10px] text-base-content/30 mt-1.5"
           >
             Route all of this container's traffic through another container — how an app is
-            put behind a VPN client.
+            put behind a VPN client. Entries marked VPN client derive their own firewall rules
+            from whatever is behind them.
           </p>
           <div
             :if={@network_parent_id not in [nil, ""]}
@@ -2930,6 +2947,14 @@ defmodule HomelabWeb.DeployWizardLive do
             network reaches it on <code phx-no-curly-interpolation>localhost</code>, and Traefik reaches it via the other
             container. Host ports and host networking are not available.
           </div>
+          <p
+            :if={plain_netns_donor?(@netns_candidates, @network_parent_id)}
+            class="text-[11px] text-base-content/40 mt-2 leading-relaxed"
+          >
+            That container is not a VPN client, so its network is shared as-is and no
+            kill-switch or firewall rules are derived for it. Sharing a namespace with an
+            ordinary container is supported; it just does not tunnel anything.
+          </p>
         </div>
       </.form>
 
@@ -4201,7 +4226,9 @@ defmodule HomelabWeb.DeployWizardLive do
           |> Enum.filter(fn candidate ->
             is_nil(candidate.network_parent_id) and not Access.host_network_mode?(candidate)
           end)
-          |> Enum.sort_by(& &1.app_template.name)
+          # VPN clients first: every other container in the space is a legitimate but
+          # much rarer choice, and the list gives no other clue which is which.
+          |> Enum.sort_by(&{netns_donor_rank(&1), &1.app_template.name})
       end
 
     socket
@@ -4235,6 +4262,31 @@ defmodule HomelabWeb.DeployWizardLive do
     do: access in ["host", "host_network"]
 
   defp netns_forbidden_access?(_parent_id, _access), do: false
+
+  defp netns_donor_rank(%{app_template: %{netns_donor_kind: kind}}) when is_binary(kind), do: 0
+  defp netns_donor_rank(_candidate), do: 1
+
+  defp netns_donor_label_suffix(%{app_template: %{netns_donor_kind: kind}}) when is_binary(kind),
+    do: " — VPN client"
+
+  defp netns_donor_label_suffix(_candidate), do: ""
+
+  # True when a donor is selected and it derives no firewall rules of its own.
+  defp plain_netns_donor?(_candidates, parent_id) when parent_id in [nil, ""], do: false
+
+  defp plain_netns_donor?(candidates, parent_id) do
+    case Enum.find(candidates, &(to_string(&1.id) == to_string(parent_id))) do
+      nil -> false
+      candidate -> netns_donor_rank(candidate) == 1
+    end
+  end
+
+  # A namespace donor being given a hostname of its own.
+  defp netns_donor_domain?(%{netns_donor_kind: kind}, domain)
+       when is_binary(kind) and is_binary(domain),
+       do: String.trim(domain) != ""
+
+  defp netns_donor_domain?(_template, _domain), do: false
 
   defp netns_attrs(socket) do
     case socket.assigns.network_parent_id do

@@ -2008,6 +2008,18 @@ defmodule HomelabWeb.DeploymentLive do
                     <p class="text-[10px] text-base-content/40">
                       Add a domain to go live; until then the app isn't reachable externally.
                     </p>
+                    <%!-- A warning, not a block: reaching a VPN client's own control UI is
+                          a real thing to want, just not what most people typing here mean. --%>
+                    <div
+                      :if={netns_donor_domain?(@deployment.app_template, @settings_domain)}
+                      class="rounded-lg bg-warning/10 border border-warning/20 p-2.5 text-[11px] text-base-content/70 leading-relaxed"
+                    >
+                      {@deployment.app_template.name} is a network container. A domain here
+                      routes to it rather than to anything running inside its network, and
+                      attaches it to the proxy network as a second interface its firewall was
+                      not told about. The deployments sharing its network carry their own
+                      domains, served from this container's address.
+                    </div>
                   </div>
 
                   <div class="flex flex-col gap-2">
@@ -3522,6 +3534,13 @@ defmodule HomelabWeb.DeploymentLive do
     do: access in ["host", "host_network"]
 
   defp netns_forbidden_access?(_parent_id, _access), do: false
+
+  # A namespace donor being given a hostname of its own.
+  defp netns_donor_domain?(%{netns_donor_kind: kind}, domain)
+       when is_binary(kind) and is_binary(domain),
+       do: String.trim(domain) != ""
+
+  defp netns_donor_domain?(_template, _domain), do: false
 
   # Normalizes stored ports into the container->host rows the Host editor renders.
   # Carries the ROLE through the form. The settings form used to post only
