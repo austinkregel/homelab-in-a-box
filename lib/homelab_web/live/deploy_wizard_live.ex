@@ -932,8 +932,10 @@ defmodule HomelabWeb.DeployWizardLive do
         |> Map.merge(advanced_attrs(socket))
         |> Map.merge(netns_attrs(socket))
 
-      case Homelab.Deployments.deploy_now(attrs) do
-        {:ok, _deployment} ->
+      # The saga, not `deploy_now/1`: it re-deploys the netns donor first (re-deriving
+      # its kill-switch env from the new child) and records `netns_parent_external_id`.
+      case Homelab.Deployments.create_and_deploy_release(attrs) do
+        {:ok, %{deployment: _deployment, release: _release}} ->
           {:noreply,
            socket
            |> put_flash(:info, "#{template.name} deployment started!")
@@ -946,7 +948,8 @@ defmodule HomelabWeb.DeployWizardLive do
            put_flash(socket, :error, "Deployment failed: #{changeset_message(changeset)}")}
 
         {:error, reason} ->
-          {:noreply, put_flash(socket, :error, "Deployment failed: #{inspect(reason)}")}
+          {:noreply,
+           put_flash(socket, :error, "Deployment failed: #{deploy_error_message(reason)}")}
       end
     end
   end
@@ -4176,6 +4179,27 @@ defmodule HomelabWeb.DeployWizardLive do
   # reads as "network parent id Docker Swarm cannot share a network namespace".
   defp changeset_message(%Ecto.Changeset{} = changeset),
     do: HomelabWeb.ChangesetErrors.to_sentence(changeset)
+
+  # The typed reasons `create_and_deploy_release/2` refuses with, in words. Anything
+  # else keeps its shape via `inspect/1`.
+  defp deploy_error_message({:missing_required_env, keys}),
+    do: "these environment variables have no value: #{Enum.join(keys, ", ")}"
+
+  defp deploy_error_message({:release_in_flight, _deployment_id}),
+    do:
+      "another deployment in this stack is already being provisioned. Wait for that " <>
+        "release to finish and deploy again."
+
+  defp deploy_error_message({:netns_donor_not_running, _donor_id}),
+    do:
+      "the container this one routes through has no running container yet, so there is " <>
+        "no network namespace to join. Deploy it first."
+
+  defp deploy_error_message({:netns_donor_missing, _donor_id}),
+    do:
+      "the container this one routes through no longer exists. Pick another on the Network step."
+
+  defp deploy_error_message(reason), do: inspect(reason)
 
   # Indexes the config step's edited rows by the key the flattening deduped on.
   defp index_by(rows, key) do
