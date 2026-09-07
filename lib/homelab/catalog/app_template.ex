@@ -2,6 +2,8 @@ defmodule Homelab.Catalog.AppTemplate do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias Homelab.Catalog.EnvSchema
+
   schema "app_templates" do
     field :slug, :string
     field :name, :string
@@ -20,6 +22,11 @@ defmodule Homelab.Catalog.AppTemplate do
     field :auth_integration, :boolean, default: true
     field :default_env, :map, default: %{}
     field :required_env, {:array, :string}, default: []
+
+    # Conditional requirements and per-key form metadata, for apps whose required set
+    # depends on a mode. Empty means `required_env` is the whole answer. See EnvSchema.
+    field :env_schema, :map, default: %{}
+
     field :volumes, {:array, :map}, default: []
     # Names this service must keep answering to on its network. An adopted container is
     # renamed by the plane, so without these every sibling that reached it by its compose
@@ -72,7 +79,7 @@ defmodule Homelab.Catalog.AppTemplate do
 
   @required_fields ~w(slug name version image)a
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
-                      volumes network_aliases command entrypoint
+                      env_schema volumes network_aliases command entrypoint
                       capabilities_add capabilities_drop devices sysctls netns_donor_kind
                       ports resource_limits backup_policy health_check depends_on
                       source source_id logo_url category auth_mode user)a
@@ -97,6 +104,9 @@ defmodule Homelab.Catalog.AppTemplate do
     |> Homelab.Deployments.RuntimeSpec.validate_capabilities(:capabilities_drop, allow_all: true)
     |> Homelab.Deployments.RuntimeSpec.validate_devices(:devices)
     |> Homelab.Deployments.RuntimeSpec.validate_sysctls(:sysctls)
+    # A malformed env schema does not fail at deploy time, it stops ASKING for a
+    # variable — so the deploy succeeds without the credential it needed.
+    |> EnvSchema.validate_changeset(:env_schema)
     |> unique_constraint(:slug)
   end
 end

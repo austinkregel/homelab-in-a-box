@@ -143,6 +143,25 @@ defmodule Homelab.Schemas.AppTemplateChangesetTest do
       assert get_change(cs, :default_env) == %{"A" => "1"}
       assert get_change(cs, :depends_on) == ["postgres"]
     end
+
+    test "casts a conditional env schema" do
+      schema = %{
+        "VPN_TYPE" => %{"enum" => ["wireguard", "openvpn"], "required" => true},
+        "OPENVPN_USER" => %{"required_when" => %{"VPN_TYPE" => "openvpn"}}
+      }
+
+      cs = changeset(Map.put(@valid_attrs, :env_schema, schema))
+      assert cs.valid?
+      assert get_change(cs, :env_schema) == schema
+    end
+
+    test "rejects an env schema whose condition names an undescribed variable" do
+      schema = %{"OPENVPN_USER" => %{"required_when" => %{"VPN_TYP" => "openvpn"}}}
+
+      cs = changeset(Map.put(@valid_attrs, :env_schema, schema))
+      refute cs.valid?
+      assert Map.has_key?(errors_on(cs), :env_schema)
+    end
   end
 
   describe "unique_constraint on slug (via Repo)" do
