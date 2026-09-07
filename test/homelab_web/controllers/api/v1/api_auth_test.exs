@@ -25,7 +25,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
     test "reading tenants is refused" do
       insert(:tenant)
 
-      conn = get(anonymous(), ~p"/api/v1/tenants")
+      conn = get(anonymous(), ~p"/api/v1/spaces")
 
       assert json_response(conn, 401)
     end
@@ -36,7 +36,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
 
     test "reading backups is refused" do
       tenant = insert(:tenant)
-      assert json_response(get(anonymous(), ~p"/api/v1/tenants/#{tenant.id}/backups"), 401)
+      assert json_response(get(anonymous(), ~p"/api/v1/spaces/#{tenant.id}/backups"), 401)
     end
 
     test "creating a deployment is refused" do
@@ -47,7 +47,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
       template = insert(:app_template)
 
       conn =
-        post(anonymous(), ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
+        post(anonymous(), ~p"/api/v1/spaces/#{tenant.id}/deployments", %{
           "deployment" => %{
             "app_template_id" => template.id,
             "image_override" => "attacker/whatever:latest"
@@ -64,7 +64,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
       conn =
         delete(
           anonymous(),
-          ~p"/api/v1/tenants/#{deployment.tenant_id}/deployments/#{deployment.id}"
+          ~p"/api/v1/spaces/#{deployment.tenant_id}/deployments/#{deployment.id}"
         )
 
       assert json_response(conn, 401)
@@ -77,7 +77,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
       conn =
         post(
           anonymous(),
-          ~p"/api/v1/tenants/#{job.deployment.tenant_id}/backups/#{job.id}/restore"
+          ~p"/api/v1/spaces/#{job.deployment.tenant_id}/backups/#{job.id}/restore"
         )
 
       assert json_response(conn, 401)
@@ -86,7 +86,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
     test "the refusal is JSON, not a redirect to the login page" do
       # A 302 to /auth/oidc is not an answer a JSON client can act on — curl follows it
       # and reports 200 with an HTML body, so a script cannot tell denied from succeeded.
-      conn = get(anonymous(), ~p"/api/v1/tenants")
+      conn = get(anonymous(), ~p"/api/v1/spaces")
 
       assert conn.status == 401
       assert %{"errors" => %{"detail" => "Unauthorized"}} = json_response(conn, 401)
@@ -105,7 +105,7 @@ defmodule HomelabWeb.Api.V1.ApiAuthTest do
     test "a logged-in session still reaches the API", %{conn: conn} do
       insert(:tenant, name: "Friends", slug: "friends")
 
-      conn = conn |> put_req_header("accept", "application/json") |> get(~p"/api/v1/tenants")
+      conn = conn |> put_req_header("accept", "application/json") |> get(~p"/api/v1/spaces")
 
       assert %{"data" => [_tenant]} = json_response(conn, 200)
     end

@@ -1,4 +1,4 @@
-defmodule HomelabWeb.TenantLive do
+defmodule HomelabWeb.SpaceLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Tenants
@@ -7,11 +7,11 @@ defmodule HomelabWeb.TenantLive do
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     case Tenants.get_tenant(String.to_integer(id)) do
-      {:ok, tenant} ->
+      {:ok, space} ->
         if connected?(socket), do: :timer.send_interval(5000, self(), :refresh)
 
-        deployments = Deployments.list_deployments_for_tenant(tenant.id)
-        all_tenants = Tenants.list_tenants()
+        deployments = Deployments.list_deployments_for_tenant(space.id)
+        all_tenants = Tenants.list_active_tenants()
 
         counts =
           Enum.group_by(deployments, & &1.status)
@@ -19,8 +19,8 @@ defmodule HomelabWeb.TenantLive do
 
         socket =
           socket
-          |> assign(:page_title, tenant.name)
-          |> assign(:tenant, tenant)
+          |> assign(:page_title, space.name)
+          |> assign(:space, space)
           |> assign(:tenants, all_tenants)
           |> assign(:deployments, deployments)
           |> assign(:counts, counts)
@@ -31,14 +31,14 @@ defmodule HomelabWeb.TenantLive do
       {:error, :not_found} ->
         {:ok,
          socket
-         |> put_flash(:error, "Tenant not found")
+         |> put_flash(:error, "Space not found")
          |> redirect(to: ~p"/")}
     end
   end
 
   @impl true
   def handle_info(:refresh, socket) do
-    deployments = Deployments.list_deployments_for_tenant(socket.assigns.tenant.id)
+    deployments = Deployments.list_deployments_for_tenant(socket.assigns.space.id)
 
     counts =
       Enum.group_by(deployments, & &1.status)
@@ -63,13 +63,13 @@ defmodule HomelabWeb.TenantLive do
     {:noreply, assign(socket, :editing, false)}
   end
 
-  def handle_event("save_tenant", %{"name" => name}, socket) do
-    case Tenants.update_tenant(socket.assigns.tenant, %{name: name}) do
-      {:ok, tenant} ->
+  def handle_event("save_space", %{"name" => name}, socket) do
+    case Tenants.update_tenant(socket.assigns.space, %{name: name}) do
+      {:ok, space} ->
         {:noreply,
          socket
-         |> assign(:tenant, tenant)
-         |> assign(:page_title, tenant.name)
+         |> assign(:space, space)
+         |> assign(:page_title, space.name)
          |> assign(:editing, false)
          |> put_flash(:info, "Space renamed.")}
 
@@ -78,16 +78,16 @@ defmodule HomelabWeb.TenantLive do
     end
   end
 
-  def handle_event("delete_tenant", _params, socket) do
-    tenant = socket.assigns.tenant
+  def handle_event("delete_space", _params, socket) do
+    space = socket.assigns.space
 
-    case Deployments.list_deployments_for_tenant(tenant.id) do
+    case Deployments.list_deployments_for_tenant(space.id) do
       [] ->
-        case Tenants.delete_tenant(tenant) do
+        case Tenants.delete_tenant(space) do
           {:ok, _} ->
             {:noreply,
              socket
-             |> put_flash(:info, "Space \"#{tenant.name}\" deleted.")
+             |> put_flash(:info, "Space \"#{space.name}\" deleted.")
              |> push_navigate(to: ~p"/")}
 
           {:error, _} ->
@@ -147,7 +147,7 @@ defmodule HomelabWeb.TenantLive do
          |> put_flash(:info, "#{deployment.app_template.name} deleted.")
          |> assign(
            :deployments,
-           Deployments.list_deployments_for_tenant(socket.assigns.tenant.id)
+           Deployments.list_deployments_for_tenant(socket.assigns.space.id)
          )}
 
       {:error, {:undeploy_failed, _reason}} ->
@@ -180,7 +180,7 @@ defmodule HomelabWeb.TenantLive do
             Dashboard
           </.link>
           <.icon name="hero-chevron-right-mini" class="size-3.5" />
-          <span class="text-base-content/60">{@tenant.name}</span>
+          <span class="text-base-content/60">{@space.name}</span>
         </div>
 
         <div class="flex items-center justify-between">
@@ -189,8 +189,8 @@ defmodule HomelabWeb.TenantLive do
               <.icon name="hero-folder-solid" class="size-7 text-primary" />
             </div>
             <div>
-              <h1 class="text-2xl font-bold text-base-content">{@tenant.name}</h1>
-              <p class="text-sm text-base-content/40 font-mono">{@tenant.slug}</p>
+              <h1 class="text-2xl font-bold text-base-content">{@space.name}</h1>
+              <p class="text-sm text-base-content/40 font-mono">{@space.slug}</p>
             </div>
           </div>
           <div class="flex items-center gap-2">
@@ -203,8 +203,8 @@ defmodule HomelabWeb.TenantLive do
             </button>
             <button
               type="button"
-              phx-click="delete_tenant"
-              data-confirm={"Delete the space \"#{@tenant.name}\"? This cannot be undone."}
+              phx-click="delete_space"
+              data-confirm={"Delete the space \"#{@space.name}\"? This cannot be undone."}
               class="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-error/20 text-sm font-medium text-error hover:bg-error/10 cursor-pointer"
             >
               <.icon name="hero-trash" class="size-4" /> Delete
@@ -228,11 +228,11 @@ defmodule HomelabWeb.TenantLive do
             phx-click-away="close_edit"
           >
             <h2 class="text-lg font-semibold text-base-content mb-4">Rename space</h2>
-            <form phx-submit="save_tenant" class="space-y-4">
+            <form phx-submit="save_space" class="space-y-4">
               <input
                 type="text"
                 name="name"
-                value={@tenant.name}
+                value={@space.name}
                 required
                 class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-2 text-sm"
               />

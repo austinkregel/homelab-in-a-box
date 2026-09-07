@@ -1,7 +1,7 @@
 defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
   @moduledoc """
   `BackupController` was routed at the top level — `/api/v1/backups` — while every other
-  resource hung off `/api/v1/tenants/:tenant_id/...`. `index` fell through to
+  resource hung off `/api/v1/spaces/:space_id/...`. `index` fell through to
   `Backups.list_backup_jobs/0`, which is every tenant's jobs, and `show` and `restore`
   took a bare id and looked it up with no scope at all. Any signed-in user could list
   every tenant's backup history and, worse, `POST /api/v1/backups/:id/restore` any
@@ -47,7 +47,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
 
   describe "index" do
     test "lists only the addressed tenant's jobs", %{conn: conn, mine: mine, my_job: my_job} do
-      conn = get(conn, ~p"/api/v1/tenants/#{mine.id}/backups")
+      conn = get(conn, ~p"/api/v1/spaces/#{mine.id}/backups")
 
       assert %{"data" => [job]} = json_response(conn, 200)
       assert job["id"] == my_job.id
@@ -59,7 +59,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
       their_job: their_job
     } do
       conn =
-        get(conn, ~p"/api/v1/tenants/#{mine.id}/backups?deployment_id=#{their_job.deployment_id}")
+        get(conn, ~p"/api/v1/spaces/#{mine.id}/backups?deployment_id=#{their_job.deployment_id}")
 
       assert json_response(conn, 404)
     end
@@ -67,14 +67,14 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
 
   describe "show" do
     test "returns the tenant's own job", %{conn: conn, mine: mine, my_job: my_job} do
-      conn = get(conn, ~p"/api/v1/tenants/#{mine.id}/backups/#{my_job.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{mine.id}/backups/#{my_job.id}")
 
       assert %{"data" => %{"id" => id}} = json_response(conn, 200)
       assert id == my_job.id
     end
 
     test "404s for another tenant's job", %{conn: conn, mine: mine, their_job: their_job} do
-      conn = get(conn, ~p"/api/v1/tenants/#{mine.id}/backups/#{their_job.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{mine.id}/backups/#{their_job.id}")
 
       assert json_response(conn, 404)
     end
@@ -91,7 +91,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
 
       expect(Homelab.Mocks.BackupProvider, :restore, fn "my-snapshot", "/data/restore" -> :ok end)
 
-      conn = post(conn, ~p"/api/v1/tenants/#{mine.id}/backups/#{job.id}/restore")
+      conn = post(conn, ~p"/api/v1/spaces/#{mine.id}/backups/#{job.id}/restore")
 
       assert %{"data" => %{"id" => id}} = json_response(conn, 200)
       assert id == job.id
@@ -104,7 +104,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
     } do
       # The whole point: no `expect` on the provider, so a call to it fails the test.
       # A 404 that still ran the restore would be worthless.
-      conn = post(conn, ~p"/api/v1/tenants/#{mine.id}/backups/#{their_job.id}/restore")
+      conn = post(conn, ~p"/api/v1/spaces/#{mine.id}/backups/#{their_job.id}/restore")
 
       assert json_response(conn, 404)
     end
@@ -116,7 +116,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
       at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
       conn =
-        post(conn, ~p"/api/v1/tenants/#{mine.id}/backups", %{
+        post(conn, ~p"/api/v1/spaces/#{mine.id}/backups", %{
           "backup" => %{"deployment_id" => deployment.id, "scheduled_at" => at}
         })
 
@@ -134,7 +134,7 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
       before = Homelab.Repo.aggregate(Homelab.Backups.BackupJob, :count)
 
       conn =
-        post(conn, ~p"/api/v1/tenants/#{mine.id}/backups", %{
+        post(conn, ~p"/api/v1/spaces/#{mine.id}/backups", %{
           "backup" => %{"deployment_id" => their_job.deployment_id, "scheduled_at" => at}
         })
 

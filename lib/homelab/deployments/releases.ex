@@ -165,14 +165,57 @@ defmodule Homelab.Deployments.Releases do
   Deployment ids that currently have a release holding a *live* lease — i.e. a
   legitimately in-flight provisioning. The reconciler skips these so it never
   fights (times out / orphan-sweeps) a deployment a release owns.
+
+  "Owns" means every deployment the release touches, not just the one it is anchored
+  on: the anchor plus every deployment named by a step's `resource_handle`, which is
+  the same union `active_release_driving/1` guards with.
+
+  Selecting only `releases.deployment_id` made this set disagree with that guard, and
+  the disagreement had teeth on exactly the release that touches the most rows. A netns
+  stack release is anchored on the DONOR and drives its children through
+  `:netns_child_container` steps, so the children — reset to `:pending` with no
+  container, mid-saga — were absent from the lease set and visible to every sweep. The
+  loop that came out of it: the release re-creates the donor, each child's recorded
+  `netns_parent_external_id` still names the old container, `sweep_stale_netns/1` sees
+  children it believes nothing owns, and re-drives the stack — superseding the release
+  that was three steps into fixing them. The successor then does the same thing, so a
+  Gluetun stack never got past its donor's health gate.
   """
   def leased_deployment_ids(now \\ utc_now()) do
-    Release
-    |> where([r], r.status in ^Release.active_statuses() and r.lease_expires_at > ^now)
-    |> select([r], r.deployment_id)
-    |> Repo.all()
-    |> MapSet.new()
+    live = dynamic([r], r.status in ^Release.active_statuses() and r.lease_expires_at > ^now)
+
+    anchors =
+      Release
+      |> where(^live)
+      |> select([r], r.deployment_id)
+      |> Repo.all()
+
+    companions =
+      Release
+      |> join(:inner, [r], s in assoc(r, :steps))
+      |> where(^live)
+      |> select([r, s], fragment("?->>'deployment_id'", s.resource_handle))
+      |> Repo.all()
+      |> Enum.flat_map(&handle_id/1)
+
+    MapSet.new(anchors ++ companions)
   end
+
+  # Handles are written with `to_string(id)`, so they come back as text and have to be
+  # cast to match the integer ids every caller holds. Parsed here rather than in SQL:
+  # a `::bigint` cast raises on the whole query if any handle ever carries something
+  # else, and a lease set is the wrong place to be strict.
+  defp handle_id(nil), do: []
+
+  defp handle_id(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {id, ""} -> [id]
+      _ -> []
+    end
+  end
+
+  defp handle_id(value) when is_integer(value), do: [value]
+  defp handle_id(_value), do: []
 
   @doc """
   Active releases whose lease has expired (or was never set) — candidates for the

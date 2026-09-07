@@ -127,6 +127,7 @@ defmodule HomelabWeb.DashboardLive do
 
     socket
     |> assign(:tenants, tenants)
+    |> assign(:sidebar_tenants, Enum.filter(tenants, &(&1.status == :active)))
     |> assign(:deployments, deployments)
     |> assign(:templates_count, length(templates))
     |> assign(:deployment_counts, deployment_counts)
@@ -222,7 +223,7 @@ defmodule HomelabWeb.DashboardLive do
     <Layouts.app
       flash={@flash}
       page_title={@page_title}
-      tenants={@tenants}
+      tenants={@sidebar_tenants}
       current_user={@current_user}
       notification_count={@notification_count}
       notifications={@notifications}
@@ -361,7 +362,7 @@ defmodule HomelabWeb.DashboardLive do
             <div :if={@tenants != []} class="divide-y divide-base-content/[0.06]">
               <.link
                 :for={tenant <- @tenants}
-                navigate={~p"/tenants/#{tenant.id}"}
+                navigate={~p"/spaces/#{tenant.id}"}
                 class="flex items-center justify-between px-4 py-3 hover:bg-base-content/[0.02] transition-colors"
               >
                 <div class="flex items-center gap-3.5 min-w-0">

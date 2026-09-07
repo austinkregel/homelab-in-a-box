@@ -629,8 +629,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
     test "navigate event redirects to tenant page", %{conn: conn, deployment: dep, tenant: tenant} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
-      render_click(view, "navigate", %{"to" => ~p"/tenants/#{tenant.id}"})
-      assert_redirect(view, ~p"/tenants/#{tenant.id}")
+      render_click(view, "navigate", %{"to" => ~p"/spaces/#{tenant.id}"})
+      assert_redirect(view, ~p"/spaces/#{tenant.id}")
     end
   end
 
@@ -1325,14 +1325,14 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ template.name
     end
 
-    test "breadcrumb has links to dashboard and tenant", %{
+    test "breadcrumb has links to dashboard and space", %{
       conn: conn,
       deployment: dep,
       tenant: tenant
     } do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       assert has_element?(view, "a[href='/']", "Dashboard")
-      assert has_element?(view, "a[href='/tenants/#{tenant.id}']")
+      assert has_element?(view, "a[href='/spaces/#{tenant.id}']")
     end
   end
 
@@ -1926,15 +1926,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "proxy",
+      render_submit(view, "save_settings", %{
+        "settings" => %{
           "auth" => "public",
-          "domain" => "dashy.example.com"
+          "routes" => %{"0" => %{"host" => "dashy.example.com", "port" => "8080"}}
         }
-      )
-      |> render_submit()
+      })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.domain == "dashy.example.com"
@@ -1969,15 +1966,14 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "start_settings_edit")
       render_click(view, "settings_add_route")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "proxy",
-          "domain" => "aut.hair",
-          "routes" => %{"0" => %{"path_prefix" => "/app", "port" => "6001"}}
+      render_submit(view, "save_settings", %{
+        "settings" => %{
+          "routes" => %{
+            "0" => %{"host" => "aut.hair", "port" => "8000"},
+            "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"}
+          }
         }
-      )
-      |> render_submit()
+      })
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"path_prefix" => "/app", "port" => 6001}] = reloaded.extra_routes
@@ -1993,18 +1989,15 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "settings_add_route")
       render_click(view, "settings_add_route")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "proxy",
-          "domain" => "aut.hair",
+      render_submit(view, "save_settings", %{
+        "settings" => %{
           "routes" => %{
-            "0" => %{"path_prefix" => "/app", "port" => "6001"},
-            "1" => %{"path_prefix" => "/half", "port" => ""}
+            "0" => %{"host" => "aut.hair", "port" => "8000"},
+            "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"},
+            "2" => %{"host" => "aut.hair", "path_prefix" => "/half", "port" => ""}
           }
         }
-      )
-      |> render_submit()
+      })
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"path_prefix" => "/app"}] = reloaded.extra_routes
@@ -2018,18 +2011,19 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      # Switch access to Host (reveals the port editor), then add a row.
-      render_change(view, "settings_changed", %{"settings" => %{"access" => "host"}})
       render_click(view, "settings_add_port")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "host",
-          "ports" => %{"0" => %{"internal" => "8080", "external" => "9090"}}
+      # Exposure is per PORT now, and dropping the routes is what makes the deployment
+      # host-mode: nothing is derived from a mode the operator picked separately.
+      render_click(view, "settings_remove_route", %{"index" => "0"})
+
+      render_submit(view, "save_settings", %{
+        "settings" => %{
+          "ports" => %{
+            "0" => %{"internal" => "8080", "external" => "9090", "exposure" => "host"}
+          }
         }
-      )
-      |> render_submit()
+      })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.exposure_mode_override == "host"
@@ -2047,19 +2041,22 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
-      render_change(view, "settings_changed", %{"settings" => %{"access" => "host"}})
       render_click(view, "settings_add_port")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "host",
+      render_click(view, "settings_remove_route", %{"index" => "0"})
+
+      render_submit(view, "save_settings", %{
+        "settings" => %{
           "ports" => %{
-            "0" => %{"internal" => "27900", "external" => "27900", "protocol" => "udp"}
+            "0" => %{
+              "internal" => "27900",
+              "external" => "27900",
+              "protocol" => "udp",
+              "exposure" => "host"
+            }
           }
         }
-      )
-      |> render_submit()
+      })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert [%{"internal" => "27900", "protocol" => "udp"}] = updated.ports_override
@@ -2072,10 +2069,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      html =
-        view
-        |> form("#settings-form", settings: %{"memory_mb" => "1024"})
-        |> render_submit()
+      html = render_submit(view, "save_settings", %{"settings" => %{"memory_mb" => "1024"}})
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
 
@@ -2107,17 +2101,14 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form",
-        settings: %{
-          "access" => "proxy",
+      render_submit(view, "save_settings", %{
+        "settings" => %{
           "auth" => "sso_protected",
           "memory_mb" => "1024",
           "cpu_shares" => "2048",
-          "health_path" => "/healthz"
+          "health" => %{"mode" => "path", "path" => "/healthz"}
         }
-      )
-      |> render_submit()
+      })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
       assert updated.resource_limits_override == %{"memory_mb" => 1024, "cpu_shares" => 2048}
@@ -2141,9 +2132,10 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form", settings: %{"access" => "internal"})
-      |> render_submit()
+      # Removing the last route is what makes it internal: nothing is derived from a
+      # mode picked separately from the routes it describes.
+      render_click(view, "settings_remove_route", %{"index" => "0"})
+      render_submit(view, "save_settings", %{"settings" => %{}})
 
       assert Homelab.Deployments.get_deployment!(dep.id).exposure_mode_override == "service"
       # Sibling untouched — its overrides remain nil and it inherits the template.
@@ -2172,9 +2164,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form", settings: %{"access" => "proxy", "domain" => "app.example.com"})
-      |> render_submit()
+      render_submit(view, "save_settings", %{
+        "settings" => %{"routes" => %{"0" => %{"host" => "app.example.com", "port" => "8080"}}}
+      })
 
       html = render_click(view, "switch_tab", %{"tab" => "releases"})
 
@@ -2194,9 +2186,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      view
-      |> form("#settings-form", settings: %{"access" => "internal"})
-      |> render_submit()
+      render_click(view, "settings_remove_route", %{"index" => "0"})
+      render_submit(view, "save_settings", %{"settings" => %{}})
 
       html = render_click(view, "switch_tab", %{"tab" => "overview"})
 

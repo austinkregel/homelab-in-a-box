@@ -29,7 +29,7 @@ defmodule HomelabWeb.TelemetryLive do
     socket =
       socket
       |> assign(:page_title, "Telemetry")
-      |> assign(:tenants, Tenants.list_tenants())
+      |> assign(:tenants, Tenants.list_active_tenants())
       |> assign(:windows, @windows)
       |> assign(:window_minutes, 30)
       |> assign(:metrics, latest_metrics())

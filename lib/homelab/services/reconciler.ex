@@ -377,9 +377,31 @@ defmodule Homelab.Services.Reconciler do
   # This is the convergence path for that: mark it failed with an error that names the
   # real cause, and re-drive the whole stack so the children are re-created against the
   # donor's current container.
+  #
+  # ## Why an active release is left alone, lease or no lease
+  #
+  # A stale pin is not drift while a release is in flight over the stack — it is that
+  # release's own half-finished work. `redeploy_netns_stack/2` re-creates the donor
+  # (minting a new container id) several steps BEFORE it re-creates the children that
+  # name it, so every child is stale for the whole span in between, by construction.
+  # Re-driving on that evidence supersedes the release that was about to fix it and
+  # plans an identical one, which re-creates the donor, which makes the children stale
+  # again. That is the Gluetun loop: a 27-step Media stack died at its donor's health
+  # gate every time, and no release ever reached its children.
+  #
+  # The lease set cannot carry this on its own. A superseded runner cannot be pulled out
+  # of a step, so the successor snoozes on `deployment_leased_elsewhere?/2` — sitting
+  # `:planning` with NO lease of its own — for as long as the outgoing runner is inside
+  # the donor's health gate, which for a VPN donor is minutes. It is unleased and
+  # supersedable during precisely the window this sweep would fire in.
+  #
+  # So the guard is the release, not the lease: the child's own, or its donor's, since
+  # the donor's is what invalidates the pin. Nothing is lost by waiting — a release that
+  # genuinely dies leaves the children stale and terminal, and the next pass re-drives
+  # them then.
   defp sweep_stale_netns(leased) do
     Netns.stale_children()
-    |> Enum.reject(&MapSet.member?(leased, &1.id))
+    |> Enum.reject(&owned_by_release?(&1, leased))
     |> Enum.group_by(& &1.network_parent_id)
     |> Enum.each(fn {_donor_id, children} ->
       Enum.each(children, fn child ->
@@ -410,6 +432,14 @@ defmodule Homelab.Services.Reconciler do
   end
 
   # 3. Ingress invariant — the single, idempotent owner of external reachability.
+  # Held by a release: leased under one, or named by one that is active but not holding
+  # a lease yet — the successor's snooze window, which is where the loop lived.
+  defp owned_by_release?(child, leased) do
+    MapSet.member?(leased, child.id) or
+      Releases.active_release_driving(child.id) != nil or
+      Releases.active_release_driving(child.network_parent_id) != nil
+  end
+
   defp enforce_ingress_invariant do
     Deployments.list_ingress_deployments()
     |> Enum.each(fn deployment ->

@@ -44,29 +44,14 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
   defp runtime_form(conn, deployment) do
     {:ok, view, _html} = live(conn, ~p"/deployments/#{deployment.id}")
     render_click(view, "switch_tab", %{"tab" => "settings"})
-    render_click(view, "start_runtime_edit", %{})
+    render_click(view, "start_settings_edit", %{})
     view
   end
 
+  # Only the fields under test are posted. Everything else round-trips from the form the
+  # editor was seeded with, exactly as a partial change event does in the browser.
   defp submit(view, params) do
-    defaults = %{
-      "restart_policy" => "on-failure",
-      "replicas" => "1",
-      "command_mode" => "inherit",
-      "command" => "",
-      "entrypoint_mode" => "inherit",
-      "entrypoint" => "",
-      "aliases_mode" => "inherit",
-      "aliases" => "",
-      "caps_add_mode" => "inherit",
-      "caps_add" => "",
-      "caps_drop_mode" => "inherit",
-      "caps_drop" => "",
-      "devices_mode" => "inherit",
-      "sysctls_mode" => "inherit"
-    }
-
-    render_submit(view, "save_runtime", %{"runtime" => Map.merge(defaults, params)})
+    render_submit(view, "save_settings", %{"settings" => params})
   end
 
   test "the card reports the effective values before editing", %{conn: conn, deployment: d} do
@@ -74,7 +59,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     html = render_click(view, "switch_tab", %{"tab" => "settings"})
 
     assert html =~ "Runtime"
-    assert html =~ "on-failure"
+    assert html =~ "On failure"
     assert html =~ "serve"
     assert html =~ "/init"
   end
@@ -94,10 +79,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     # implementing shell quoting in a form field.
     view = runtime_form(conn, d)
 
-    submit(view, %{
-      "command_mode" => "custom",
-      "command" => "serve\n--config\n/etc/app with spaces.conf"
-    })
+    submit(view, %{"command" => "serve\n--config\n/etc/app with spaces.conf"})
 
     assert Repo.reload!(d).command_override == ["serve", "--config", "/etc/app with spaces.conf"]
   end
@@ -105,21 +87,37 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
   test "a custom-but-empty entrypoint clears the image's own", %{conn: conn, deployment: d} do
     # [] and nil mean different things to Docker, so the form has to be able to say both.
     view = runtime_form(conn, d)
-    submit(view, %{"entrypoint_mode" => "custom", "entrypoint" => ""})
+    submit(view, %{"entrypoint" => ""})
 
     reloaded = Repo.reload!(d)
     assert reloaded.entrypoint_override == []
     refute reloaded.entrypoint_override == nil
   end
 
-  test "inherit stores nil, so the catalog still drives it", %{conn: conn, deployment: d} do
+  test "typing the catalog's own command back in stores nil, so the catalog drives it again", %{
+    conn: conn,
+    deployment: d
+  } do
     {:ok, pinned} =
       Homelab.Deployments.update_deployment(d, %{command_override: ["something-else"]})
 
     view = runtime_form(conn, pinned)
-    submit(view, %{"command_mode" => "inherit"})
+    submit(view, %{"command" => "serve"})
 
     assert Repo.reload!(d).command_override == nil
+  end
+
+  test "the editor is seeded with the effective command, not an empty box", %{
+    conn: conn,
+    deployment: d
+  } do
+    # The whole point of dropping the inherit toggle: what the container actually runs is
+    # readable without leaving the page.
+    view = runtime_form(conn, d)
+    html = render(view)
+
+    assert html =~ "serve"
+    assert html =~ "/init"
   end
 
   test "network aliases are fixable, so a wrong adoption guess is recoverable", %{
@@ -129,7 +127,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     # Adoption guesses these from the original's compose service name. When it guesses
     # wrong the stack's internal DNS is broken, and there was no way to correct it.
     view = runtime_form(conn, d)
-    submit(view, %{"aliases_mode" => "custom", "aliases" => "mysql\ndb"})
+    submit(view, %{"aliases" => "mysql\ndb"})
 
     assert Repo.reload!(d).network_aliases_override == ["mysql", "db"]
   end
@@ -141,10 +139,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     } do
       view = runtime_form(conn, d)
 
-      submit(view, %{
-        "caps_add_mode" => "custom",
-        "caps_add" => "cap_net_admin\nNET_ADMIN\nNET_RAW"
-      })
+      submit(view, %{"caps_add" => ["", "cap_net_admin", "NET_ADMIN", "NET_RAW"]})
 
       assert Repo.reload!(d).capabilities_add_override == ["NET_ADMIN", "NET_RAW"]
     end
@@ -160,7 +155,9 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
       d = %{d | app_template: template}
 
       view = runtime_form(conn, d)
-      submit(view, %{"caps_add_mode" => "custom", "caps_add" => ""})
+      # The sentinel alone: every box cleared. Without it the payload would carry no key
+      # at all, which is indistinguishable from the control not being rendered.
+      submit(view, %{"caps_add" => [""]})
 
       assert Repo.reload!(d).capabilities_add_override == []
     end
@@ -170,7 +167,7 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
       deployment: d
     } do
       view = runtime_form(conn, d)
-      html = submit(view, %{"caps_add_mode" => "custom", "caps_add" => "NET_ADMN"})
+      html = submit(view, %{"caps_add" => ["", "NET_ADMN"]})
 
       assert html =~ "unknown Linux capability: NET_ADMN"
       assert Repo.reload!(d).capabilities_add_override == nil
@@ -182,10 +179,8 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     } do
       view = runtime_form(conn, d)
 
-      submit(view, %{
-        "devices_mode" => "custom",
-        "devices" => %{"0" => %{"host_path" => "/dev/net/tun"}}
-      })
+      render_click(view, "settings_add_device", %{})
+      submit(view, %{"devices" => %{"0" => %{"host_path" => "/dev/net/tun"}}})
 
       assert [device] = Repo.reload!(d).devices_override
       assert device["host_path"] == "/dev/net/tun"
@@ -196,11 +191,8 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     test "a device with a relative host path is refused", %{conn: conn, deployment: d} do
       view = runtime_form(conn, d)
 
-      html =
-        submit(view, %{
-          "devices_mode" => "custom",
-          "devices" => %{"0" => %{"host_path" => "dev/net/tun"}}
-        })
+      render_click(view, "settings_add_device", %{})
+      html = submit(view, %{"devices" => %{"0" => %{"host_path" => "dev/net/tun"}}})
 
       assert html =~ "a device needs an absolute host path"
       assert Repo.reload!(d).devices_override == nil
@@ -209,8 +201,10 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     test "sysctl rows are stored as a map, with blank keys dropped", %{conn: conn, deployment: d} do
       view = runtime_form(conn, d)
 
+      render_click(view, "settings_add_sysctl", %{})
+      render_click(view, "settings_add_sysctl", %{})
+
       submit(view, %{
-        "sysctls_mode" => "custom",
         "sysctls" => %{
           "0" => %{"key" => "net.ipv4.conf.all.src_valid_mark", "value" => "1"},
           "1" => %{"key" => "", "value" => ""}
@@ -223,17 +217,16 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
     test "a sysctl outside a container's own namespace is refused", %{conn: conn, deployment: d} do
       view = runtime_form(conn, d)
 
+      render_click(view, "settings_add_sysctl", %{})
+
       html =
-        submit(view, %{
-          "sysctls_mode" => "custom",
-          "sysctls" => %{"0" => %{"key" => "vm.max_map_count", "value" => "262144"}}
-        })
+        submit(view, %{"sysctls" => %{"0" => %{"key" => "vm.max_map_count", "value" => "262144"}}})
 
       assert html =~ "not in a namespace a container owns"
       assert Repo.reload!(d).sysctls_override == nil
     end
 
-    test "inherit leaves all four as nil, so the catalog still drives them", %{
+    test "clearing them all returns them to the catalog, which grants none", %{
       conn: conn,
       deployment: d
     } do
@@ -245,12 +238,34 @@ defmodule HomelabWeb.DeploymentRuntimeTest do
         })
 
       view = runtime_form(conn, pinned)
-      submit(view, %{})
+      render_click(view, "settings_remove_device", %{"index" => "0"})
+      render_click(view, "settings_remove_sysctl", %{"index" => "0"})
+      submit(view, %{"caps_add" => [""]})
 
       reloaded = Repo.reload!(d)
       assert reloaded.capabilities_add_override == nil
       assert reloaded.devices_override == nil
       assert reloaded.sysctls_override == nil
+    end
+
+    test "an untouched save leaves every override exactly as it was", %{
+      conn: conn,
+      deployment: d
+    } do
+      # Merely opening Settings and saving must not move anything. This is the failure
+      # the three-form split kept producing, in a different field each time.
+      {:ok, pinned} =
+        Homelab.Deployments.update_deployment(d, %{
+          capabilities_add_override: ["NET_ADMIN"],
+          devices_override: [%{"host_path" => "/dev/net/tun"}]
+        })
+
+      view = runtime_form(conn, pinned)
+      submit(view, %{})
+
+      reloaded = Repo.reload!(d)
+      assert reloaded.capabilities_add_override == ["NET_ADMIN"]
+      assert [%{"host_path" => "/dev/net/tun"}] = reloaded.devices_override
     end
 
     test "the read-only card reports the effective values", %{conn: conn, deployment: d} do

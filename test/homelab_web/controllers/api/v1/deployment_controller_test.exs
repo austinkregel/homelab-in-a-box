@@ -17,12 +17,12 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
     {:ok, conn: put_req_header(conn, "accept", "application/json"), tenant: tenant}
   end
 
-  describe "GET /api/v1/tenants/:tenant_id/deployments" do
+  describe "GET /api/v1/spaces/:space_id/deployments" do
     test "lists deployments for tenant", %{conn: conn, tenant: tenant} do
       insert(:deployment, tenant: tenant)
       insert(:deployment, tenant: tenant)
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments")
       assert %{"data" => deployments} = json_response(conn, 200)
       assert length(deployments) == 2
     end
@@ -32,13 +32,13 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       insert(:deployment, tenant: tenant)
       insert(:deployment, tenant: other_tenant)
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments")
       assert %{"data" => deployments} = json_response(conn, 200)
       assert length(deployments) == 1
     end
   end
 
-  describe "POST /api/v1/tenants/:tenant_id/deployments" do
+  describe "POST /api/v1/spaces/:space_id/deployments" do
     test "creates deployment", %{conn: conn, tenant: tenant} do
       template = insert(:app_template)
 
@@ -49,7 +49,7 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_1"}} end)
 
       conn =
-        post(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
+        post(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments", %{
           "deployment" => %{
             "app_template_id" => template.id,
             "domain" => "app.friends.homelab.local"
@@ -62,7 +62,7 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
 
     test "returns 422 with invalid data", %{conn: conn, tenant: tenant} do
       conn =
-        post(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
+        post(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments", %{
           "deployment" => %{}
         })
 
@@ -70,11 +70,11 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
     end
   end
 
-  describe "GET /api/v1/tenants/:tenant_id/deployments/:id" do
+  describe "GET /api/v1/spaces/:space_id/deployments/:id" do
     test "returns deployment", %{conn: conn, tenant: tenant} do
       deployment = insert(:deployment, tenant: tenant)
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert %{"data" => data} = json_response(conn, 200)
       assert data["id"] == deployment.id
     end
@@ -83,12 +83,12 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       other_tenant = insert(:tenant)
       deployment = insert(:deployment, tenant: other_tenant)
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert json_response(conn, 404)
     end
   end
 
-  describe "GET /api/v1/tenants/:tenant_id/deployments/:id JSON rendering" do
+  describe "GET /api/v1/spaces/:space_id/deployments/:id JSON rendering" do
     test "redacts sensitive env vars in response", %{conn: conn, tenant: tenant} do
       deployment =
         insert(:deployment,
@@ -103,7 +103,7 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
           }
         )
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert %{"data" => data} = json_response(conn, 200)
 
       env = data["env_overrides"]
@@ -118,17 +118,17 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
     test "handles nil env_overrides", %{conn: conn, tenant: tenant} do
       deployment = insert(:deployment, tenant: tenant, env_overrides: nil)
 
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert %{"data" => data} = json_response(conn, 200)
       assert data["env_overrides"] == %{}
     end
   end
 
-  describe "DELETE /api/v1/tenants/:tenant_id/deployments/:id" do
+  describe "DELETE /api/v1/spaces/:space_id/deployments/:id" do
     test "deletes deployment and returns 204", %{conn: conn, tenant: tenant} do
       deployment = insert(:deployment, tenant: tenant, status: :running)
 
-      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = delete(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert response(conn, 204)
 
       assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
@@ -144,7 +144,7 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       Homelab.Mocks.Orchestrator
       |> expect(:undeploy, fn "container_xyz" -> :ok end)
 
-      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = delete(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert response(conn, 204)
 
       assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) == nil
@@ -157,7 +157,7 @@ defmodule HomelabWeb.Api.V1.DeploymentControllerTest do
       Homelab.Mocks.Orchestrator
       |> expect(:undeploy, fn "container_down" -> {:error, :docker_down} end)
 
-      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}/deployments/#{deployment.id}")
+      conn = delete(conn, ~p"/api/v1/spaces/#{tenant.id}/deployments/#{deployment.id}")
       assert response(conn, 502)
 
       assert Homelab.Repo.get(Homelab.Deployments.Deployment, deployment.id) != nil

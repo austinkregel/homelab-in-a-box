@@ -88,7 +88,7 @@ defmodule HomelabWeb.Layouts do
               path={~p"/domains"}
               icon="hero-globe-alt"
               label="Domains"
-              active={@page_title == "Domains"}
+              active={@page_title == "Domains & DNS"}
             />
             <.sidebar_link
               path={~p"/backups"}
@@ -120,10 +120,22 @@ defmodule HomelabWeb.Layouts do
             <div :if={@tenants != []} class="space-y-0.5">
               <.link
                 :for={tenant <- @tenants}
-                navigate={~p"/tenants/#{tenant.id}"}
-                class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-base-content/60 hover:text-base-content hover:bg-base-content/5 transition-colors"
+                navigate={~p"/spaces/#{tenant.id}"}
+                class={[
+                  "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                  if(@page_title == tenant.name,
+                    do: "bg-primary/15 text-primary",
+                    else: "text-base-content/60 hover:text-base-content hover:bg-base-content/5"
+                  )
+                ]}
               >
-                <.icon name="hero-folder-solid" class="size-4 opacity-50" />
+                <.icon
+                  name="hero-folder-solid"
+                  class={[
+                    "size-4",
+                    if(@page_title == tenant.name, do: "text-primary", else: "opacity-50")
+                  ]}
+                />
                 <span class="truncate">{tenant.name}</span>
               </.link>
             </div>

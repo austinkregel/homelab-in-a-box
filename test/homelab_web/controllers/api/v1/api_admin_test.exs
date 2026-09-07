@@ -38,7 +38,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       template = insert(:app_template)
 
       conn =
-        post(as(:member), ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
+        post(as(:member), ~p"/api/v1/spaces/#{tenant.id}/deployments", %{
           "deployment" => %{
             "app_template_id" => template.id,
             "image_override" => "attacker/whatever:latest"
@@ -55,7 +55,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       conn =
         delete(
           as(:member),
-          ~p"/api/v1/tenants/#{deployment.tenant_id}/deployments/#{deployment.id}"
+          ~p"/api/v1/spaces/#{deployment.tenant_id}/deployments/#{deployment.id}"
         )
 
       assert json_response(conn, 403)
@@ -65,7 +65,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
     test "cannot destroy a tenant" do
       tenant = insert(:tenant)
 
-      conn = delete(as(:member), ~p"/api/v1/tenants/#{tenant.id}")
+      conn = delete(as(:member), ~p"/api/v1/spaces/#{tenant.id}")
 
       assert json_response(conn, 403)
       assert Homelab.Repo.get(Homelab.Tenants.Tenant, tenant.id)
@@ -79,7 +79,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       conn =
         post(
           as(:member),
-          ~p"/api/v1/tenants/#{job.deployment.tenant_id}/backups/#{job.id}/restore"
+          ~p"/api/v1/spaces/#{job.deployment.tenant_id}/backups/#{job.id}/restore"
         )
 
       assert json_response(conn, 403)
@@ -90,7 +90,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       # locking members out of reads is the failure this split was chosen to avoid.
       insert(:tenant, name: "Friends", slug: "friends")
 
-      assert %{"data" => [_]} = json_response(get(as(:member), ~p"/api/v1/tenants"), 200)
+      assert %{"data" => [_]} = json_response(get(as(:member), ~p"/api/v1/spaces"), 200)
       assert %{"data" => _} = json_response(get(as(:member), ~p"/api/v1/app-templates"), 200)
     end
   end
@@ -100,7 +100,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       # Proves the 403s above are about the ROLE, not a broken route.
       tenant = insert(:tenant)
 
-      conn = delete(as(:admin), ~p"/api/v1/tenants/#{tenant.id}")
+      conn = delete(as(:admin), ~p"/api/v1/spaces/#{tenant.id}")
 
       assert conn.status in [200, 204]
       refute Homelab.Repo.get(Homelab.Tenants.Tenant, tenant.id)
@@ -114,7 +114,7 @@ defmodule HomelabWeb.Api.V1.ApiAdminTest do
       # client can act on: curl follows it and reports 200 with an HTML body.
       tenant = insert(:tenant)
 
-      conn = delete(as(:member), ~p"/api/v1/tenants/#{tenant.id}")
+      conn = delete(as(:member), ~p"/api/v1/spaces/#{tenant.id}")
 
       assert conn.status == 403
       assert get_resp_header(conn, "content-type") |> hd() =~ "application/json"

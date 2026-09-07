@@ -48,7 +48,7 @@ defmodule HomelabWeb.Api.V1.ApiPipelineTest do
     test "an anonymous request is refused with 401, not a 500" do
       insert(:tenant)
 
-      conn = get(raw_conn(), ~p"/api/v1/tenants")
+      conn = get(raw_conn(), ~p"/api/v1/spaces")
 
       assert conn.status == 401
       assert %{"errors" => %{"detail" => "Unauthorized"}} = json_response(conn, 401)
@@ -75,7 +75,7 @@ defmodule HomelabWeb.Api.V1.ApiPipelineTest do
         logged_in
         |> Phoenix.ConnTest.recycle()
         |> put_req_header("accept", "application/json")
-        |> get(~p"/api/v1/tenants")
+        |> get(~p"/api/v1/spaces")
 
       assert %{"data" => [_tenant]} = json_response(conn, 200)
       assert conn.assigns.current_user.role == :admin

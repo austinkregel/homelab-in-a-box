@@ -151,6 +151,45 @@ defmodule Homelab.Deployments.ReleasesTest do
     end
   end
 
+  describe "leased_deployment_ids/1" do
+    test "covers deployments the release drives through a step handle, not just its anchor" do
+      donor = insert(:deployment)
+      child = insert(:deployment, network_parent_id: donor.id)
+
+      {:ok, release} =
+        Releases.plan_release(donor, [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}}
+        ])
+
+      {:ok, _leased} = Releases.acquire_lease(release, "node@a")
+
+      leased = Releases.leased_deployment_ids()
+
+      assert MapSet.member?(leased, donor.id)
+
+      # The regression: a netns child spends the middle of its stack's release reset to
+      # `:pending` with no container. Absent from this set, every reconciler sweep read
+      # that as a deployment nothing owned.
+      assert MapSet.member?(leased, child.id)
+    end
+
+    test "excludes a release with no live lease" do
+      donor = insert(:deployment)
+      child = insert(:deployment, network_parent_id: donor.id)
+
+      {:ok, _release} =
+        Releases.plan_release(donor, [
+          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}}
+        ])
+
+      leased = Releases.leased_deployment_ids()
+
+      refute MapSet.member?(leased, donor.id)
+      refute MapSet.member?(leased, child.id)
+    end
+  end
+
   describe "abandon_release/2" do
     # `ensure_no_active_release/1` refuses to plan while a release is active, and a
     # release interrupted mid-compensation stays active forever — so that deployment
