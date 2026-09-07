@@ -400,6 +400,86 @@ defmodule Homelab.Services.ReconcilerTest do
       refute_receive {:unpublished, "vpn1"}, 300
     end
 
+    # The Gluetun loop. A stack release re-creates the donor several steps before it
+    # re-creates the children that name its container id, so every child is stale for
+    # that whole span — by construction, not by drift. Acting on it superseded the
+    # release that was about to fix it and planned an identical one, forever.
+    #
+    # Deliberately unleased: the successor of a superseded release snoozes in `:planning`
+    # with no lease while the outgoing runner is stuck inside the donor's health gate,
+    # which for a VPN donor is minutes. That is the window the loop actually fired in, so
+    # a lease-based guard is not what this is testing.
+    test "does not re-drive a stale child while a release is already driving the stack" do
+      record_orchestrator_io(self())
+      {tenant, donor} = netns_stack()
+
+      child =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, slug: "sonarr", exposure_mode: :service),
+          domain: nil,
+          network_parent_id: donor.id,
+          netns_parent_external_id: "vpn0",
+          status: :pending,
+          external_id: nil
+        )
+
+      {:ok, release} =
+        Releases.plan_release(donor, [
+          %{type: :app_container, resource_handle: %{}},
+          %{type: :await_health, resource_handle: %{}},
+          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}}
+        ])
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn ->
+        {:ok, [svc("vpn1", %{state: :running, health: :healthy})]}
+      end)
+
+      start_and_sync!()
+
+      assert Releases.get_release(release.id).status == :planning
+      assert Deployments.get_deployment!(child.id).status == :pending
+    end
+
+    # The other half: with nothing driving the stack, a stale pin is real drift and the
+    # sweep is the only thing that clears it.
+    test "re-drives a stale child that no release covers" do
+      record_orchestrator_io(self())
+      {tenant, donor} = netns_stack()
+
+      child =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, slug: "sonarr", exposure_mode: :service),
+          domain: nil,
+          network_parent_id: donor.id,
+          netns_parent_external_id: "vpn0",
+          status: :running,
+          external_id: "sonarr1"
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn ->
+        {:ok, [svc("vpn1", %{state: :running, health: :healthy})]}
+      end)
+
+      start_and_sync!()
+
+      # Re-driven: a fresh stack release now exists, anchored on the donor and carrying a
+      # step for the child. The child reads `:pending` rather than the `:failed` the sweep
+      # writes, because `redeploy_netns_stack/2` resets it on the way to planning.
+      release = Releases.get_active_release(donor.id)
+      assert release
+
+      assert Enum.any?(
+               release.steps,
+               &(get_in(&1.resource_handle, ["deployment_id"]) == child.id)
+             )
+
+      assert Deployments.get_deployment!(child.id).status == :pending
+    end
+
     test "leaves a donor with no routed children off the ingress network" do
       record_orchestrator_io(self())
       {tenant, donor} = netns_stack()
