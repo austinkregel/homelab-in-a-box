@@ -24,6 +24,16 @@ defmodule Homelab.Deployments.ReleaseSteps.ProvisionCredentials do
 
   alias Homelab.Deployments.Releases
 
+  # No specs means the credentials were shared through `env_overrides` already;
+  # generating a second, different password would mismatch the two sides.
+  @impl true
+  def skip?(step, _ctx) do
+    case Map.get(step.resource_handle || %{}, "specs", []) do
+      [] -> {:skip, "no credentials to generate for this deployment"}
+      _specs -> :run
+    end
+  end
+
   @impl true
   def run(step, ctx) do
     app_id = ctx.deployment.id

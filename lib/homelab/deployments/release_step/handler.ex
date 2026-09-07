@@ -14,13 +14,23 @@ defmodule Homelab.Deployments.ReleaseStep.Handler do
   it is merged into the step's `resource_handle` so `compensate/2` can undo it
   without re-deriving anything. `compensate/2` is optional — a step with no
   externally-visible side effect (e.g. a pure health check) can omit it.
+
+  `skip?/2` is the runtime gate, evaluated immediately before `run/2`: `{:skip, message}`
+  records a `:skipped` step carrying that message, and omitting the callback means
+  "always run". `ctx.facts` holds the `ReleaseFacts` for the step's target; see
+  `ReleaseSteps.Conditions`.
   """
 
-  @type ctx :: %{required(:release) => struct(), required(:deployment) => struct() | nil}
+  @type ctx :: %{
+          required(:release) => struct(),
+          required(:deployment) => struct() | nil,
+          optional(:facts) => struct()
+        }
   @type handle :: map()
 
   @callback run(step :: struct(), ctx) :: {:ok, handle} | {:error, term()}
   @callback compensate(step :: struct(), ctx) :: :ok | {:error, term()}
+  @callback skip?(step :: struct(), ctx) :: :run | {:skip, String.t()}
 
-  @optional_callbacks compensate: 2
+  @optional_callbacks compensate: 2, skip?: 2
 end

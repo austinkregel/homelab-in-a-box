@@ -71,6 +71,7 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
 
       assert types == [
                :ensure_ingress_proxy,
+               :provision_credentials,
                :app_container,
                :await_health,
                :sync_domain,

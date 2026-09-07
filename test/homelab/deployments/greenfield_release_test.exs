@@ -11,7 +11,8 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
   import Homelab.Factory
 
   alias Homelab.Deployments
-  alias Homelab.Deployments.{ReleaseRunner, Releases}
+  alias Homelab.Deployments.{ReleaseFacts, ReleaseRunner, Releases}
+  alias Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants
 
   setup :set_mox_global
   setup :verify_on_exit!
@@ -50,14 +51,48 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     {:ok, release} = Deployments.deploy_release(app, [companion])
     types = release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type)
 
-    # The full routed plan. The proxy is ensured BEFORE any container exists (it is a
-    # precondition of the route, and failing there means there is nothing to unwind);
-    # everything that advertises a name — the Domain row, the A records, reachability —
-    # comes after the app's health gate, so nothing points at a workload that is not up.
+    # The proxy before any container exists; everything that advertises a name after
+    # the app's health gate.
     assert types == [
              :ensure_ingress_proxy,
+             :provision_credentials,
              :dependency_container,
              :await_health,
+             :ensure_datastore_grants,
+             :app_container,
+             :await_health,
+             :sync_domain,
+             :publish_dns,
+             :publish_ingress,
+             :verify_public_url
+           ]
+
+    assert release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.stage) == [
+             :prepare,
+             :prepare,
+             :dependencies,
+             :dependencies,
+             :dependencies,
+             :workload,
+             :workload,
+             :naming,
+             :naming,
+             :reachability,
+             :verification
+           ]
+  end
+
+  # The same plan whatever the deployment looks like: a domainless app with no
+  # companions still gets every singleton stage.
+  test "the singleton stages are planned for a deployment that needs none of them" do
+    tenant = insert(:tenant, slug: "bare")
+    app = pending_deployment(tenant, "bare-app", domain: nil)
+
+    {:ok, release} = Deployments.deploy_release(app)
+
+    assert release.steps |> Enum.sort_by(& &1.position) |> Enum.map(& &1.type) == [
+             :ensure_ingress_proxy,
+             :provision_credentials,
              :app_container,
              :await_health,
              :sync_domain,
@@ -103,40 +138,57 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     assert grants.position < Enum.find(steps, &(&1.type == :app_container)).position
   end
 
-  test "a companion that is not a datastore gets no grants step", %{
+  test "a companion that is not a datastore skips its grants step", %{
     app: app,
     companion: companion
   } do
-    # `clean_template/1` uses a plain image; only engines Grants can actually drive are
-    # planned, rather than emitting a step that would fail.
+    # `clean_template/1` uses a plain image, so the handler declines rather than the
+    # plan quietly differing.
     {:ok, release} = Deployments.deploy_release(app, [companion])
+    step = Enum.find(release.steps, &(&1.type == :ensure_datastore_grants))
 
-    refute :ensure_datastore_grants in Enum.map(release.steps, & &1.type)
+    assert {:skip, reason} =
+             EnsureDatastoreGrants.skip?(step, %{facts: ReleaseFacts.build(companion)})
+
+    assert reason =~ "not a datastore"
   end
 
-  # `reachability_steps/1` reuses `publish_deployment/1`'s runtime gate, and that gate
-  # opens with `Repo.preload(deployment, [:tenant, :app_template])` BEFORE it evaluates
-  # `ingress_published?/1 and attachable?/1`. Restating the predicates on the caller's
-  # struct without the preload added a precondition `deploy_release/2` never had — the
-  # pre-image was a pure `domain` field match — and fails it by RAISING, where the gate
-  # it copied returns `:ok` for the very same struct.
-  test "planning tolerates a deployment loaded without its associations", %{app: app} do
+  # `Access.effective_exposure/1` needs the template, and facts preload before they
+  # evaluate anything — as `publish_deployment/1` does with the same struct.
+  test "facts tolerate a deployment loaded without its associations", %{app: app} do
     bare = Repo.get!(Homelab.Deployments.Deployment, app.id)
     assert %Ecto.Association.NotLoaded{} = bare.app_template
 
-    # The gate this predicate was copied from is fine with it.
     assert :ok = Deployments.publish_deployment(bare)
+
+    facts = ReleaseFacts.build(bare)
+    assert facts.ingress_published?
+    assert facts.attachable?
 
     assert {:ok, release} = Deployments.deploy_release(bare)
     assert :publish_ingress in Enum.map(release.steps, & &1.type)
   end
 
-  test "no ingress step when the app has no domain", %{companion: companion} do
+  test "an app with no domain skips reachability at runtime rather than at plan time", %{
+    companion: companion
+  } do
     tenant = insert(:tenant, slug: "nodomain")
     app = pending_deployment(tenant, "app2", domain: nil)
 
+    running_stack()
+
     {:ok, release} = Deployments.deploy_release(app, [companion])
-    refute :publish_ingress in Enum.map(release.steps, & &1.type)
+    assert :ok = ReleaseRunner.run(release.id, owner: "t")
+
+    step =
+      release.id
+      |> Releases.get_release()
+      |> Map.fetch!(:steps)
+      |> Enum.find(&(&1.type == :publish_ingress))
+
+    assert step.status == :skipped
+    assert step.reason_type == "skipped"
+    assert step.reason_message =~ "not proxy-routed"
   end
 
   # A DNS provider IS configured in test, so `publish_dns` really pushes. Stubbing it
@@ -229,7 +281,9 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
 
     release = Releases.get_release(release.id)
     assert release.status == :running
-    assert Enum.all?(release.steps, &(&1.status == :completed))
+    # Every step settled: the ones that applied completed, the rest recorded a skip.
+    assert Enum.all?(release.steps, &(&1.status in [:completed, :skipped]))
+    assert Enum.any?(release.steps, &(&1.status == :completed))
 
     assert Deployments.get_deployment!(companion.id).external_id == "ext-#{companion.id}"
     assert Deployments.get_deployment!(app.id).external_id == "ext-#{app.id}"
@@ -497,8 +551,8 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     assert Releases.get_release(release.id).status == :running
 
     # But the release says WHY the route may not resolve.
-    assert step.error_message =~ "Traefik not ensured"
-    assert step.error_message =~ "dns_token_missing"
+    assert step.reason_message =~ "Traefik not ensured"
+    assert step.reason_message =~ "dns_token_missing"
   end
 
   # The other side of it: an install that HAS a proxy gets no note, so the note means
@@ -514,6 +568,6 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
 
     step = proxy_step(release.id)
     assert step.resource_handle["ingress_proxy"] == "already_running"
-    assert step.error_message == nil
+    assert step.reason_message == nil
   end
 end

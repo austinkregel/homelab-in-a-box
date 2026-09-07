@@ -59,17 +59,30 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
           type: :app_container,
           position: 5,
           status: :running,
+          stage: :workload,
           resource_handle: %{"external_id" => "ctr-1"},
           attempts: 3,
-          error_message: "x"
+          reason_type: "error",
+          reason_message: "x"
         })
 
       assert changeset.valid?
       s = Ecto.Changeset.apply_changes(changeset)
       assert s.status == :running
+      assert s.stage == :workload
       assert s.resource_handle == %{"external_id" => "ctr-1"}
       assert s.attempts == 3
-      assert s.error_message == "x"
+      assert s.reason_type == "error"
+      assert s.reason_message == "x"
+    end
+
+    test "rejects a stage and a reason type it does not define" do
+      release = insert_release()
+
+      base = %{release_id: release.id, type: :app_container, position: 1}
+
+      refute ReleaseStep.changeset(%ReleaseStep{}, Map.put(base, :stage, :nope)).valid?
+      refute ReleaseStep.changeset(%ReleaseStep{}, Map.put(base, :reason_type, "nope")).valid?
     end
   end
 
@@ -200,7 +213,7 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
       assert changeset.valid?
       assert Ecto.Changeset.get_change(changeset, :status) == :running
       refute Ecto.Changeset.changed?(changeset, :resource_handle)
-      refute Ecto.Changeset.changed?(changeset, :error_message)
+      refute Ecto.Changeset.changed?(changeset, :reason_message)
     end
 
     test "merges :handle into resource_handle" do
@@ -224,33 +237,44 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
       assert Ecto.Changeset.get_change(changeset, :resource_handle) == %{}
     end
 
-    test "sets error_message via :error opt" do
+    test "sets the reason type and message via the :reason opt" do
       step = %ReleaseStep{status: :running}
 
-      changeset = ReleaseStep.progress_changeset(step, :failed, error: "kaboom")
+      changeset = ReleaseStep.progress_changeset(step, :failed, reason: {"error", "kaboom"})
 
-      assert Ecto.Changeset.get_change(changeset, :error_message) == "kaboom"
+      assert Ecto.Changeset.get_change(changeset, :reason_type) == "error"
+      assert Ecto.Changeset.get_change(changeset, :reason_message) == "kaboom"
     end
 
-    test "a nil :error opt is treated as not provided" do
-      step = %ReleaseStep{status: :running, error_message: "old"}
+    test "a skip carries its own type, so the UI can tell it from a failure" do
+      step = %ReleaseStep{status: :running}
 
-      changeset = ReleaseStep.progress_changeset(step, :completed, error: nil)
+      changeset =
+        ReleaseStep.progress_changeset(step, :skipped, reason: {"skipped", "no domain"})
 
-      refute Ecto.Changeset.changed?(changeset, :error_message)
+      assert Ecto.Changeset.get_change(changeset, :reason_type) == "skipped"
+      assert Ecto.Changeset.get_change(changeset, :reason_message) == "no domain"
     end
 
-    test "handle and error together" do
+    test "a nil :reason opt is treated as not provided" do
+      step = %ReleaseStep{status: :running, reason_message: "old"}
+
+      changeset = ReleaseStep.progress_changeset(step, :completed, reason: nil)
+
+      refute Ecto.Changeset.changed?(changeset, :reason_message)
+    end
+
+    test "handle and reason together" do
       step = %ReleaseStep{status: :running, resource_handle: %{}}
 
       changeset =
         ReleaseStep.progress_changeset(step, :failed,
           handle: %{"x" => 1},
-          error: "bad"
+          reason: {"error", "bad"}
         )
 
       assert Ecto.Changeset.get_change(changeset, :resource_handle) == %{"x" => 1}
-      assert Ecto.Changeset.get_change(changeset, :error_message) == "bad"
+      assert Ecto.Changeset.get_change(changeset, :reason_message) == "bad"
     end
 
     test "rejects an invalid status" do
@@ -313,6 +337,23 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
     test "statuses/0 lists all step statuses" do
       assert ReleaseStep.statuses() ==
                [:pending, :running, :completed, :compensating, :compensated, :failed, :skipped]
+    end
+
+    # The order here is the order the Releases page reads in.
+    test "stages/0 lists the lifecycle stages in order" do
+      assert ReleaseStep.stages() == [
+               :prepare,
+               :dependencies,
+               :workload,
+               :namespace,
+               :naming,
+               :reachability,
+               :verification
+             ]
+    end
+
+    test "reason_types/0 lists the kinds of message a step can carry" do
+      assert ReleaseStep.reason_types() == ~w(error skipped note)
     end
   end
 end

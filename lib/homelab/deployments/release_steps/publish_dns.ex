@@ -74,8 +74,16 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishDns do
 
   alias Homelab.Deployments
   alias Homelab.Deployments.Releases
+  alias Homelab.Deployments.ReleaseSteps.Conditions
   alias Homelab.Networking
   alias Homelab.Services.ActivityLog
+
+  # A record resolves a name, so there is nothing to publish for a deployment that holds
+  # none.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.all(ctx.facts, [{:own_domain?, "it holds no domain to resolve"}])
+  end
 
   @impl true
   def run(step, ctx) do

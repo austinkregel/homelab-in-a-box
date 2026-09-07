@@ -84,7 +84,15 @@ defmodule Homelab.Deployments.ReleaseSteps.SyncDomain do
 
   alias Homelab.Deployments
   alias Homelab.Deployments.Releases
+  alias Homelab.Deployments.ReleaseSteps.Conditions
   alias Homelab.Networking
+
+  # A `Domain` row belongs to whichever deployment holds the name — for a tunneled stack
+  # that is the child, not the donor carrying its route.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.all(ctx.facts, [{:own_domain?, "it holds no domain to claim"}])
+  end
 
   @impl true
   def run(step, ctx) do

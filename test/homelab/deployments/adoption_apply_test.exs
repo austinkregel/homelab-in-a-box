@@ -49,6 +49,8 @@ defmodule Homelab.Deployments.AdoptionApplyTest do
     release = Releases.get_release(result.release.id)
 
     assert Enum.map(release.steps, & &1.type) == [
+             :ensure_ingress_proxy,
+             :provision_credentials,
              :backup_verify,
              :quiesce_old,
              :migrate_volume,
@@ -56,7 +58,30 @@ defmodule Homelab.Deployments.AdoptionApplyTest do
              :adopt_credentials,
              :adopt_volume,
              :adopt_container,
-             :verify_integrity
+             :verify_integrity,
+             :sync_domain,
+             :publish_dns,
+             :publish_ingress,
+             :verify_public_url
+           ]
+
+    # The cutover is the workload stage; the routing tail keeps the same stages every
+    # other planner emits.
+    assert Enum.map(release.steps, & &1.stage) == [
+             :prepare,
+             :prepare,
+             :workload,
+             :workload,
+             :workload,
+             :workload,
+             :workload,
+             :workload,
+             :workload,
+             :workload,
+             :naming,
+             :naming,
+             :reachability,
+             :verification
            ]
 
     assert_enqueued(worker: ReleaseRunner, args: %{"release_id" => release.id})

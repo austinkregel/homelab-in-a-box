@@ -32,6 +32,17 @@ defmodule Homelab.Deployments.ReleaseSteps.PublishIngress do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.ReleaseSteps.Conditions
+
+  # `publish_deployment/1`'s own gate, read through `ReleaseFacts` so there is one
+  # definition of it.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.all(ctx.facts, [
+      {:ingress_published?, "it is not proxy-routed with a domain of its own"},
+      {:attachable?, "its workload shares another namespace and holds no endpoint to attach"}
+    ])
+  end
 
   @impl true
   def run(_step, ctx) do

@@ -33,8 +33,18 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants do
   alias Homelab.Deployments
   alias Homelab.Deployments.Datastore.Grants
   alias Homelab.Deployments.{Releases, SpecBuilder}
+  alias Homelab.Deployments.ReleaseSteps.Conditions
 
   @default_port 3306
+
+  # Only engines `Grants` can drive; the facts are built for the companion this step
+  # targets.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.all(ctx.facts, [
+      {:datastore?, "this companion is not a datastore homelab can grant on"}
+    ])
+  end
 
   @impl true
   def run(step, ctx) do

@@ -5,10 +5,13 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
   An Oban job (queue `:releases`) drives one release. Under a held lease it runs
   pending steps in ascending `position`, dispatching each to a registered
-  `Homelab.Deployments.ReleaseStep.Handler`. On a step failure it flips the
-  release to `:rolling_back` and walks the completed steps in **descending**
-  position, compensating each, then settles at `:rolled_back` (or
-  `:rollback_failed`).
+  `Homelab.Deployments.ReleaseStep.Handler`. A handler's optional `skip?/2` is
+  evaluated first, against the `ReleaseFacts` built for the step's target: a skip
+  records the step `:skipped` with its reason rather than running it.
+
+  On a step failure it flips the release to `:rolling_back` and walks the completed
+  steps in **descending** position, compensating each, then settles at `:rolled_back`
+  (or `:rollback_failed`). A skipped step never enters that walk.
 
   Durability / crash-resume:
 
@@ -36,7 +39,7 @@ defmodule Homelab.Deployments.ReleaseRunner do
   require Logger
 
   alias Homelab.Repo
-  alias Homelab.Deployments.{Release, Releases, ReleaseSteps}
+  alias Homelab.Deployments.{Release, ReleaseFacts, Releases, ReleaseSteps}
   alias Homelab.Services.ActivityLog
 
   # Step types that bring a workload into existence. Their completion is the saga's
@@ -281,43 +284,66 @@ defmodule Homelab.Deployments.ReleaseRunner do
         :ok
 
       {:ok, step} ->
-        handler = handler_for(step.type)
-
-        try do
-          case with_lease_heartbeat(release_id, owner, fn -> handler.run(step, ctx) end) do
-            {:ok, handle} when is_map(handle) ->
-              # Activity entries hang off the compare-and-set, never off the handler
-              # call. The CAS is already the idempotency guard the saga relies on, so a
-              # resumed or raced runner that re-runs an idempotent handler gets
-              # `{:noop, _}` here and writes no second entry. Logging next to the
-              # handler instead would double every line on every resume.
-              case Releases.transition_step(step, :completed, [:running], handle: handle) do
-                {:ok, completed} -> log_step_completed(completed, ctx)
-                {:noop, _} -> :ok
-              end
-
-              :ok
-
-            {:error, reason} ->
-              case Releases.transition_step(step, :failed, [:running],
-                     error: format_error(reason)
-                   ) do
-                {:ok, failed} -> log_step_failed(failed, ctx, reason)
-                {:noop, _} -> :ok
-              end
-
-              advisory_result(step, reason)
-          end
-        rescue
-          e ->
-            case Releases.transition_step(step, :failed, [:running], error: Exception.message(e)) do
-              {:ok, failed} -> log_step_failed(failed, ctx, e)
-              {:noop, _} -> :ok
-            end
-
-            advisory_result(step, e)
-        end
+        dispatch(handler_for(step.type), step, ctx, release_id, owner)
     end
+  end
+
+  # The rescue covers the whole dispatch: a raise while deciding whether to run is a
+  # failed step, not a crashed job.
+  defp dispatch(handler, step, ctx, release_id, owner) do
+    step_ctx = Map.put(ctx, :facts, ReleaseFacts.for_step(step, ctx))
+
+    case skip?(handler, step, step_ctx) do
+      {:skip, message} -> skip_step(step, message)
+      :run -> execute_step(handler, step, step_ctx, release_id, owner)
+    end
+  rescue
+    e -> fail_step(step, ctx, e, Exception.message(e))
+  end
+
+  # A skipped step is never compensated: `compensate_step/2` advances from
+  # `:completed` only.
+  defp skip_step(step, message) do
+    case Releases.transition_step(step, :skipped, [:running], reason: {"skipped", message}) do
+      {:ok, skipped} -> Logger.info("[release] skipped #{skipped.type}: #{message}")
+      {:noop, _} -> :ok
+    end
+
+    :ok
+  end
+
+  # `Code.ensure_loaded?/1` first: a handler module not yet loaded exports nothing, and
+  # the answer would be "run" for a step that should have declined.
+  defp skip?(handler, step, ctx) do
+    if Code.ensure_loaded?(handler) and function_exported?(handler, :skip?, 2),
+      do: handler.skip?(step, ctx),
+      else: :run
+  end
+
+  defp execute_step(handler, step, ctx, release_id, owner) do
+    case with_lease_heartbeat(release_id, owner, fn -> handler.run(step, ctx) end) do
+      {:ok, handle} when is_map(handle) ->
+        # Activity entries hang off the compare-and-set, so a resumed or raced runner
+        # re-running an idempotent handler writes no second entry.
+        case Releases.transition_step(step, :completed, [:running], handle: handle) do
+          {:ok, completed} -> log_step_completed(completed, ctx)
+          {:noop, _} -> :ok
+        end
+
+        :ok
+
+      {:error, reason} ->
+        fail_step(step, ctx, reason, format_error(reason))
+    end
+  end
+
+  defp fail_step(step, ctx, reason, message) do
+    case Releases.transition_step(step, :failed, [:running], reason: {"error", message}) do
+      {:ok, failed} -> log_step_failed(failed, ctx, reason)
+      {:noop, _} -> :ok
+    end
+
+    advisory_result(step, reason)
   end
 
   # `:ok` continues the loop, `{:error, _}` rolls the release back. The step is already
@@ -615,14 +641,17 @@ defmodule Homelab.Deployments.ReleaseRunner do
 
             {:error, reason} ->
               Releases.transition_step(step, :failed, [:compensating],
-                error: format_error(reason)
+                reason: {"error", format_error(reason)}
               )
 
               {:error, reason}
           end
         rescue
           e ->
-            Releases.transition_step(step, :failed, [:compensating], error: Exception.message(e))
+            Releases.transition_step(step, :failed, [:compensating],
+              reason: {"error", Exception.message(e)}
+            )
+
             {:error, e}
         end
     end

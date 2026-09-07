@@ -18,7 +18,13 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
   import Homelab.Factory
 
   alias Homelab.Deployments
-  alias Homelab.Deployments.{AdoptionPlanner, Releases}
+  alias Homelab.Deployments.{AdoptionPlanner, ReleaseFacts, Releases}
+  alias Homelab.Deployments.ReleaseSteps.{EnsureIngressProxy, PublishDns, PublishIngress}
+
+  defp skips?(handler, deployment) do
+    facts = ReleaseFacts.build(Deployments.get_deployment!(deployment.id))
+    match?({:skip, _reason}, handler.skip?(%{resource_handle: %{}}, %{facts: facts}))
+  end
 
   defp review(name) do
     %{
@@ -65,7 +71,7 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
   end
 
   describe "a domainless adoption" do
-    test "plans none of the routing steps" do
+    test "plans the routing steps and skips every one of them" do
       tenant = insert(:tenant)
       plan = AdoptionPlanner.build_plan([review("homelab-pg")])
 
@@ -73,10 +79,14 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
 
       types = step_types(result)
 
-      refute :ensure_ingress_proxy in types
-      refute :sync_domain in types
-      refute :publish_dns in types
-      refute :publish_ingress in types
+      assert :ensure_ingress_proxy in types
+      assert :sync_domain in types
+      assert :publish_dns in types
+      assert :publish_ingress in types
+
+      assert skips?(EnsureIngressProxy, result.deployment)
+      assert skips?(PublishDns, result.deployment)
+      assert skips?(PublishIngress, result.deployment)
     end
   end
 
@@ -98,7 +108,8 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
       tenant = insert(:tenant)
       result = readopt(tenant, "proxy-pg", %{domain: "proxy-pg.example.test"})
 
-      assert [:ensure_ingress_proxy, :backup_verify | _] = step_types(result)
+      assert [:ensure_ingress_proxy, :provision_credentials, :backup_verify | _] =
+               step_types(result)
     end
 
     test "advertises the name only after the cutover has been verified" do
@@ -116,18 +127,17 @@ defmodule Homelab.Deployments.AdoptionRoutingTest do
       assert List.last(Enum.take_while(types, &(&1 != :sync_domain))) == :verify_integrity
 
       assert Enum.drop_while(types, &(&1 != :sync_domain)) ==
-               [:sync_domain, :publish_dns, :verify_public_url]
+               [:sync_domain, :publish_dns, :publish_ingress, :verify_public_url]
     end
 
-    test "plans no publish_ingress for a :host adoption" do
+    test "does not attach a :host adoption to ingress" do
       # `adopted_exposure/1` gives a plain adopted container `:host`, which is not
-      # proxy-routed, so `publish_deployment/1` would decline to attach it at runtime.
-      # Planning the step anyway is the "reports success for work it did not do"
-      # defect the reachability gate exists to prevent.
+      # proxy-routed.
       tenant = insert(:tenant)
       result = readopt(tenant, "hostmode-pg", %{domain: "hostmode-pg.example.test"})
 
-      refute :publish_ingress in step_types(result)
+      assert :publish_ingress in step_types(result)
+      assert skips?(PublishIngress, result.deployment)
     end
 
     test "grants reachability when the operator moves it behind the proxy" do

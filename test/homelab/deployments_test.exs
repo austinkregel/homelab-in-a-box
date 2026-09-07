@@ -96,6 +96,25 @@ defmodule Homelab.DeploymentsTest do
       assert :await_health in types
     end
 
+    test "plans the lifecycle stages in order, with no companion block" do
+      deployment = insert(:deployment, status: :running, external_id: "live-2")
+
+      assert {:ok, release} = Deployments.reconverge_release(deployment)
+
+      assert release.steps
+             |> Enum.sort_by(& &1.position)
+             |> Enum.map(&{&1.stage, &1.type}) == [
+               {:prepare, :ensure_ingress_proxy},
+               {:prepare, :provision_credentials},
+               {:workload, :app_container},
+               {:workload, :await_health},
+               {:naming, :sync_domain},
+               {:naming, :publish_dns},
+               {:reachability, :publish_ingress},
+               {:verification, :verify_public_url}
+             ]
+    end
+
     # The whole reason this is not `redeploy/1`. A version bump on an app must not take
     # the datastore behind it down: that companion is not in the step list, and its row
     # keeps the container id it is running under.

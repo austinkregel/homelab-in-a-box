@@ -6,6 +6,10 @@ defmodule Homelab.Deployments.ReleaseStep do
   walks completed steps in descending `position`. `resource_handle` records what
   the step created (a container `external_id`, a network name, a secret id, …) so
   the step's compensation can undo it idempotently without re-deriving anything.
+
+  `stage` is the lifecycle band the step belongs to, and every release is planned with
+  every stage present. A step that does not apply is skipped at runtime, with its
+  `reason_type` and `reason_message`.
   """
   use Ecto.Schema
   import Ecto.Changeset
@@ -14,9 +18,9 @@ defmodule Homelab.Deployments.ReleaseStep do
     # Greenfield deploy steps.
     :network,
     :provision_credentials,
-    # The shared ingress proxy (Traefik). Planned FIRST for a routed release, before
-    # any container exists — the proxy is a precondition of the route, not a product
-    # of it. Deliberately has no compensation; see `ReleaseSteps.EnsureIngressProxy`.
+    # The shared ingress proxy (Traefik). Planned FIRST, before any container exists —
+    # the proxy is a precondition of the route, not a product of it. Deliberately has
+    # no compensation; see `ReleaseSteps.EnsureIngressProxy`.
     :ensure_ingress_proxy,
     :dependency_container,
     :await_health,
@@ -69,13 +73,31 @@ defmodule Homelab.Deployments.ReleaseStep do
 
   @statuses [:pending, :running, :completed, :compensating, :compensated, :failed, :skipped]
 
+  # The lifecycle backbone, in execution order. `:dependencies` and `:namespace` are as
+  # wide as the deployment is; the rest are singletons.
+  @stages [
+    :prepare,
+    :dependencies,
+    :workload,
+    :namespace,
+    :naming,
+    :reachability,
+    :verification
+  ]
+
+  # Why a step is not simply done: it failed, a condition did not hold, or it completed
+  # while telling the operator something (`EnsureIngressProxy`).
+  @reason_types ~w(error skipped note)
+
   schema "release_steps" do
     field :type, Ecto.Enum, values: @types
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :position, :integer
     field :resource_handle, :map, default: %{}
     field :attempts, :integer, default: 0
-    field :error_message, :string
+    field :stage, Ecto.Enum, values: @stages
+    field :reason_type, :string
+    field :reason_message, :string
 
     belongs_to :release, Homelab.Deployments.Release
 
@@ -84,9 +106,11 @@ defmodule Homelab.Deployments.ReleaseStep do
 
   def types, do: @types
   def statuses, do: @statuses
+  def stages, do: @stages
+  def reason_types, do: @reason_types
 
   @required_fields ~w(release_id type position)a
-  @optional_fields ~w(status resource_handle attempts error_message)a
+  @optional_fields ~w(status stage resource_handle attempts reason_type reason_message)a
 
   def changeset(step, attrs) do
     step
@@ -94,19 +118,27 @@ defmodule Homelab.Deployments.ReleaseStep do
     |> validate_required(@required_fields)
     |> validate_inclusion(:type, @types)
     |> validate_inclusion(:status, @statuses)
+    |> validate_inclusion(:stage, @stages)
+    |> validate_inclusion(:reason_type, @reason_types)
     |> foreign_key_constraint(:release_id)
     |> unique_constraint([:release_id, :position])
   end
 
   @doc """
-  Records the outcome of running (or compensating) a step: status plus an
-  optional `:handle` (merged into `resource_handle`) and `:error`.
+  Records the outcome of running (or compensating) a step: status plus an optional
+  `:handle` (merged into `resource_handle`) and `:reason` (`{type, message}`).
   """
   def progress_changeset(step, status, opts \\ []) do
     attrs = %{status: status}
 
     attrs =
-      if error = Keyword.get(opts, :error), do: Map.put(attrs, :error_message, error), else: attrs
+      case Keyword.get(opts, :reason) do
+        {type, message} when is_binary(message) ->
+          Map.merge(attrs, %{reason_type: to_string(type), reason_message: message})
+
+        _ ->
+          attrs
+      end
 
     attrs =
       case Keyword.fetch(opts, :handle) do
@@ -115,7 +147,8 @@ defmodule Homelab.Deployments.ReleaseStep do
       end
 
     step
-    |> cast(attrs, [:status, :resource_handle, :error_message])
+    |> cast(attrs, [:status, :resource_handle, :reason_type, :reason_message])
     |> validate_inclusion(:status, @statuses)
+    |> validate_inclusion(:reason_type, @reason_types)
   end
 end
