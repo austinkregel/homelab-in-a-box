@@ -1,4 +1,4 @@
-defmodule HomelabWeb.TenantLiveTest do
+defmodule HomelabWeb.SpaceLiveTest do
   use HomelabWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
@@ -27,25 +27,25 @@ defmodule HomelabWeb.TenantLiveTest do
   end
 
   describe "mount" do
-    test "renders tenant page with name and slug", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+    test "renders space page with name and slug", %{conn: conn, tenant: tenant} do
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ tenant.name
       assert html =~ tenant.slug
     end
 
     test "shows breadcrumb navigation", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Dashboard"
       assert html =~ tenant.name
     end
 
     test "shows deploy app button", %{conn: conn, tenant: tenant} do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert has_element?(view, "a", "Deploy App")
     end
 
     test "shows summary cards", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Total"
       assert html =~ "Running"
       assert html =~ "Pending"
@@ -53,18 +53,18 @@ defmodule HomelabWeb.TenantLiveTest do
     end
 
     test "redirects for non-existent tenant", %{conn: conn} do
-      {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/tenants/999999")
+      {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/spaces/999999")
     end
   end
 
   describe "empty state" do
     test "shows no deployments message when empty", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "No apps deployed yet"
     end
 
     test "shows link to catalog", %{conn: conn, tenant: tenant} do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert has_element?(view, "a", "Browse Catalog")
     end
   end
@@ -83,17 +83,17 @@ defmodule HomelabWeb.TenantLiveTest do
     end
 
     test "shows deployment in list", %{conn: conn, tenant: tenant, template: template} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ template.name
     end
 
     test "shows running count", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Running"
     end
 
     test "shows deployment status pill", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Running"
     end
 
@@ -102,7 +102,7 @@ defmodule HomelabWeb.TenantLiveTest do
       tenant: tenant,
       deployment: dep
     } do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       render_click(view, "navigate", %{"to" => ~p"/deployments/#{dep.id}"})
       assert_redirect(view, ~p"/deployments/#{dep.id}")
     end
@@ -133,7 +133,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:undeploy, fn _spec -> :ok end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "stop", %{"id" => to_string(dep.id)})
       assert html =~ "stopped"
     end
@@ -145,7 +145,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.DnsProvider
       |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_1"}} end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "start", %{"id" => to_string(dep.id)})
       assert html =~ "starting" or html =~ dep.app_template.name
     end
@@ -154,7 +154,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:restart, fn _dep -> :ok end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "restart", %{"id" => to_string(dep.id)})
       assert html =~ "restarting"
     end
@@ -163,7 +163,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:undeploy, fn _spec -> :ok end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "delete", %{"id" => to_string(dep.id)})
       assert html =~ "deleted"
     end
@@ -176,7 +176,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:undeploy, fn _spec -> {:error, :docker_down} end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "delete", %{"id" => to_string(dep.id)})
       assert html =~ "was kept"
       assert {:ok, _} = Homelab.Deployments.get_deployment(dep.id)
@@ -184,10 +184,10 @@ defmodule HomelabWeb.TenantLiveTest do
   end
 
   describe "tenant edit and delete" do
-    test "save_tenant renames the space", %{conn: conn, tenant: tenant} do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+    test "save_space renames the space", %{conn: conn, tenant: tenant} do
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       render_click(view, "open_edit", %{})
-      render_submit(view, "save_tenant", %{"name" => "Renamed Space"})
+      render_submit(view, "save_space", %{"name" => "Renamed Space"})
 
       assert {:ok, updated} = Homelab.Tenants.get_tenant(tenant.id)
       assert updated.name == "Renamed Space"
@@ -200,8 +200,8 @@ defmodule HomelabWeb.TenantLiveTest do
     } do
       insert(:deployment, tenant: tenant, app_template: template)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
-      html = render_click(view, "delete_tenant", %{})
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
+      html = render_click(view, "delete_space", %{})
 
       assert html =~ "Move or delete this space"
       assert {:ok, _} = Homelab.Tenants.get_tenant(tenant.id)
@@ -209,8 +209,8 @@ defmodule HomelabWeb.TenantLiveTest do
 
     test "delete succeeds when the space is empty", %{conn: conn} do
       empty = insert(:tenant)
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{empty.id}")
-      render_click(view, "delete_tenant", %{})
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{empty.id}")
+      render_click(view, "delete_space", %{})
 
       assert_redirect(view, ~p"/")
       assert {:error, :not_found} = Homelab.Tenants.get_tenant(empty.id)
@@ -219,7 +219,7 @@ defmodule HomelabWeb.TenantLiveTest do
 
   describe "handle_info :refresh" do
     test "refreshes deployment data", %{conn: conn, tenant: tenant} do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       send(view.pid, :refresh)
       _ = :sys.get_state(view.pid)
       html = render(view)
@@ -253,14 +253,14 @@ defmodule HomelabWeb.TenantLiveTest do
     end
 
     test "shows correct counts for mixed statuses", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Running"
       assert html =~ "Pending"
       assert html =~ "Failed"
     end
 
     test "shows error message for failed deployment", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Container crashed"
     end
   end
@@ -286,7 +286,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:undeploy, fn _spec -> {:error, "failed to stop"} end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "stop", %{"id" => to_string(dep.id)})
       assert html =~ "stopped"
     end
@@ -309,7 +309,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.Orchestrator
       |> stub(:restart, fn _dep -> {:error, "failed to restart"} end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "restart", %{"id" => to_string(dep.id)})
       assert html =~ "Failed to restart"
     end
@@ -328,7 +328,7 @@ defmodule HomelabWeb.TenantLiveTest do
     end
 
     test "refresh reloads deployments and counts", %{conn: conn, tenant: tenant} do
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       send(view.pid, :refresh)
       _ = :sys.get_state(view.pid)
       html = render(view)
@@ -351,7 +351,7 @@ defmodule HomelabWeb.TenantLiveTest do
         domain: "myapp.example.com"
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "myapp.example.com"
     end
   end
@@ -367,7 +367,7 @@ defmodule HomelabWeb.TenantLiveTest do
         external_id: "logo_container"
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "https://example.com/logo.png"
     end
   end
@@ -392,7 +392,7 @@ defmodule HomelabWeb.TenantLiveTest do
       Homelab.Mocks.DnsProvider
       |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "r1"}} end)
 
-      {:ok, view, _html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, view, _html} = live(conn, ~p"/spaces/#{tenant.id}")
       html = render_click(view, "start", %{"id" => to_string(stopped.id)})
       assert html =~ "starting" or html =~ stopped.app_template.name
     end
@@ -407,7 +407,7 @@ defmodule HomelabWeb.TenantLiveTest do
         external_id: nil
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Deploying"
     end
   end
@@ -421,7 +421,7 @@ defmodule HomelabWeb.TenantLiveTest do
         external_id: nil
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Removing"
     end
   end
@@ -440,7 +440,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: DateTime.utc_now()
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "just now"
     end
 
@@ -457,7 +457,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: DateTime.add(DateTime.utc_now(), -30, :second)
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "s ago"
     end
 
@@ -474,7 +474,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: DateTime.add(DateTime.utc_now(), -300, :second)
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "m ago"
     end
 
@@ -491,7 +491,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: DateTime.add(DateTime.utc_now(), -7200, :second)
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "h ago"
     end
 
@@ -508,7 +508,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: DateTime.add(DateTime.utc_now(), -172_800, :second)
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ ~r/\d{4}-\d{2}-\d{2}/
     end
 
@@ -525,7 +525,7 @@ defmodule HomelabWeb.TenantLiveTest do
         last_reconciled_at: nil
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "never reconciled"
     end
   end
@@ -543,12 +543,12 @@ defmodule HomelabWeb.TenantLiveTest do
         external_id: "topo_container"
       )
 
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       assert html =~ "Infrastructure Topology"
     end
 
     test "does not render topology section when no deployments", %{conn: conn, tenant: tenant} do
-      {:ok, _view, html} = live(conn, ~p"/tenants/#{tenant.id}")
+      {:ok, _view, html} = live(conn, ~p"/spaces/#{tenant.id}")
       refute html =~ "Infrastructure Topology"
     end
   end

@@ -108,8 +108,8 @@ defmodule HomelabWeb.RouterAuthTest do
     # filter that over-matches) and the test passing vacuously.
     paths = Enum.map(routes(), & &1.path)
 
-    assert Enum.any?(paths, &String.starts_with?(&1, "/api/v1/tenants"))
-    assert Enum.any?(paths, &(&1 =~ ~r{^/api/v1/tenants/[^/]+/backups}))
+    assert Enum.any?(paths, &String.starts_with?(&1, "/api/v1/spaces"))
+    assert Enum.any?(paths, &(&1 =~ ~r{^/api/v1/spaces/[^/]+/backups}))
 
     # F10: backups were top-level and unscoped, so any logged-in user could restore any
     # tenant's snapshot. Re-adding a top-level route would reinstate that bypass whether
@@ -140,7 +140,7 @@ defmodule HomelabWeb.RouterAuthTest do
     {:get, "/workbench"},
     {:get, "/deploy/new"},
     # Where a space and its deployments are edited and destroyed.
-    {:get, "/tenants/:id"},
+    {:get, "/spaces/:id"},
     # Creates and deletes named volumes and rewrites a live deployment's mounts — a
     # wrong path there is data loss, not a bad render.
     {:get, "/storage"},
@@ -150,16 +150,16 @@ defmodule HomelabWeb.RouterAuthTest do
     # Every mutating API route. `POST .../deployments` reaches `deploy_now/1` and
     # `image_override` takes any parseable reference; `DELETE` destroys real
     # infrastructure; `restore` overwrites live data from a snapshot.
-    {:post, "/api/v1/tenants"},
-    {:patch, "/api/v1/tenants/:id"},
-    {:put, "/api/v1/tenants/:id"},
-    {:delete, "/api/v1/tenants/:id"},
-    {:post, "/api/v1/tenants/:tenant_id/deployments"},
-    {:patch, "/api/v1/tenants/:tenant_id/deployments/:id"},
-    {:put, "/api/v1/tenants/:tenant_id/deployments/:id"},
-    {:delete, "/api/v1/tenants/:tenant_id/deployments/:id"},
-    {:post, "/api/v1/tenants/:tenant_id/backups"},
-    {:post, "/api/v1/tenants/:tenant_id/backups/:id/restore"}
+    {:post, "/api/v1/spaces"},
+    {:patch, "/api/v1/spaces/:id"},
+    {:put, "/api/v1/spaces/:id"},
+    {:delete, "/api/v1/spaces/:id"},
+    {:post, "/api/v1/spaces/:space_id/deployments"},
+    {:patch, "/api/v1/spaces/:space_id/deployments/:id"},
+    {:put, "/api/v1/spaces/:space_id/deployments/:id"},
+    {:delete, "/api/v1/spaces/:space_id/deployments/:id"},
+    {:post, "/api/v1/spaces/:space_id/backups"},
+    {:post, "/api/v1/spaces/:space_id/backups/:id/restore"}
   ]
 
   # Routes a member may reach. Read-only: they render state, and none of them is where
@@ -172,12 +172,12 @@ defmodule HomelabWeb.RouterAuthTest do
     {:get, "/backups"},
     {:get, "/activity"},
     {:get, "/telemetry"},
-    {:get, "/api/v1/tenants"},
-    {:get, "/api/v1/tenants/:id"},
-    {:get, "/api/v1/tenants/:tenant_id/deployments"},
-    {:get, "/api/v1/tenants/:tenant_id/deployments/:id"},
-    {:get, "/api/v1/tenants/:tenant_id/backups"},
-    {:get, "/api/v1/tenants/:tenant_id/backups/:id"},
+    {:get, "/api/v1/spaces"},
+    {:get, "/api/v1/spaces/:id"},
+    {:get, "/api/v1/spaces/:space_id/deployments"},
+    {:get, "/api/v1/spaces/:space_id/deployments/:id"},
+    {:get, "/api/v1/spaces/:space_id/backups"},
+    {:get, "/api/v1/spaces/:space_id/backups/:id"},
     {:get, "/api/v1/app-templates"},
     {:get, "/api/v1/app-templates/:id"}
   ]

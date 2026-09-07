@@ -938,7 +938,7 @@ defmodule HomelabWeb.DeploymentLive do
           </.link>
           <.icon name="hero-chevron-right-mini" class="size-3.5" />
           <.link
-            navigate={~p"/tenants/#{@deployment.tenant.id}"}
+            navigate={~p"/spaces/#{@deployment.tenant.id}"}
             class="hover:text-base-content/70 transition-colors"
           >
             {@deployment.tenant.name}

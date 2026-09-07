@@ -61,7 +61,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
       good_token(bypass)
       insert(:tenant)
 
-      conn = get(with_token("tok"), ~p"/api/v1/tenants")
+      conn = get(with_token("tok"), ~p"/api/v1/spaces")
 
       assert %{"data" => [_ | _]} = json_response(conn, 200)
     end
@@ -73,7 +73,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
         unauthenticated_conn()
         |> put_req_header("accept", "application/json")
         |> put_req_header("authorization", "bearer tok")
-        |> get(~p"/api/v1/tenants")
+        |> get(~p"/api/v1/spaces")
 
       assert json_response(conn, 200)
     end
@@ -81,7 +81,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
     test "the machine turns up in the roster as a :service row", %{bypass: bypass} do
       good_token(bypass)
 
-      assert json_response(get(with_token("tok"), ~p"/api/v1/tenants"), 200)
+      assert json_response(get(with_token("tok"), ~p"/api/v1/spaces"), 200)
 
       assert [%{role: :service, sub: "service:mcp-1", name: "MCP Server"}] =
                Homelab.Accounts.list_users() |> Enum.filter(&Homelab.Accounts.service?/1)
@@ -95,7 +95,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
       template = insert(:app_template)
 
       conn =
-        post(with_token("tok"), ~p"/api/v1/tenants/#{tenant.id}/deployments", %{
+        post(with_token("tok"), ~p"/api/v1/spaces/#{tenant.id}/deployments", %{
           "deployment" => %{"app_template_id" => template.id, "image_override" => "evil:latest"}
         })
 
@@ -106,7 +106,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
       good_token(bypass)
       tenant = insert(:tenant)
 
-      assert json_response(delete(with_token("tok"), ~p"/api/v1/tenants/#{tenant.id}"), 403)
+      assert json_response(delete(with_token("tok"), ~p"/api/v1/spaces/#{tenant.id}"), 403)
       assert {:ok, _} = Homelab.Tenants.get_tenant(tenant.id)
     end
   end
@@ -115,13 +115,13 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
     test "a token the issuer rejects is 401", %{bypass: bypass} do
       machine_info(bypass, 401, %{"error" => "invalid_token"})
 
-      assert json_response(get(with_token("bad"), ~p"/api/v1/tenants"), 401)
+      assert json_response(get(with_token("bad"), ~p"/api/v1/spaces"), 401)
     end
 
     test "a valid token without the required scope is 401", %{bypass: bypass} do
       machine_info(bypass, 200, %{"client_id" => "other", "scopes" => ["openid", "email"]})
 
-      assert json_response(get(with_token("tok"), ~p"/api/v1/tenants"), 401)
+      assert json_response(get(with_token("tok"), ~p"/api/v1/spaces"), 401)
     end
 
     test "a bad token is refused even alongside a good admin session", %{
@@ -136,7 +136,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
         conn
         |> put_req_header("accept", "application/json")
         |> put_req_header("authorization", "Bearer expired")
-        |> get(~p"/api/v1/tenants")
+        |> get(~p"/api/v1/spaces")
 
       # The token decides once presented; falling back would let a lapsed agent act as the operator.
       assert json_response(refused, 401)
@@ -148,7 +148,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
         conn
         |> put_req_header("accept", "application/json")
         |> put_req_header("authorization", "Basic abc123")
-        |> get(~p"/api/v1/tenants")
+        |> get(~p"/api/v1/spaces")
 
       assert json_response(conn, 200)
     end
@@ -156,7 +156,7 @@ defmodule HomelabWeb.Api.V1.ApiMachineTokenTest do
     test "an unreachable issuer is 401, not 500", %{bypass: bypass} do
       Bypass.down(bypass)
 
-      assert json_response(get(with_token("tok"), ~p"/api/v1/tenants"), 401)
+      assert json_response(get(with_token("tok"), ~p"/api/v1/spaces"), 401)
     end
   end
 end

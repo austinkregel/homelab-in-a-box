@@ -1,7 +1,7 @@
-defmodule HomelabWeb.Api.V1.TenantJSONTest do
+defmodule HomelabWeb.Api.V1.SpaceJSONTest do
   use ExUnit.Case, async: true
 
-  alias HomelabWeb.Api.V1.TenantJSON
+  alias HomelabWeb.Api.V1.SpaceJSON
   alias Homelab.Tenants.Tenant
 
   defp tenant(attrs \\ %{}) do
@@ -20,13 +20,13 @@ defmodule HomelabWeb.Api.V1.TenantJSONTest do
 
   describe "show/1" do
     test "wraps a single tenant under :data" do
-      assert %{data: data} = TenantJSON.show(%{tenant: tenant()})
+      assert %{data: data} = SpaceJSON.show(%{space: tenant()})
       assert is_map(data)
     end
 
     test "renders all expected fields" do
       t = tenant()
-      %{data: data} = TenantJSON.show(%{tenant: t})
+      %{data: data} = SpaceJSON.show(%{space: t})
 
       assert data.id == t.id
       assert data.name == t.name
@@ -38,7 +38,7 @@ defmodule HomelabWeb.Api.V1.TenantJSONTest do
     end
 
     test "exposes exactly the documented key set" do
-      %{data: data} = TenantJSON.show(%{tenant: tenant()})
+      %{data: data} = SpaceJSON.show(%{space: tenant()})
 
       assert Map.keys(data) |> Enum.sort() ==
                Enum.sort([
@@ -53,18 +53,18 @@ defmodule HomelabWeb.Api.V1.TenantJSONTest do
     end
 
     test "passes settings through as-is, including empty map" do
-      %{data: data} = TenantJSON.show(%{tenant: tenant(%{settings: %{}})})
+      %{data: data} = SpaceJSON.show(%{space: tenant(%{settings: %{}})})
       assert data.settings == %{}
     end
 
     test "passes nil settings through unchanged" do
-      %{data: data} = TenantJSON.show(%{tenant: tenant(%{settings: nil})})
+      %{data: data} = SpaceJSON.show(%{space: tenant(%{settings: nil})})
       assert data.settings == nil
     end
 
     test "renders the various status enum values" do
       for status <- [:active, :suspended, :archived] do
-        %{data: data} = TenantJSON.show(%{tenant: tenant(%{status: status})})
+        %{data: data} = SpaceJSON.show(%{space: tenant(%{status: status})})
         assert data.status == status
       end
     end
@@ -73,20 +73,20 @@ defmodule HomelabWeb.Api.V1.TenantJSONTest do
   describe "index/1" do
     test "wraps a list of tenants under :data" do
       ts = [tenant(%{id: 1}), tenant(%{id: 2}), tenant(%{id: 3})]
-      %{data: list} = TenantJSON.index(%{tenants: ts})
+      %{data: list} = SpaceJSON.index(%{spaces: ts})
 
       assert length(list) == 3
       assert Enum.map(list, & &1.id) == [1, 2, 3]
     end
 
     test "returns empty list for no tenants" do
-      assert TenantJSON.index(%{tenants: []}) == %{data: []}
+      assert SpaceJSON.index(%{spaces: []}) == %{data: []}
     end
 
     test "shapes each element identically to show/1" do
       t = tenant(%{id: 7})
-      %{data: [from_index]} = TenantJSON.index(%{tenants: [t]})
-      %{data: from_show} = TenantJSON.show(%{tenant: t})
+      %{data: [from_index]} = SpaceJSON.index(%{spaces: [t]})
+      %{data: from_show} = SpaceJSON.show(%{space: t})
 
       assert from_index == from_show
     end

@@ -1,4 +1,4 @@
-defmodule HomelabWeb.Api.V1.TenantControllerTest do
+defmodule HomelabWeb.Api.V1.SpaceControllerTest do
   use HomelabWeb.ConnCase, async: true
 
   import Homelab.Factory
@@ -7,27 +7,27 @@ defmodule HomelabWeb.Api.V1.TenantControllerTest do
     {:ok, conn: put_req_header(conn, "accept", "application/json")}
   end
 
-  describe "GET /api/v1/tenants" do
+  describe "GET /api/v1/spaces" do
     test "lists all tenants", %{conn: conn} do
       insert(:tenant, name: "Friends", slug: "friends")
       insert(:tenant, name: "Family", slug: "family")
 
-      conn = get(conn, ~p"/api/v1/tenants")
+      conn = get(conn, ~p"/api/v1/spaces")
       assert %{"data" => tenants} = json_response(conn, 200)
       assert length(tenants) == 2
     end
 
     test "returns empty list when no tenants", %{conn: conn} do
-      conn = get(conn, ~p"/api/v1/tenants")
+      conn = get(conn, ~p"/api/v1/spaces")
       assert %{"data" => []} = json_response(conn, 200)
     end
   end
 
-  describe "POST /api/v1/tenants" do
+  describe "POST /api/v1/spaces" do
     test "creates tenant with valid data", %{conn: conn} do
       conn =
-        post(conn, ~p"/api/v1/tenants", %{
-          "tenant" => %{"name" => "My Friends", "slug" => "my-friends"}
+        post(conn, ~p"/api/v1/spaces", %{
+          "space" => %{"name" => "My Friends", "slug" => "my-friends"}
         })
 
       assert %{"data" => tenant} = json_response(conn, 201)
@@ -38,8 +38,8 @@ defmodule HomelabWeb.Api.V1.TenantControllerTest do
 
     test "returns 422 with invalid data", %{conn: conn} do
       conn =
-        post(conn, ~p"/api/v1/tenants", %{
-          "tenant" => %{"name" => "", "slug" => "A"}
+        post(conn, ~p"/api/v1/spaces", %{
+          "space" => %{"name" => "", "slug" => "A"}
         })
 
       assert %{"errors" => errors} = json_response(conn, 422)
@@ -47,10 +47,10 @@ defmodule HomelabWeb.Api.V1.TenantControllerTest do
     end
   end
 
-  describe "GET /api/v1/tenants/:id" do
+  describe "GET /api/v1/spaces/:id" do
     test "returns tenant by id", %{conn: conn} do
       tenant = insert(:tenant, name: "Friends", slug: "friends")
-      conn = get(conn, ~p"/api/v1/tenants/#{tenant.id}")
+      conn = get(conn, ~p"/api/v1/spaces/#{tenant.id}")
 
       assert %{"data" => data} = json_response(conn, 200)
       assert data["id"] == tenant.id
@@ -58,18 +58,18 @@ defmodule HomelabWeb.Api.V1.TenantControllerTest do
     end
 
     test "returns 404 for nonexistent tenant", %{conn: conn} do
-      conn = get(conn, ~p"/api/v1/tenants/999")
+      conn = get(conn, ~p"/api/v1/spaces/999")
       assert json_response(conn, 404)
     end
   end
 
-  describe "PATCH /api/v1/tenants/:id" do
+  describe "PATCH /api/v1/spaces/:id" do
     test "updates tenant", %{conn: conn} do
       tenant = insert(:tenant)
 
       conn =
-        patch(conn, ~p"/api/v1/tenants/#{tenant.id}", %{
-          "tenant" => %{"name" => "Updated Name"}
+        patch(conn, ~p"/api/v1/spaces/#{tenant.id}", %{
+          "space" => %{"name" => "Updated Name"}
         })
 
       assert %{"data" => data} = json_response(conn, 200)
@@ -77,10 +77,10 @@ defmodule HomelabWeb.Api.V1.TenantControllerTest do
     end
   end
 
-  describe "DELETE /api/v1/tenants/:id" do
+  describe "DELETE /api/v1/spaces/:id" do
     test "deletes tenant", %{conn: conn} do
       tenant = insert(:tenant)
-      conn = delete(conn, ~p"/api/v1/tenants/#{tenant.id}")
+      conn = delete(conn, ~p"/api/v1/spaces/#{tenant.id}")
       assert response(conn, 204)
     end
   end

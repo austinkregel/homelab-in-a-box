@@ -1268,14 +1268,14 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ template.name
     end
 
-    test "breadcrumb has links to dashboard and tenant", %{
+    test "breadcrumb has links to dashboard and space", %{
       conn: conn,
       deployment: dep,
       tenant: tenant
     } do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       assert has_element?(view, "a[href='/']", "Dashboard")
-      assert has_element?(view, "a[href='/tenants/#{tenant.id}']")
+      assert has_element?(view, "a[href='/spaces/#{tenant.id}']")
     end
   end
 

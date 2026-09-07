@@ -92,7 +92,7 @@ defmodule HomelabWeb.Router do
   # it because it dumps the instance's configuration as JSON.
   #
   # The rest create or reconfigure real infrastructure: `/deploy/new` and `/workbench`
-  # both end in running a container image on the Docker host, and `/tenants/:id` is where
+  # both end in running a container image on the Docker host, and `/spaces/:id` is where
   # a space and its deployments are edited and destroyed.
   #
   # `/storage` and `/containers` are here for a subtler reason than the others — most of
@@ -102,9 +102,12 @@ defmodule HomelabWeb.Router do
   # ones we manage: the image, command, and labels of the operator's unrelated stacks.
   # Both are admin-shaped even where the page looks like a table.
   #
-  # Note what this is NOT. With no user<->tenant relationship in the schema, admin/member
-  # is the only boundary that exists — it is read-vs-write, not tenant isolation. A
-  # member can still see every tenant's state.
+  # Note what this is NOT. With no user<->space relationship in the schema, admin/member
+  # is the only boundary that exists — it is read-vs-write, not isolation between spaces.
+  # A member can still see every space's state. That is why these are spaces and not
+  # tenants: the word "tenant" survives only in the schema (`Homelab.Tenants`, the
+  # `tenant_id` columns, the `homelab.tenant` container label), where renaming it would
+  # mean a migration and orphaning every running container.
   scope "/", HomelabWeb do
     pipe_through [:browser, :authenticated, :admin]
 
@@ -120,7 +123,7 @@ defmodule HomelabWeb.Router do
       live "/storage", StorageLive, :index
       live "/containers", ContainersLive, :index
       live "/deploy/new", DeployWizardLive, :new
-      live "/tenants/:id", TenantLive, :show
+      live "/spaces/:id", SpaceLive, :show
     end
 
     # Non-LiveView routes (controllers can't live inside a live_session).
@@ -138,20 +141,20 @@ defmodule HomelabWeb.Router do
 
   # Everything else reads or MUTATES real state. This scope had no authentication at all
   # until now — and since the app's own Traefik rule matches `Host(base_domain)` with no
-  # path constraint, all of it was served publicly. `POST /tenants/:id/deployments`
+  # path constraint, all of it was served publicly. `POST /spaces/:id/deployments`
   # reaches `deploy_now/1`, and `image_override` takes any parseable reference, so this
   # was unauthenticated arbitrary-image execution on the Docker host.
   # Reads: any signed-in user, or a machine holding a `client_credentials` token (see
   # `RequireAuthApi`). A machine gets exactly this half; the scope below refuses it.
-  # Backups nest under the tenant like everything else —
-  # top-level `/backups` meant `index` listed every tenant's jobs and `show`/`restore`
+  # Backups nest under the space like everything else —
+  # top-level `/backups` meant `index` listed every space's jobs and `show`/`restore`
   # took a bare id, so any signed-in user could read all backup history and restore any
-  # tenant's snapshot over `/data/restore`. The old paths are removed rather than kept
+  # space's snapshot over `/data/restore`. The old paths are removed rather than kept
   # as aliases; left in place they would simply be a bypass of the scoping.
   scope "/api/v1", HomelabWeb.Api.V1 do
     pipe_through [:api, :api_authenticated]
 
-    resources "/tenants", TenantController, only: [:index, :show] do
+    resources "/spaces", SpaceController, only: [:index, :show] do
       resources "/deployments", DeploymentController, only: [:index, :show]
       resources "/backups", BackupController, only: [:index, :show]
     end
@@ -159,7 +162,7 @@ defmodule HomelabWeb.Router do
     resources "/app-templates", AppTemplateController, only: [:index, :show]
   end
 
-  # Writes: administrators. `POST /tenants/:id/deployments` reaches `deploy_now/1` and
+  # Writes: administrators. `POST /spaces/:id/deployments` reaches `deploy_now/1` and
   # `image_override` accepts any parseable reference, so a write here is arbitrary-image
   # execution on the Docker host; `DELETE` destroys real infrastructure and
   # `POST /backups/:id/restore` overwrites live data from a snapshot. Listing what is
@@ -171,7 +174,7 @@ defmodule HomelabWeb.Router do
   scope "/api/v1", HomelabWeb.Api.V1 do
     pipe_through [:api, :api_authenticated, :api_admin]
 
-    resources "/tenants", TenantController, only: [:create, :update, :delete] do
+    resources "/spaces", SpaceController, only: [:create, :update, :delete] do
       resources "/deployments", DeploymentController, only: [:create, :update, :delete]
       resources "/backups", BackupController, only: [:create]
       post "/backups/:id/restore", BackupController, :restore
