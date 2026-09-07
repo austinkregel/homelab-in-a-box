@@ -367,6 +367,45 @@ defmodule Homelab.Services.DockerEventListenerTest do
       assert_receive :unpublished
     end
 
+    # A gluetun donor reports unhealthy for as long as the tunnel takes to come up. Its
+    # ingress endpoint is its children's only address and is only ever established at
+    # container-create time, so severing it here is an outage nothing can undo.
+    test "health_status: unhealthy leaves a netns donor attached to ingress" do
+      pid = start_connected_listener()
+      test_pid = self()
+
+      stub(Homelab.Mocks.Orchestrator, :unpublish, fn container_id, _network ->
+        send(test_pid, {:unpublished, container_id})
+        :ok
+      end)
+
+      tenant = insert(:tenant)
+
+      donor =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, name: "Gluetun", slug: "gluetun", ports: []),
+          domain: nil,
+          status: :running,
+          external_id: "gluetun-1"
+        )
+
+      insert(:deployment,
+        tenant: tenant,
+        app_template: insert(:app_template, slug: "sonarr", exposure_mode: :public),
+        domain: "sonarr.example.com",
+        network_parent_id: donor.id,
+        status: :running,
+        external_id: "sonarr-1"
+      )
+
+      push_events(pid, [container_event("health_status: unhealthy", donor.id)])
+
+      # Still demoted, so the route is re-evaluated once it recovers.
+      assert reload_status(donor.id) == :deploying
+      refute_received {:unpublished, "gluetun-1"}
+    end
+
     test "die with exit code 0 -> stopped" do
       pid = start_connected_listener()
       d = insert_deployment(:running)

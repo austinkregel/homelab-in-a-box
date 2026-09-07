@@ -8,9 +8,10 @@ defmodule Homelab.Services.Reconciler do
        state, using the readiness model (a template-declared healthcheck, else a
        running-and-stable window). This is what un-sticks `:deploying`.
     2. **Times out** deployments stuck in `:deploying` and marks them `:failed`.
-    3. **Enforces the ingress invariant**: Traefik is connected to an
-       ingress-published deployment's network *iff* it is `:running`. This is the
-       only thing that grants external reachability, and it is idempotent.
+    3. **Enforces the ingress invariant**: a deployment holding a domain is on
+       the ingress network *iff* it is `:running`; a netns donor is on it for as
+       long as it carries a routed child. Idempotent, and the only thing that
+       grants external reachability.
     4. **Sweeps orphans**: a managed container with no deployment record. The
        action taken depends on the `reconciler_sweep_mode` setting:
          * `sever_only` (default): sever the public route, notify, and record the
@@ -271,7 +272,7 @@ defmodule Homelab.Services.Reconciler do
   end
 
   # A previously-running deployment that is no longer ready (e.g. went unhealthy)
-  # is demoted so the ingress invariant will sever its route this same pass.
+  # is demoted so the ingress invariant re-evaluates its route this same pass.
   defp demote_if_running(deployment) do
     if deployment.status == :running do
       transition(deployment, :deploying, [:running])
@@ -352,14 +353,19 @@ defmodule Homelab.Services.Reconciler do
   defp enforce_ingress_invariant do
     Deployments.list_ingress_deployments()
     |> Enum.each(fn deployment ->
-      # Traefik is connected iff the deployment is a proxy mode with a domain AND
-      # running. Anything else with a (possibly stale) domain is disconnected.
-      if Deployments.ingress_published?(deployment) and deployment.status == :running do
-        Deployments.publish_deployment(deployment)
+      if ingress_desired?(deployment) do
+        Deployments.ensure_ingress_membership(deployment)
       else
         Deployments.unpublish_deployment(deployment)
       end
     end)
+  end
+
+  # A deployment's own route is gated on `:running`; a donor's is not — its endpoint
+  # serves its children, and they stay routed while the donor is merely unhealthy.
+  defp ingress_desired?(deployment) do
+    (Deployments.ingress_published?(deployment) and deployment.status == :running) or
+      Deployments.carries_child_routes?(deployment)
   end
 
   # 4. Orphan sweep. Behaviour depends on the sweep mode (see moduledoc).

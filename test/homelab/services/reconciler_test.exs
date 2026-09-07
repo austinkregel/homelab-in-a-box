@@ -254,6 +254,102 @@ defmodule Homelab.Services.ReconcilerTest do
       assert_receive {:published, "c1"}, 2_000
       assert_receive {:unpublished, "c2"}, 2_000
     end
+
+    # A gluetun donor holds no name of its own — every domain in the stack belongs to a
+    # child — so a `domain`-keyed query cannot see it and nothing else re-attaches it.
+    defp netns_stack do
+      tenant = insert(:tenant, slug: "acme")
+
+      donor =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, slug: "gluetun", ports: []),
+          domain: nil,
+          status: :running,
+          external_id: "vpn1"
+        )
+
+      {tenant, donor}
+    end
+
+    defp routed_child(tenant, donor) do
+      insert(:deployment,
+        tenant: tenant,
+        app_template: insert(:app_template, slug: "sonarr", exposure_mode: :public),
+        domain: "sonarr.acme.test",
+        network_parent_id: donor.id,
+        status: :running,
+        external_id: "sonarr1"
+      )
+    end
+
+    test "attaches a domainless donor whose children carry the routes" do
+      record_orchestrator_io(self())
+      {tenant, donor} = netns_stack()
+      routed_child(tenant, donor)
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn ->
+        {:ok,
+         [
+           svc("vpn1", %{state: :running, health: :healthy}),
+           svc("sonarr1", %{state: :running, health: :healthy})
+         ]}
+      end)
+
+      start_and_sync!()
+
+      assert_receive {:published, "vpn1"}, 2_000
+      refute_receive {:unpublished, "vpn1"}, 300
+    end
+
+    test "keeps a donor attached while it is unhealthy" do
+      record_orchestrator_io(self())
+      {tenant, donor} = netns_stack()
+      routed_child(tenant, donor)
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn ->
+        {:ok,
+         [
+           svc("vpn1", %{state: :running, health: :unhealthy}),
+           svc("sonarr1", %{state: :running, health: :healthy})
+         ]}
+      end)
+
+      start_and_sync!()
+
+      assert Deployments.get_deployment!(donor.id).status == :deploying
+      assert_receive {:published, "vpn1"}, 2_000
+      refute_receive {:unpublished, "vpn1"}, 300
+    end
+
+    test "leaves a donor with no routed children off the ingress network" do
+      record_orchestrator_io(self())
+      {tenant, donor} = netns_stack()
+
+      insert(:deployment,
+        tenant: tenant,
+        app_template: insert(:app_template, slug: "qbit", exposure_mode: :service),
+        domain: nil,
+        network_parent_id: donor.id,
+        status: :running,
+        external_id: "qbit1"
+      )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn ->
+        {:ok,
+         [
+           svc("vpn1", %{state: :running, health: :healthy}),
+           svc("qbit1", %{state: :running, health: :healthy})
+         ]}
+      end)
+
+      start_and_sync!()
+
+      refute_receive {:published, "vpn1"}, 300
+    end
   end
 
   describe "orphan sweep" do
