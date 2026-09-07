@@ -1021,13 +1021,20 @@ defmodule HomelabWeb.DeployWizardLive do
       # deployment", leaving orphaned `:pending` rows and planning no release at all. The
       # import dead-ended at exactly the point it looked like it had worked.
       primary_name =
-        if main_result, do: nil, else: ComposeParser.primary_name(socket.assigns.compose_services)
+        if main_result, do: nil, else: compose_primary_name(socket.assigns.compose_services)
+
+      services_by_name =
+        Map.new(socket.assigns.compose_services, &{to_string(&1[:name]), &1})
 
       # Create the compose deployment ROWS. Companions carry no domain — they are internal
       # dependencies, never ingress-published. The release saga deploys them.
-      compose_deployments =
+      #
+      # Donors first, threading their ids through the fold: a child needs its donor's row
+      # to point at, and `deploy_release/2` deploys companions in this order.
+      {compose_deployments, _created_ids} =
         socket.assigns.compose_services
-        |> Enum.map(fn svc ->
+        |> order_netns_donors_first()
+        |> Enum.map_reduce(%{}, fn svc, created ->
           primary? = primary_name != nil and svc[:name] == primary_name
           slug = slugify(svc[:name] || "compose-service")
           image = svc[:image] || ""
@@ -1059,7 +1066,7 @@ defmodule HomelabWeb.DeployWizardLive do
               |> Enum.filter(fn %{"value" => v} -> v == "" end)
               |> Enum.map(fn %{"key" => k} -> k end),
             depends_on: svc[:depends_on] || [],
-            exposure_mode: String.to_existing_atom(exposure_mode),
+            exposure_mode: compose_exposure_mode(exposure_mode, svc),
             # What the service is allowed to ask the KERNEL for. Dropping these was the
             # difference between an import that looks complete and a container that
             # cannot do its job — a VPN client with no NET_ADMIN starts, fails to open
@@ -1073,7 +1080,8 @@ defmodule HomelabWeb.DeployWizardLive do
             entrypoint: svc[:entrypoint]
           }
 
-          with {:ok, template} <- resolve_compose_template(slug, template_attrs) do
+          with {:ok, netns_parent_id} <- netns_parent_id(svc, services_by_name, created),
+               {:ok, template} <- resolve_compose_template(slug, template_attrs) do
             svc_env_overrides =
               svc_env
               |> Enum.reject(fn %{"value" => v} -> v == "" end)
@@ -1091,7 +1099,8 @@ defmodule HomelabWeb.DeployWizardLive do
                 # `restart:` has a home (`restart_policy_override`) but has never been
                 # imported, so every compose service arrived on the platform default
                 # regardless of what its file said.
-                restart_policy_override: svc[:restart]
+                restart_policy_override: svc[:restart],
+                network_parent_id: netns_parent_id
               }
               # The Advanced panel describes ONE workload, so it applies to the app and
               # not to its companions — a routed port or memory ceiling copied onto five
@@ -1106,13 +1115,15 @@ defmodule HomelabWeb.DeployWizardLive do
 
             case Homelab.Deployments.create_deployment(attrs) do
               {:ok, deployment} ->
-                {:ok, {primary?, deployment}}
+                # Keyed by COMPOSE service name — what a sibling's `network_mode` names.
+                {{:ok, {primary?, deployment}},
+                 Map.put(created, to_string(svc[:name]), deployment.id)}
 
               {:error, changeset} ->
-                {:error, {svc[:name] || slug, changeset_message(changeset)}}
+                {{:error, {svc[:name] || slug, changeset_message(changeset)}}, created}
             end
           else
-            {:error, message} -> {:error, {svc[:name] || slug, message}}
+            {:error, message} -> {{:error, {svc[:name] || slug, message}}, created}
           end
         end)
 
@@ -1184,11 +1195,120 @@ defmodule HomelabWeb.DeployWizardLive do
       {[{_primary?, app} | extra], companions} ->
         {app, Enum.map(extra ++ companions, fn {_primary?, d} -> d end)}
 
-      {[], [{_primary?, app} | companions]} ->
-        {app, Enum.map(companions, fn {_primary?, d} -> d end)}
-
       {[], []} ->
         {nil, []}
+
+      {[], rows} ->
+        fallback_compose_app(rows)
+    end
+  end
+
+  # The primary service could not be imported. Prefers a row nothing else lives inside:
+  # the app is deployed last, so a namespace donor picked here would come up after the
+  # containers that need it.
+  defp fallback_compose_app(rows) do
+    donor_ids = MapSet.new(rows, fn {_primary?, d} -> d.network_parent_id end)
+
+    {app, companions} =
+      case Enum.split_with(rows, fn {_primary?, d} -> not MapSet.member?(donor_ids, d.id) end) do
+        {[{_primary?, app} | rest], donors} -> {app, donors ++ rest}
+        {[], [{_primary?, app} | rest]} -> {app, rest}
+      end
+
+    {app, Enum.map(companions, fn {_primary?, d} -> d end)}
+  end
+
+  # The compose service whose network namespace this one runs in, or nil. `container:x`
+  # is resolved against the bundle's service names too, and refused when it misses.
+  defp netns_target(svc) do
+    case svc[:network_mode] do
+      {_kind, target} -> to_string(target)
+      _mode -> nil
+    end
+  end
+
+  defp netns_donor_names(services) do
+    services
+    |> Enum.map(&netns_target/1)
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new()
+  end
+
+  # Donors ahead of their children, stable otherwise. One partition is enough: depth is
+  # one, so a donor is never itself a child.
+  defp order_netns_donors_first(services) do
+    donor_names = netns_donor_names(services)
+
+    Enum.sort_by(services, fn svc ->
+      if MapSet.member?(donor_names, to_string(svc[:name])), do: 0, else: 1
+    end)
+  end
+
+  # The service the release is about. Never a namespace donor: the app is deployed last,
+  # and a donor deployed after the containers living in its namespace leaves them with
+  # nothing to join.
+  defp compose_primary_name(services) do
+    donor_names = netns_donor_names(services)
+
+    services
+    |> Enum.reject(&MapSet.member?(donor_names, to_string(&1[:name])))
+    |> ComposeParser.primary_name()
+    |> Kernel.||(ComposeParser.primary_name(services))
+  end
+
+  # The deployment id this service's `network_mode` points at, or a refusal. A child
+  # that cannot be placed in its donor's namespace is skipped rather than created on
+  # the space's network, where it would look healthy while running outside the tunnel.
+  defp netns_parent_id(svc, services_by_name, created) do
+    case netns_target(svc) do
+      nil -> {:ok, nil}
+      target -> resolve_netns_target(to_string(svc[:name]), target, services_by_name, created)
+    end
+  end
+
+  defp resolve_netns_target(name, target, services_by_name, created) do
+    donor = Map.get(services_by_name, target)
+
+    cond do
+      target == name ->
+        {:error,
+         "its network mode points at itself, so there is no other container's network " <>
+           "for it to join"}
+
+      is_nil(donor) ->
+        {:error,
+         "it runs inside #{target}'s network, and no service called #{target} is in " <>
+           "this file. Importing it on the space's network instead would take it outside " <>
+           "whatever that container provides — for a service behind a VPN, outside the tunnel"}
+
+      netns_target(donor) != nil ->
+        {:error,
+         "it runs inside #{target}'s network and #{target} runs inside another " <>
+           "container's. Only one level of this is supported: a re-created container in " <>
+           "the middle of a chain orphans everything downstream with nothing to say so"}
+
+      true ->
+        case Map.fetch(created, target) do
+          {:ok, donor_id} ->
+            {:ok, donor_id}
+
+          :error ->
+            {:error,
+             "#{target}, whose network it runs inside, could not be imported — so there " <>
+               "is no namespace for it to join"}
+        end
+    end
+  end
+
+  # A child has no ports of its own to bind, so `Netns` refuses both host modes. The
+  # proxy modes stand: its Traefik labels are emitted onto the donor.
+  defp compose_exposure_mode(exposure_mode, svc) do
+    mode = String.to_existing_atom(exposure_mode)
+
+    cond do
+      is_nil(netns_target(svc)) -> mode
+      mode in [:host, :host_network] -> :service
+      true -> mode
     end
   end
 

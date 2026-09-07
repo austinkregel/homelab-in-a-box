@@ -618,4 +618,56 @@ defmodule Homelab.Catalog.Enrichers.ComposeParserTest do
       assert vol["source"] == nil
     end
   end
+
+  # A service in another container's namespace was invisible to the parser, so a VPN'd
+  # bundle imported "successfully" with every child on the tenant network instead of
+  # inside the tunnel.
+  describe "network_mode" do
+    test "service: names another service in the same file" do
+      {:ok, services} =
+        ComposeParser.parse_all("""
+        services:
+          gluetun:
+            image: qmcgaw/gluetun
+          sonarr:
+            image: linuxserver/sonarr
+            network_mode: "service:gluetun"
+        """)
+
+      assert Enum.find(services, &(&1.name == "sonarr")).network_mode == {:service, "gluetun"}
+      assert Enum.find(services, &(&1.name == "gluetun")).network_mode == nil
+    end
+
+    test "container: is kept apart from service:, because it names an existing container" do
+      {:ok, metadata} =
+        ComposeParser.parse("""
+        services:
+          sonarr:
+            image: linuxserver/sonarr
+            network_mode: "container:vpn"
+        """)
+
+      assert metadata.network_mode == {:container, "vpn"}
+    end
+
+    test "the modes that share no container namespace are not read as one" do
+      for mode <- ~w(host bridge none my-network) do
+        {:ok, metadata} =
+          ComposeParser.parse("""
+          services:
+            app:
+              image: app:latest
+              network_mode: "#{mode}"
+          """)
+
+        assert metadata.network_mode == nil
+      end
+    end
+
+    test "a service declaring none of it stores nil" do
+      {:ok, metadata} = ComposeParser.parse(@basic_compose)
+
+      assert metadata.network_mode == nil
+    end
+  end
 end

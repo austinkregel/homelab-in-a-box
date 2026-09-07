@@ -1,9 +1,9 @@
 defmodule Homelab.Catalog.Enrichers.ComposeParser do
   @moduledoc """
   Parses docker-compose YAML files to extract structured deployment metadata
-  including ports, volumes, environment variables, service dependencies, and the
-  privileged-runtime settings (capabilities, devices, sysctls) an app needs to work at
-  all.
+  including ports, volumes, environment variables, service dependencies, the network
+  namespace a service shares, and the privileged-runtime settings (capabilities,
+  devices, sysctls) an app needs to work at all.
   """
 
   alias Homelab.Deployments.RuntimeSpec
@@ -95,6 +95,8 @@ defmodule Homelab.Catalog.Enrichers.ComposeParser do
       volumes: parse_volumes(service["volumes"], opts),
       env: parse_environment(service["environment"]),
       depends_on: parse_depends_on(service["depends_on"]),
+      # Whose network namespace this service runs in — `network_mode: service:gluetun`.
+      network_mode: parse_network_mode(service["network_mode"]),
       # Kernel privileges. Dropping these was not a neutral omission: a compose file
       # whose service needs NET_ADMIN and /dev/net/tun imported cleanly and produced a
       # template that could never work, with nothing on screen to say why.
@@ -111,6 +113,24 @@ defmodule Homelab.Catalog.Enrichers.ComposeParser do
       entrypoint: parse_command(service["entrypoint"])
     }
   end
+
+  @doc """
+  The namespace donor a `network_mode` names, as `{:service, name}` or
+  `{:container, name}`, and nil for everything else.
+
+  `service:` names another service in the same file; `container:` names an existing
+  container on the host. The remaining modes (`host`, `bridge`, `none`, a named
+  network) share no namespace with a container.
+  """
+  def parse_network_mode(mode) when is_binary(mode) do
+    case String.split(String.trim(mode), ":", parts: 2) do
+      ["service", name] when name != "" -> {:service, String.trim(name)}
+      ["container", name] when name != "" -> {:container, String.trim(name)}
+      _ -> nil
+    end
+  end
+
+  def parse_network_mode(_mode), do: nil
 
   # Compose accepts `"/dev/net/tun"`, `"/dev/sda:/dev/xvda"` and
   # `"/dev/ttyUSB0:/dev/ttyUSB0:rw"`, plus a long form. RuntimeSpec.normalize_device/1
@@ -431,6 +451,7 @@ defmodule Homelab.Catalog.Enrichers.ComposeParser do
       volumes: [],
       env: [],
       depends_on: [],
+      network_mode: nil,
       capabilities_add: [],
       capabilities_drop: [],
       devices: [],
