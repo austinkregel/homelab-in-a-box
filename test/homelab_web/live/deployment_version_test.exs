@@ -112,14 +112,14 @@ defmodule HomelabWeb.DeploymentVersionTest do
       deployment: deployment
     } do
       view = settings_view(conn, deployment)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
       html =
-        view
-        |> form("#version-form", %{"version" => %{"image" => "gitlab/gitlab-ce:17.0.0"}})
-        |> render_submit()
+        render_submit(view, "save_settings", %{
+          "settings" => %{"image" => "gitlab/gitlab-ce:17.0.0"}
+        })
 
-      assert html =~ "Now running gitlab/gitlab-ce:17.0.0"
+      assert html =~ "Settings saved"
       assert Repo.reload!(deployment).image_override == "gitlab/gitlab-ce:17.0.0"
     end
 
@@ -133,11 +133,11 @@ defmodule HomelabWeb.DeploymentVersionTest do
       sibling = insert(:deployment, app_template: template, tenant: other_tenant)
 
       view = settings_view(conn, deployment)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
-      view
-      |> form("#version-form", %{"version" => %{"image" => "gitlab/gitlab-ce:17.0.0"}})
-      |> render_submit()
+      render_submit(view, "save_settings", %{
+        "settings" => %{"image" => "gitlab/gitlab-ce:17.0.0"}
+      })
 
       assert Repo.reload!(template).image == "gitlab/gitlab-ce:16.11.0"
       assert Repo.reload!(sibling).image_override == nil
@@ -151,16 +151,16 @@ defmodule HomelabWeb.DeploymentVersionTest do
         Deployments.update_deployment(deployment, %{image_override: "gitlab/gitlab-ce:17.0.0"})
 
       view = settings_view(conn, pinned)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
-      view
-      |> form("#version-form", %{"version" => %{"image" => "gitlab/gitlab-ce:16.11.0"}})
-      |> render_submit()
+      render_submit(view, "save_settings", %{
+        "settings" => %{"image" => "gitlab/gitlab-ce:16.11.0"}
+      })
 
       assert Repo.reload!(deployment).image_override == nil
     end
 
-    test "reset returns the deployment to the catalog default", %{
+    test "clearing the field returns the deployment to the catalog default", %{
       conn: conn,
       deployment: deployment
     } do
@@ -168,10 +168,10 @@ defmodule HomelabWeb.DeploymentVersionTest do
         Deployments.update_deployment(deployment, %{image_override: "gitlab/gitlab-ce:17.0.0"})
 
       view = settings_view(conn, pinned)
-      render_click(view, "start_version_edit", %{})
-      html = render_click(view, "reset_version", %{})
+      render_click(view, "start_settings_edit", %{})
 
-      assert html =~ "Reset to the catalog default"
+      render_submit(view, "save_settings", %{"settings" => %{"image" => ""}})
+
       assert Repo.reload!(deployment).image_override == nil
     end
 
@@ -180,12 +180,10 @@ defmodule HomelabWeb.DeploymentVersionTest do
       deployment: deployment
     } do
       view = settings_view(conn, deployment)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
       html =
-        view
-        |> form("#version-form", %{"version" => %{"image" => "not a valid ref"}})
-        |> render_submit()
+        render_submit(view, "save_settings", %{"settings" => %{"image" => "not a valid ref"}})
 
       assert html =~ "is not a valid image reference"
       assert Repo.reload!(deployment).image_override == nil
@@ -193,7 +191,12 @@ defmodule HomelabWeb.DeploymentVersionTest do
 
     test "the operator is warned before committing", %{conn: conn, deployment: deployment} do
       view = settings_view(conn, deployment)
-      html = render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
+
+      html =
+        render_change(view, "settings_changed", %{
+          "settings" => %{"image" => "gitlab/gitlab-ce:17.0.0"}
+        })
 
       assert html =~ "recreates the container"
       # The GitLab case: the expensive mistake is not recoverable from this screen.
@@ -207,12 +210,12 @@ defmodule HomelabWeb.DeploymentVersionTest do
       deployment: deployment
     } do
       view = settings_view(conn, deployment)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
       # The fetch is async; wait for it to land.
       assert render_async(view) =~ "17.0.0"
 
-      html = render_click(view, "select_tag", %{"tag" => "17.0.0"})
+      html = render_click(view, "settings_select_tag", %{"tag" => "17.0.0"})
       assert html =~ "gitlab/gitlab-ce:17.0.0"
 
       # Picking a tag fills the field; it does not save on its own.
@@ -226,12 +229,12 @@ defmodule HomelabWeb.DeploymentVersionTest do
       Application.put_env(:homelab, :registries, [ErroringStub])
 
       view = settings_view(conn, deployment)
-      render_click(view, "start_version_edit", %{})
+      render_click(view, "start_settings_edit", %{})
 
       html = render_async(view)
       assert html =~ "registry did not answer"
       # The control that always works is still there.
-      assert html =~ "version[image]"
+      assert html =~ "settings[image]"
     end
   end
 

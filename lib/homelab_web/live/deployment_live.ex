@@ -5,15 +5,14 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.Readiness
+  alias Homelab.Deployments.SettingsForm
   alias Homelab.Deployments.SpecBuilder
-  alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
-  alias Homelab.Catalog.ImageRef
   alias Homelab.Catalog.Tags
   alias Homelab.Backups
-  alias Homelab.Networking.Hostname
   alias Homelab.Services.BackupScheduler
   alias Homelab.Storage
+  alias HomelabWeb.DeploymentSettings
   alias HomelabWeb.SecretReveal
 
   @log_poll_interval 3_000
@@ -35,49 +34,15 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:env_rows, [])
       |> assign(:revealed_env, MapSet.new())
       |> assign(:settings_edit_mode, false)
-      |> assign(:settings_domain, "")
-      |> assign(:settings_access, "proxy")
-      |> assign(:settings_auth, "public")
-      |> assign(:settings_ports, [])
-      |> assign(:settings_routes, [])
-      |> assign(:settings_additional_domains, [])
+      # The pristine read and the edited one. Everything the tab renders -- the dirty
+      # count, the review sheet, the derived summary -- is a comparison of the pair.
+      |> assign(:settings_form, %SettingsForm{})
+      |> assign(:settings_base, %SettingsForm{})
+      |> assign(:settings_review, nil)
       |> assign(:volumes_edit_mode, false)
       |> assign(:volumes_rows, [])
       |> assign(:known_volumes, [])
-      |> assign(:settings_memory_mb, "")
-      |> assign(:settings_cpu_shares, "")
-      |> assign(:settings_gpu_vendor, "")
-      |> assign(:settings_gpu_count, "")
-      |> assign(:settings_gpu_devices, "")
-      |> assign(:settings_gpu_kind, "")
       |> assign(:gpu_advertised_kinds, [])
-      |> assign(:settings_health_path, "")
-      |> assign(:settings_sticky, false)
-      |> assign(:settings_backend_scheme, "http")
-      |> assign(:settings_routed_port, nil)
-      |> assign(:runtime_edit_mode, false)
-      |> assign(:runtime_restart_policy, "on-failure")
-      |> assign(:runtime_replicas, "1")
-      # "inherit" | "custom" per list field. An empty custom list is a real value ([],
-      # "run nothing"), which a blank textarea alone could not distinguish from inherit.
-      |> assign(:runtime_command_mode, "inherit")
-      |> assign(:runtime_command, "")
-      |> assign(:runtime_entrypoint_mode, "inherit")
-      |> assign(:runtime_entrypoint, "")
-      |> assign(:runtime_aliases_mode, "inherit")
-      |> assign(:runtime_aliases, "")
-      |> assign(:runtime_caps_add_mode, "inherit")
-      |> assign(:runtime_caps_add, "")
-      |> assign(:runtime_caps_drop_mode, "inherit")
-      |> assign(:runtime_caps_drop, "")
-      # Devices and sysctls are row editors rather than textareas, but carry the same
-      # inherit-vs-custom mode: a template that passes a device and a deployment that
-      # wants none is a real distinction an empty row list alone cannot express.
-      |> assign(:runtime_devices_mode, "inherit")
-      |> assign(:runtime_devices, [])
-      |> assign(:runtime_sysctls_mode, "inherit")
-      |> assign(:runtime_sysctls, [])
-      |> assign(:settings_network_parent_id, nil)
       |> assign(:netns_candidates, [])
       |> assign(:netns_donor, nil)
       |> assign(:netns_children, [])
@@ -393,218 +358,47 @@ defmodule HomelabWeb.DeploymentLive do
   # other field here is a config tweak; changing the image is the one action that can
   # replace the software the operator's data is sitting under.
 
-  def handle_event("start_version_edit", _params, socket) do
-    deployment = socket.assigns.deployment
-
-    {:noreply,
-     socket
-     |> assign(:version_edit_mode, true)
-     |> assign(:version_image, Access.effective_image(deployment))
-     |> load_available_tags()}
-  end
-
-  def handle_event("cancel_version_edit", _params, socket) do
-    {:noreply, assign(socket, version_edit_mode: false, available_tags: :idle)}
-  end
-
-  def handle_event("version_changed", %{"version" => %{"image" => image}}, socket) do
-    {:noreply, assign(socket, :version_image, image)}
-  end
-
-  # Picking from the tag list fills the text field rather than saving: the operator
-  # still confirms, and can still hand-edit what the picker produced.
-  def handle_event("select_tag", %{"tag" => tag}, socket) do
-    case ImageRef.with_tag(socket.assigns.version_image, tag) do
-      {:ok, image} -> {:noreply, assign(socket, :version_image, image)}
-      {:error, :invalid} -> {:noreply, socket}
-    end
-  end
-
-  def handle_event("save_version", %{"version" => %{"image" => image}}, socket) do
-    deployment = socket.assigns.deployment
-    image = String.trim(image)
-
-    # Typing the catalog's own image back in means "follow the catalog", not "pin to
-    # what the catalog happens to say today".
-    override = if image == "" or image == deployment.app_template.image, do: nil, else: image
-
-    apply_version(socket, override)
-  end
-
-  def handle_event("reset_version", _params, socket) do
-    apply_version(socket, nil)
-  end
-
-  # --- Runtime (restart policy / replicas / command / entrypoint / aliases) ---
-
-  def handle_event("start_runtime_edit", _params, socket) do
-    d = socket.assigns.deployment
-
-    {:noreply,
-     socket
-     |> assign(:runtime_edit_mode, true)
-     |> assign(:runtime_restart_policy, Access.effective_restart_policy(d))
-     |> assign(:runtime_replicas, to_string(Access.effective_replicas(d)))
-     |> assign_list_field(:command, d.command_override)
-     |> assign_list_field(:entrypoint, d.entrypoint_override)
-     |> assign_list_field(:aliases, d.network_aliases_override)
-     |> assign_list_field(:caps_add, d.capabilities_add_override)
-     |> assign_list_field(:caps_drop, d.capabilities_drop_override)
-     |> assign_device_rows(d.devices_override)
-     |> assign_sysctl_rows(d.sysctls_override)}
-  end
-
-  def handle_event("cancel_runtime_edit", _params, socket) do
-    {:noreply, assign(socket, :runtime_edit_mode, false)}
-  end
-
-  def handle_event("runtime_changed", %{"runtime" => runtime}, socket) do
-    {:noreply,
-     socket
-     |> assign(:runtime_restart_policy, runtime["restart_policy"])
-     |> assign(:runtime_replicas, runtime["replicas"])
-     |> assign(:runtime_command_mode, runtime["command_mode"])
-     |> assign(:runtime_command, runtime["command"])
-     |> assign(:runtime_entrypoint_mode, runtime["entrypoint_mode"])
-     |> assign(:runtime_entrypoint, runtime["entrypoint"])
-     |> assign(:runtime_aliases_mode, runtime["aliases_mode"])
-     |> assign(:runtime_aliases, runtime["aliases"])
-     |> assign(:runtime_caps_add_mode, runtime["caps_add_mode"])
-     |> assign(:runtime_caps_add, runtime["caps_add"])
-     |> assign(:runtime_caps_drop_mode, runtime["caps_drop_mode"])
-     |> assign(:runtime_caps_drop, runtime["caps_drop"])
-     |> assign(:runtime_devices_mode, runtime["devices_mode"])
-     # parse_*_rows KEEPS blank rows, unlike the parse_* the changeset uses: a
-     # just-added row has to survive this change event instead of vanishing under the
-     # operator's cursor.
-     |> assign(:runtime_devices, RuntimeSpec.parse_device_rows(runtime["devices"]))
-     |> assign(:runtime_sysctls_mode, runtime["sysctls_mode"])
-     |> assign(:runtime_sysctls, sysctl_rows_from_params(runtime["sysctls"]))}
-  end
-
-  def handle_event("add_runtime_device", _params, socket) do
-    {:noreply,
-     assign(
-       socket,
-       :runtime_devices,
-       socket.assigns.runtime_devices ++
-         [%{"host_path" => "", "container_path" => "", "permissions" => "rwm"}]
-     )}
-  end
-
-  def handle_event("remove_runtime_device", %{"index" => index}, socket) do
-    {:noreply,
-     assign(
-       socket,
-       :runtime_devices,
-       List.delete_at(socket.assigns.runtime_devices, to_int(index))
-     )}
-  end
-
-  def handle_event("add_runtime_sysctl", _params, socket) do
-    {:noreply,
-     assign(
-       socket,
-       :runtime_sysctls,
-       socket.assigns.runtime_sysctls ++ [%{"key" => "", "value" => ""}]
-     )}
-  end
-
-  def handle_event("remove_runtime_sysctl", %{"index" => index}, socket) do
-    {:noreply,
-     assign(
-       socket,
-       :runtime_sysctls,
-       List.delete_at(socket.assigns.runtime_sysctls, to_int(index))
-     )}
-  end
-
-  def handle_event("save_runtime", %{"runtime" => runtime}, socket) do
-    deployment = socket.assigns.deployment
-
-    attrs = %{
-      restart_policy_override: blank_to_nil(runtime["restart_policy"]),
-      replicas_override: parse_replicas(runtime["replicas"]),
-      command_override: parse_list_field(runtime["command_mode"], runtime["command"]),
-      entrypoint_override: parse_list_field(runtime["entrypoint_mode"], runtime["entrypoint"]),
-      network_aliases_override: parse_list_field(runtime["aliases_mode"], runtime["aliases"]),
-      capabilities_add_override:
-        parse_capability_field(runtime["caps_add_mode"], runtime["caps_add"]),
-      capabilities_drop_override:
-        parse_capability_field(runtime["caps_drop_mode"], runtime["caps_drop"]),
-      devices_override: parse_devices_field(runtime["devices_mode"], runtime["devices"]),
-      sysctls_override: parse_sysctls_field(runtime["sysctls_mode"], runtime["sysctls"])
-    }
-
-    case apply_config(deployment, attrs) do
-      {:ok, updated, _release} ->
-        {:noreply,
-         socket
-         |> assign_applied(updated)
-         |> assign(:runtime_edit_mode, false)
-         |> put_flash(:info, "Runtime settings saved — #{release_started_flash(false)}")}
-
-      {:error, message} ->
-        {:noreply, put_flash(socket, :error, message)}
-    end
-  end
-
-  # --- Settings (domain / exposure / ports) ---
+  # --- Settings: one editor over the whole configuration ---
 
   def handle_event("start_settings_edit", _params, socket) do
     deployment = socket.assigns.deployment
-    exposure = Access.effective_exposure(deployment)
-    limits = Access.effective_resource_limits(deployment)
-    health = Access.effective_health_check(deployment)
+    form = SettingsForm.from_deployment(deployment)
 
+    # The registry list and the cluster's GPU kinds are read when the editor OPENS, not
+    # on mount: both are only ever needed by this form, and every other tab on the page
+    # would otherwise pay for them.
     {:noreply,
      socket
      |> assign(:settings_edit_mode, true)
-     |> assign(:settings_domain, deployment.domain || "")
-     |> assign(:settings_access, Access.access_of(exposure))
-     |> assign(:settings_auth, Access.auth_of(exposure))
-     |> assign(:settings_ports, editable_ports(Access.effective_ports(deployment)))
-     |> assign(:settings_routes, editable_routes(deployment.extra_routes))
-     |> assign(
-       :settings_additional_domains,
-       editable_domains(deployment.additional_domains)
-     )
-     |> assign(:settings_memory_mb, to_string(limits["memory_mb"] || ""))
-     |> assign(:settings_cpu_shares, to_string(limits["cpu_shares"] || ""))
-     |> assign_gpu_settings(limits)
-     |> assign(:settings_health_path, health["path"] || "")
-     |> assign(:settings_sticky, (deployment.proxy_options || %{})["sticky"] == true)
-     |> assign(:settings_backend_scheme, SpecBuilder.backend_scheme(deployment))
-     |> assign(
-       :settings_network_parent_id,
-       deployment.network_parent_id && to_string(deployment.network_parent_id)
-     )
-     # Seeded once here and round-tripped in `settings_changed` from then on, like every
-     # other field — see `checked_routed_port/2` for what recomputing it per render did.
-     |> assign(
-       :settings_routed_port,
-       checked_routed_port(deployment, editable_ports(Access.effective_ports(deployment)))
-     )
-     |> assign(:netns_candidates, netns_candidates(deployment))}
+     |> assign(:settings_form, form)
+     |> assign(:settings_base, form)
+     |> assign(:settings_review, nil)
+     |> assign(:netns_candidates, netns_candidates(deployment))
+     |> assign(:gpu_advertised_kinds, advertised_gpu_kinds())
+     |> load_available_tags()}
   end
 
   def handle_event("cancel_settings_edit", _params, socket) do
-    {:noreply, assign(socket, :settings_edit_mode, false)}
-  end
-
-  # Keep the assigns in sync as the user types so add/remove-port don't drop edits.
-  def handle_event("settings_changed", %{"settings" => settings}, socket) do
     {:noreply,
      socket
-     |> assign(:settings_ports, ports_from_params(settings["ports"]))
-     |> assign(:settings_routes, routes_from_params(settings["routes"]))
-     |> assign(
-       :settings_additional_domains,
-       domains_from_params(settings["domains"])
-     )
-     |> assign(:settings_sticky, settings["sticky"] == "true")
-     |> carry_settings(settings)}
+     |> assign(:settings_edit_mode, false)
+     |> assign(:settings_review, nil)
+     |> assign(:settings_form, socket.assigns.settings_base)}
   end
+
+  # Every field round-trips through the struct as the operator types. A control whose
+  # value is recomputed from the deployment per render reverts under the cursor as soon
+  # as anything else is touched, and the save then writes the value they replaced.
+  def handle_event("settings_changed", %{"settings" => settings}, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :settings_form,
+       SettingsForm.from_params(socket.assigns.settings_form, settings)
+     )}
+  end
+
+  def handle_event("settings_changed", _params, socket), do: {:noreply, socket}
 
   def handle_event("recheck_tls", _params, socket) do
     {:noreply, probe_tls(socket)}
@@ -617,15 +411,23 @@ defmodule HomelabWeb.DeploymentLive do
       "role" => "other",
       "protocol" => "tcp",
       "description" => "",
-      "optional" => false
+      "optional" => false,
+      "host_ip" => nil,
+      "exposure" => nil
     }
 
-    {:noreply, assign(socket, :settings_ports, socket.assigns.settings_ports ++ [blank])}
+    {:noreply,
+     update_settings(socket, fn form ->
+       exposure = List.first(SettingsForm.allowed_exposures(form))
+       %{form | ports: form.ports ++ [Map.put(blank, "exposure", exposure)]}
+     end)}
   end
 
-  def handle_event("settings_remove_port", %{"index" => idx}, socket) do
-    ports = List.delete_at(socket.assigns.settings_ports, String.to_integer(idx))
-    {:noreply, assign(socket, :settings_ports, ports)}
+  def handle_event("settings_remove_port", %{"index" => index}, socket) do
+    {:noreply,
+     update_settings(socket, fn form ->
+       %{form | ports: List.delete_at(form.ports, String.to_integer(index))}
+     end)}
   end
 
   def handle_event("start_volumes_edit", _params, socket) do
@@ -697,83 +499,105 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   def handle_event("settings_add_route", _params, socket) do
-    blank = %{"path_prefix" => "", "port" => ""}
-    {:noreply, assign(socket, :settings_routes, socket.assigns.settings_routes ++ [blank])}
-  end
+    form = socket.assigns.settings_form
 
-  def handle_event("settings_remove_route", %{"index" => idx}, socket) do
-    routes = List.delete_at(socket.assigns.settings_routes, String.to_integer(idx))
-    {:noreply, assign(socket, :settings_routes, routes)}
-  end
-
-  def handle_event("settings_add_domain", _params, socket) do
-    blank = %{"host" => "", "path_prefix" => "", "port" => ""}
-
-    {:noreply,
-     assign(
-       socket,
-       :settings_additional_domains,
-       socket.assigns.settings_additional_domains ++ [blank]
-     )}
-  end
-
-  def handle_event("settings_remove_domain", %{"index" => idx}, socket) do
-    domains = List.delete_at(socket.assigns.settings_additional_domains, String.to_integer(idx))
-    {:noreply, assign(socket, :settings_additional_domains, domains)}
-  end
-
-  def handle_event("save_settings", %{"settings" => settings}, socket) do
-    deployment = socket.assigns.deployment
-    access = settings["access"] || socket.assigns.settings_access
-    auth = settings["auth"] || socket.assigns.settings_auth
-
-    exposure = Access.exposure_for(access, auth)
-
-    # Domain only matters for proxy access; in Host mode every listed port binds.
-    #
-    # The primary field takes a LIST, exactly as the wizard's does: first host wins the
-    # `domain` slot, the rest join the Additional domains rows below. This page has an
-    # explicit alias editor, so the split is a convenience here rather than the only way
-    # to express a second host -- but the two inputs must agree on what a comma means,
-    # or pasting the same value into each gives different results.
-    {domain, extra_hosts} =
-      if access == "proxy",
-        do: Hostname.split_primary(settings["domain"]),
-        else: {nil, []}
-
-    # Proxy mode used to hard-code `[]` here, which is NOT "inherit the template" —
-    # `Access.effective_ports/1` only inherits on nil, so an empty override won, and
-    # `primary_port([])` falls back to "80". Merely opening Settings and saving
-    # silently repointed the reverse proxy at port 80. Parse the form in every mode,
-    # and treat "no ports" as inherit.
-    ports =
-      settings["ports"]
-      |> Homelab.Deployments.ConfigForm.parse_ports()
-      |> Enum.map(&apply_publish_flag(&1, access))
-
-    attrs = %{
-      domain: domain,
-      exposure_mode_override: exposure,
-      ports_override: if(ports == [], do: nil, else: ports),
-      routed_port:
-        parse_routed_port(settings["routed_port"] || socket.assigns.settings_routed_port),
-      # Only a proxied app has paths to route; in host mode Traefik is not in the way.
-      extra_routes: if(access == "proxy", do: parse_routes(settings["routes"]), else: []),
-      # Additional hostnames are proxy-only for the same reason as extra routes.
-      additional_domains:
-        if(access == "proxy",
-          do: merge_alias_hosts(parse_additional_domains(settings["domains"]), extra_hosts),
-          else: []
-        ),
-      proxy_options: proxy_options(settings, access),
-      resource_limits_override: limits_override(settings),
-      health_check_override: health_override(deployment, settings),
-      network_parent_id: parse_network_parent(settings, socket)
+    # A new row inherits the primary's host and the first proxied port, because the
+    # overwhelmingly common second route is another path on the same hostname. Typing
+    # the host again for every row is how the old three-editor split felt.
+    blank = %{
+      "host" => first_route_host(form),
+      "path_prefix" => "",
+      "port" => default_route_port(form),
+      "primary" => form.routes == []
     }
 
+    {:noreply, update_settings(socket, fn form -> %{form | routes: form.routes ++ [blank]} end)}
+  end
+
+  def handle_event("settings_remove_route", %{"index" => index}, socket) do
+    {:noreply,
+     update_settings(socket, fn form ->
+       %{form | routes: List.delete_at(form.routes, String.to_integer(index))}
+     end)}
+  end
+
+  def handle_event("settings_add_device", _params, socket) do
+    blank = %{"host_path" => "", "container_path" => "", "permissions" => "rwm"}
+    {:noreply, update_settings(socket, fn form -> %{form | devices: form.devices ++ [blank]} end)}
+  end
+
+  def handle_event("settings_remove_device", %{"index" => index}, socket) do
+    {:noreply,
+     update_settings(socket, fn form ->
+       %{form | devices: List.delete_at(form.devices, String.to_integer(index))}
+     end)}
+  end
+
+  def handle_event("settings_add_sysctl", _params, socket) do
+    blank = %{"key" => "", "value" => ""}
+    {:noreply, update_settings(socket, fn form -> %{form | sysctls: form.sysctls ++ [blank]} end)}
+  end
+
+  def handle_event("settings_remove_sysctl", %{"index" => index}, socket) do
+    {:noreply,
+     update_settings(socket, fn form ->
+       %{form | sysctls: List.delete_at(form.sysctls, String.to_integer(index))}
+     end)}
+  end
+
+  def handle_event("settings_add_health_arg", _params, socket) do
+    {:noreply, update_health(socket, &(&1 ++ [""]))}
+  end
+
+  def handle_event("settings_remove_health_arg", %{"index" => index}, socket) do
+    {:noreply, update_health(socket, &List.delete_at(&1, String.to_integer(index)))}
+  end
+
+  def handle_event("settings_select_tag", %{"tag" => tag}, socket) do
+    image = String.replace(socket.assigns.settings_form.image, ~r/:[^:\/]*$/, "") <> ":" <> tag
+    {:noreply, update_settings(socket, fn form -> %{form | image: image} end)}
+  end
+
+  def handle_event("settings_discard", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:settings_form, socket.assigns.settings_base)
+     |> assign(:settings_review, nil)}
+  end
+
+  # The sheet is opened from the same diff the save bar counts, so the operator reviews
+  # the change they were told they had rather than one recomputed on the way in.
+  def handle_event("settings_review", _params, socket) do
+    diff = SettingsForm.diff(socket.assigns.settings_base, socket.assigns.settings_form)
+    {:noreply, assign(socket, :settings_review, diff)}
+  end
+
+  def handle_event("settings_close_review", _params, socket) do
+    {:noreply, assign(socket, :settings_review, nil)}
+  end
+
+  # One save for the whole page. Version, runtime and network used to write three
+  # disjoint attr maps through three submits, so an edit that touched two of them
+  # recreated the container twice -- and the second recreate raced the first release.
+  def handle_event("save_settings", params, socket) do
+    deployment = socket.assigns.deployment
+
+    # A submit carries the form; the review sheet's button does not, so it saves what
+    # the assigns already hold rather than an empty payload.
+    form =
+      case params do
+        %{"settings" => settings} ->
+          SettingsForm.from_params(socket.assigns.settings_form, settings)
+
+        _no_payload ->
+          socket.assigns.settings_form
+      end
+
+    attrs = SettingsForm.to_attrs(form, deployment)
+
     # A netns member's route is served by its DONOR's labels, so changing it means
-    # re-creating the donor — which mints a new container id and leaves every OTHER
-    # child naming a container that no longer exists. The whole group has to go round
+    # re-creating the donor -- which mints a new container id and leaves every OTHER
+    # child naming a container that no longer exists. The whole group goes round
     # together; see Deployments.redeploy_netns_stack/1.
     stack? = netns_member?(deployment, attrs.network_parent_id)
 
@@ -783,10 +607,15 @@ defmodule HomelabWeb.DeploymentLive do
          socket
          |> assign_applied(updated)
          |> assign(:settings_edit_mode, false)
+         |> assign(:settings_review, nil)
          |> put_flash(:info, settings_saved_flash(updated, stack?))}
 
       {:error, message} ->
-        {:noreply, put_flash(socket, :error, message)}
+        {:noreply,
+         socket
+         |> assign(:settings_form, form)
+         |> assign(:settings_review, nil)
+         |> put_flash(:error, message)}
     end
   end
 
@@ -1368,1305 +1197,40 @@ defmodule HomelabWeb.DeploymentLive do
           </script>
         </div>
 
-        <%!-- Settings tab (domain / exposure / ports) --%>
-        <div
-          :if={@active_tab == "settings"}
-          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden mb-4"
-        >
-          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
-            <h3 class="text-sm font-semibold text-base-content">Version</h3>
-            <button
-              :if={!@version_edit_mode}
-              type="button"
-              phx-click="start_version_edit"
-              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
-            >
-              Change
-            </button>
-          </div>
-          <div class="p-4">
-            <%= if @version_edit_mode do %>
-              <.form
-                for={%{}}
-                id="version-form"
-                phx-change="version_changed"
-                phx-submit="save_version"
-                class="space-y-4"
-              >
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-xs font-medium text-base-content/50">Image reference</label>
-                  <input
-                    type="text"
-                    name="version[image]"
-                    value={@version_image}
-                    autocomplete="off"
-                    placeholder="gitlab/gitlab-ce:17.0.0"
-                    class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
-                  />
-                  <p class="text-xs text-base-content/40">
-                    The catalog default is <span class="font-mono">{@deployment.app_template.image}</span>.
-                  </p>
-                </div>
-
-                <div :if={@available_tags != :idle} class="flex flex-col gap-1.5">
-                  <label class="text-xs font-medium text-base-content/50">
-                    Available versions
-                  </label>
-                  <p :if={@available_tags == :loading} class="text-xs text-base-content/40">
-                    Asking the registry…
-                  </p>
-                  <p
-                    :if={match?({:error, _}, @available_tags)}
-                    class="text-xs text-base-content/40"
-                  >
-                    The registry did not answer — type a tag above instead.
-                  </p>
-                  <div :if={match?({:ok, _}, @available_tags)} class="flex flex-wrap gap-1.5">
-                    <button
-                      :for={tag <- elem(@available_tags, 1)}
-                      type="button"
-                      phx-click="select_tag"
-                      phx-value-tag={tag.tag}
-                      class="px-2 py-1 rounded-md bg-base-200 text-xs font-mono text-base-content/70 hover:bg-primary/10 hover:text-primary transition-colors cursor-pointer"
-                      title={tag.last_updated && "Updated #{tag.last_updated}"}
-                    >
-                      {tag.tag}
-                    </button>
-                  </div>
-                </div>
-
-                <%!-- A version change is not a port tweak. Say what it costs BEFORE the
-                      operator commits, because the expensive half of this mistake
-                      (skipping an app's required intermediate versions) is not
-                      recoverable from this screen. --%>
-                <div class="rounded-lg bg-warning/5 border border-warning/20 p-3 space-y-1">
-                  <p class="text-xs font-medium text-warning">
-                    This recreates the container.
-                  </p>
-                  <p class="text-xs text-base-content/60">
-                    The app is briefly unavailable, and its data is left in place. Check the
-                    app's own upgrade notes first — some (GitLab, Nextcloud, Mastodon) must be
-                    upgraded one version at a time, and skipping releases can leave the install
-                    unrecoverable.
-                  </p>
-                </div>
-
-                <div class="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-                  >
-                    Save &amp; recreate
-                  </button>
-                  <button
-                    type="button"
-                    phx-click="cancel_version_edit"
-                    class="px-3 py-1.5 rounded-lg bg-base-200 text-base-content/70 text-sm font-medium hover:bg-base-300 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    :if={Access.image_overridden?(@deployment)}
-                    type="button"
-                    phx-click="reset_version"
-                    data-confirm="Reset to the catalog default and recreate the container?"
-                    class="ml-auto text-xs text-base-content/50 hover:text-base-content transition-colors cursor-pointer"
-                  >
-                    Reset to catalog default
-                  </button>
-                </div>
-              </.form>
-            <% else %>
-              <dl class="space-y-3 text-sm">
-                <div>
-                  <dt class="text-base-content/50 text-xs">Running</dt>
-                  <dd class="font-mono text-base-content flex items-center gap-2">
-                    {Access.effective_image(@deployment)}
-                    <span
-                      :if={Access.image_overridden?(@deployment)}
-                      class="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-primary/10 text-primary"
-                    >
-                      Pinned
-                    </span>
-                    <span
-                      :if={!Access.image_overridden?(@deployment)}
-                      class="px-1.5 py-0.5 rounded text-[10px] font-sans font-medium bg-base-200 text-base-content/50"
-                    >
-                      Catalog default
-                    </span>
-                  </dd>
-                </div>
-                <div :if={Access.image_overridden?(@deployment)}>
-                  <dt class="text-base-content/50 text-xs">Catalog default</dt>
-                  <dd class="font-mono text-base-content/50 text-xs">
-                    {@deployment.app_template.image}
-                  </dd>
-                </div>
-              </dl>
-            <% end %>
-          </div>
-        </div>
-
-        <div
-          :if={@active_tab == "settings"}
-          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden mb-4"
-        >
-          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
-            <h3 class="text-sm font-semibold text-base-content">Runtime</h3>
-            <button
-              :if={!@runtime_edit_mode}
-              type="button"
-              phx-click="start_runtime_edit"
-              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
-            >
-              Edit
-            </button>
-          </div>
-          <div class="p-4">
-            <%= if @runtime_edit_mode do %>
-              <.form
-                for={%{}}
-                id="runtime-form"
-                phx-change="runtime_changed"
-                phx-submit="save_runtime"
-                class="space-y-5"
-              >
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div class="flex flex-col gap-1.5">
-                    <label class="text-xs font-medium text-base-content/50">Restart policy</label>
-                    <select
-                      name="runtime[restart_policy]"
-                      class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                    >
-                      <option
-                        :for={
-                          {value, label} <- [
-                            {"on-failure", "On failure (up to 3 times)"},
-                            {"always", "Always"},
-                            {"unless-stopped", "Unless stopped"},
-                            {"no", "Never"}
-                          ]
-                        }
-                        value={value}
-                        selected={@runtime_restart_policy == value}
-                      >
-                        {label}
-                      </option>
-                    </select>
-                  </div>
-
-                  <div class="flex flex-col gap-1.5">
-                    <label class="text-xs font-medium text-base-content/50">Replicas</label>
-                    <input
-                      type="number"
-                      min="1"
-                      name="runtime[replicas]"
-                      value={@runtime_replicas}
-                      disabled={!swarm?()}
-                      class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
-                    />
-                    <p class="text-xs text-base-content/40">
-                      <%= if swarm?() do %>
-                        Not available with host ports or host networking — every task would
-                        bind the same port.
-                      <% else %>
-                        Docker Engine runs a single container; scaling needs Swarm.
-                      <% end %>
-                    </p>
-                  </div>
-                </div>
-
-                <.runtime_list_field
-                  name="command"
-                  label="Command"
-                  hint="What the container runs. One argument per line."
-                  mode={@runtime_command_mode}
-                  value={@runtime_command}
-                />
-                <.runtime_list_field
-                  name="entrypoint"
-                  label="Entrypoint"
-                  hint="Overrides the image's own entrypoint. One argument per line; custom-and-empty clears it."
-                  mode={@runtime_entrypoint_mode}
-                  value={@runtime_entrypoint}
-                />
-                <.runtime_list_field
-                  name="aliases"
-                  label="Network aliases"
-                  hint="Extra names siblings can reach this container by, one per line. Ignored on the host network."
-                  mode={@runtime_aliases_mode}
-                  value={@runtime_aliases}
-                />
-
-                <div class="pt-2 border-t border-base-content/5">
-                  <h4 class="text-xs font-semibold text-base-content/70 uppercase tracking-wide mb-1">
-                    Kernel privileges
-                  </h4>
-                  <p class="text-xs text-base-content/40 mb-4">
-                    What this container may ask the host kernel for. Needed by VPN clients,
-                    USB/serial coordinators and anything managing its own network stack.
-                  </p>
-
-                  <div class="space-y-5">
-                    <.runtime_list_field
-                      name="caps_add"
-                      label="Capabilities added"
-                      hint="One per line, e.g. NET_ADMIN. The CAP_ prefix is optional."
-                      mode={@runtime_caps_add_mode}
-                      value={@runtime_caps_add}
-                    />
-                    <p
-                      :if={privileged_caps(@runtime_caps_add_mode, @runtime_caps_add) != []}
-                      class="flex items-start gap-2 text-xs text-warning -mt-3"
-                    >
-                      <.icon name="hero-exclamation-triangle" class="w-4 h-4 shrink-0 mt-px" />
-                      <span>
-                        {Enum.join(privileged_caps(@runtime_caps_add_mode, @runtime_caps_add), ", ")}
-                        {if length(privileged_caps(@runtime_caps_add_mode, @runtime_caps_add)) == 1,
-                          do: "reaches",
-                          else: "reach"} past the container onto the host. Grant only what this
-                        app actually needs.
-                      </span>
-                    </p>
-
-                    <.runtime_list_field
-                      name="caps_drop"
-                      label="Capabilities dropped"
-                      hint="One per line. ALL drops every capability, then only the added ones apply."
-                      mode={@runtime_caps_drop_mode}
-                      value={@runtime_caps_drop}
-                    />
-
-                    <div class="flex flex-col gap-1.5">
-                      <label class="text-xs font-medium text-base-content/50">Devices</label>
-                      <select
-                        name="runtime[devices_mode]"
-                        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                      >
-                        <option value="inherit" selected={@runtime_devices_mode == "inherit"}>
-                          Inherit from catalog
-                        </option>
-                        <option value="custom" selected={@runtime_devices_mode == "custom"}>
-                          Custom
-                        </option>
-                      </select>
-
-                      <div :if={@runtime_devices_mode == "custom"} class="space-y-2 mt-1">
-                        <div
-                          :for={{device, idx} <- Enum.with_index(@runtime_devices)}
-                          class="flex items-center gap-2"
-                        >
-                          <input
-                            type="text"
-                            name={"runtime[devices][#{idx}][host_path]"}
-                            value={device["host_path"]}
-                            placeholder="/dev/net/tun"
-                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                          />
-                          <input
-                            type="text"
-                            name={"runtime[devices][#{idx}][container_path]"}
-                            value={device["container_path"]}
-                            placeholder="same as host"
-                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                          />
-                          <input
-                            type="text"
-                            name={"runtime[devices][#{idx}][permissions]"}
-                            value={device["permissions"]}
-                            placeholder="rwm"
-                            class="w-20 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                          />
-                          <button
-                            type="button"
-                            phx-click="remove_runtime_device"
-                            phx-value-index={idx}
-                            class="p-2 rounded-lg text-base-content/40 hover:text-error hover:bg-error/10 transition-colors"
-                            aria-label="Remove device"
-                          >
-                            <.icon name="hero-x-mark" class="w-4 h-4" />
-                          </button>
-                        </div>
-                        <button
-                          type="button"
-                          phx-click="add_runtime_device"
-                          class="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
-                        >
-                          + Add device
-                        </button>
-                      </div>
-                      <p class="text-xs text-base-content/40">
-                        Host path, path inside the container, and cgroup permissions (r/w/m).
-                        <%= if swarm?() do %>
-                          Swarm cannot pass a device — a deployment with one is refused rather
-                          than started without it.
-                        <% end %>
-                      </p>
-                    </div>
-
-                    <div class="flex flex-col gap-1.5">
-                      <label class="text-xs font-medium text-base-content/50">Sysctls</label>
-                      <select
-                        name="runtime[sysctls_mode]"
-                        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                      >
-                        <option value="inherit" selected={@runtime_sysctls_mode == "inherit"}>
-                          Inherit from catalog
-                        </option>
-                        <option value="custom" selected={@runtime_sysctls_mode == "custom"}>
-                          Custom
-                        </option>
-                      </select>
-
-                      <div :if={@runtime_sysctls_mode == "custom"} class="space-y-2 mt-1">
-                        <div
-                          :for={{sysctl, idx} <- Enum.with_index(@runtime_sysctls)}
-                          class="flex items-center gap-2"
-                        >
-                          <input
-                            type="text"
-                            name={"runtime[sysctls][#{idx}][key]"}
-                            value={sysctl["key"]}
-                            placeholder="net.ipv4.conf.all.src_valid_mark"
-                            class="flex-1 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                          />
-                          <input
-                            type="text"
-                            name={"runtime[sysctls][#{idx}][value]"}
-                            value={sysctl["value"]}
-                            placeholder="1"
-                            class="w-28 rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                          />
-                          <button
-                            type="button"
-                            phx-click="remove_runtime_sysctl"
-                            phx-value-index={idx}
-                            class="p-2 rounded-lg text-base-content/40 hover:text-error hover:bg-error/10 transition-colors"
-                            aria-label="Remove sysctl"
-                          >
-                            <.icon name="hero-x-mark" class="w-4 h-4" />
-                          </button>
-                        </div>
-                        <button
-                          type="button"
-                          phx-click="add_runtime_sysctl"
-                          class="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
-                        >
-                          + Add sysctl
-                        </button>
-                      </div>
-                      <p class="text-xs text-base-content/40">
-                        Only settings a container owns its own copy of — net.*, fs.mqueue.* and
-                        the kernel IPC limits. Docker refuses anything else.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="flex items-center gap-2">
-                  <button
-                    type="submit"
-                    class="px-3 py-1.5 rounded-lg bg-primary text-primary-content text-sm font-medium hover:bg-primary/90 transition-colors"
-                  >
-                    Save &amp; recreate
-                  </button>
-                  <button
-                    type="button"
-                    phx-click="cancel_runtime_edit"
-                    class="px-3 py-1.5 rounded-lg bg-base-200 text-base-content/70 text-sm font-medium hover:bg-base-300 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </.form>
-            <% else %>
-              <dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                <div>
-                  <dt class="text-base-content/50 text-xs">Restart policy</dt>
-                  <dd class="text-base-content">
-                    {Access.effective_restart_policy(@deployment)}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Replicas</dt>
-                  <dd class="text-base-content">{Access.effective_replicas(@deployment)}</dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Command</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_list(Access.effective_command(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Entrypoint</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_list(Access.effective_entrypoint(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Network aliases</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_list(Access.effective_network_aliases(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Capabilities added</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_list(Access.effective_capabilities_add(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Capabilities dropped</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_list(Access.effective_capabilities_drop(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Devices</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_devices(Access.effective_devices(@deployment))}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="text-base-content/50 text-xs">Sysctls</dt>
-                  <dd class="font-mono text-xs text-base-content">
-                    {format_sysctls(Access.effective_sysctls(@deployment))}
-                  </dd>
-                </div>
-                <div :if={@netns_donor}>
-                  <dt class="text-base-content/50 text-xs">Network</dt>
-                  <dd class="text-base-content">
-                    Through
-                    <.link
-                      navigate={~p"/deployments/#{@netns_donor.id}"}
-                      class="text-primary hover:underline"
-                    >
-                      {@netns_donor.app_template.name}
-                    </.link>
-                  </dd>
-                </div>
-              </dl>
-
-              <%!-- The donor's side of the relationship. The derived firewall values are
-                    shown because they are computed rather than typed: a 502 through
-                    Traefik is almost always a port missing from this list, and there is
-                    nothing in any log that says so. --%>
-              <div :if={@netns_children != []} class="mt-5 pt-4 border-t border-base-content/5">
-                <h4 class="text-xs font-semibold text-base-content/70 uppercase tracking-wide mb-2">
-                  Sharing its network
-                </h4>
-                <ul class="space-y-1.5 mb-3">
-                  <li
-                    :for={child <- @netns_children}
-                    class="flex items-center justify-between gap-3 text-sm"
-                  >
-                    <.link
-                      navigate={~p"/deployments/#{child.id}"}
-                      class="text-primary hover:underline"
-                    >
-                      {child.app_template.name}
-                    </.link>
-                    <span class="font-mono text-xs text-base-content/50">
-                      {format_ports(Homelab.Deployments.Netns.declared_ports(child))}
-                    </span>
-                  </li>
-                </ul>
-                <dl :if={@netns_donor_env != %{}} class="space-y-1.5">
-                  <div :for={{key, value} <- Enum.sort(@netns_donor_env)}>
-                    <dt class="text-base-content/50 text-xs">{key}</dt>
-                    <dd class="font-mono text-xs text-base-content break-all">{value}</dd>
-                  </div>
-                </dl>
-              </div>
-            <% end %>
-          </div>
-        </div>
-
-        <div
-          :if={@active_tab == "settings"}
-          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
-        >
-          <div class="flex items-center justify-between px-4 py-3 border-b border-base-content/5">
-            <h3 class="text-sm font-semibold text-base-content">Network &amp; ports</h3>
+        <%!-- Settings tab: one form over the whole configuration.
+              It was three -- version, runtime, network -- each with its own Save button
+              and its own container recreate, so an edit spanning two of them went round
+              twice and nothing could state the combined change. --%>
+        <div :if={@active_tab == "settings"} class="flex flex-col gap-4">
+          <div class="flex items-center justify-between gap-3">
+            <p class="text-xs text-base-content/40">
+              {if @settings_edit_mode,
+                do: "Changes are applied together, once, when you recreate.",
+                else: "The configuration this container is running with."}
+            </p>
             <button
               :if={!@settings_edit_mode}
               type="button"
               phx-click="start_settings_edit"
-              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors"
+              class="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 transition-colors cursor-pointer"
             >
-              Edit
+              Edit configuration
             </button>
           </div>
-          <div class="p-4">
-            <%= if @settings_edit_mode do %>
-              <.form
-                for={%{}}
-                id="settings-form"
-                phx-change="settings_changed"
-                phx-submit="save_settings"
-                class="space-y-5"
-              >
-                <div :if={@netns_candidates != []} class="flex flex-col gap-1.5">
-                  <label class="text-xs font-medium text-base-content/50">Network</label>
-                  <select
-                    name="settings[network_parent_id]"
-                    class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                  >
-                    <option value="" selected={@settings_network_parent_id in [nil, ""]}>
-                      Its own network
-                    </option>
-                    <option
-                      :for={candidate <- @netns_candidates}
-                      value={to_string(candidate.id)}
-                      selected={@settings_network_parent_id == to_string(candidate.id)}
-                    >
-                      Through {candidate.app_template.name}
-                    </option>
-                  </select>
-                  <div
-                    :if={@settings_network_parent_id not in [nil, ""]}
-                    class="rounded-lg bg-warning/10 border border-warning/20 p-2.5 text-[11px] text-base-content/70 leading-relaxed"
-                  >
-                    All of this container's traffic goes through that container, and only
-                    through it. It gets no ports, no network aliases and no address of its own —
-                    siblings sharing the namespace reach each other on <code phx-no-curly-interpolation>localhost</code>, and its
-                    Traefik route is served from the other container. Saving re-creates the whole
-                    group, because the containers behind it are pinned to a specific container ID.
-                  </div>
-                </div>
 
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-xs font-medium text-base-content/50">Access</label>
-                  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                    <label
-                      :for={{value, title, desc} <- Access.access_choices()}
-                      class={[
-                        "flex flex-col gap-0.5 rounded-lg border p-2.5 cursor-pointer transition-colors",
-                        netns_forbidden_access?(@settings_network_parent_id, value) &&
-                          "opacity-40 pointer-events-none",
-                        if(@settings_access == value,
-                          do: "border-primary bg-primary/5",
-                          else: "border-base-content/10 hover:border-base-content/20"
-                        )
-                      ]}
-                    >
-                      <input
-                        type="radio"
-                        name="settings[access]"
-                        value={value}
-                        checked={@settings_access == value}
-                        disabled={netns_forbidden_access?(@settings_network_parent_id, value)}
-                        class="sr-only"
-                      />
-                      <span class="text-xs font-semibold text-base-content">{title}</span>
-                      <span class="text-[10px] text-base-content/40 leading-snug">
-                        <%= if netns_forbidden_access?(@settings_network_parent_id, value) do %>
-                          Not available while routing through another container
-                        <% else %>
-                          {desc}
-                        <% end %>
-                      </span>
-                    </label>
-                  </div>
-                </div>
-
-                <div :if={@settings_access == "proxy"} class="space-y-4 rounded-lg bg-base-200/40 p-3">
-                  <div class="flex flex-col gap-1.5">
-                    <label class="text-xs font-medium text-base-content/50">Authentication</label>
-                    <div class="grid grid-cols-3 gap-2">
-                      <label
-                        :for={{value, title, desc} <- Access.auth_choices()}
-                        class={[
-                          "flex flex-col gap-0.5 rounded-lg border p-2 cursor-pointer transition-colors",
-                          if(@settings_auth == value,
-                            do: "border-primary bg-primary/5",
-                            else: "border-base-content/10 hover:border-base-content/20"
-                          )
-                        ]}
-                      >
-                        <input
-                          type="radio"
-                          name="settings[auth]"
-                          value={value}
-                          checked={@settings_auth == value}
-                          class="sr-only"
-                        />
-                        <span class="text-xs font-semibold text-base-content">{title}</span>
-                        <span class="text-[10px] text-base-content/40 leading-snug">{desc}</span>
-                      </label>
-                    </div>
-                  </div>
-                  <div class="flex flex-col gap-1">
-                    <label class="text-xs font-medium text-base-content/50">Domain</label>
-                    <input
-                      type="text"
-                      name="settings[domain]"
-                      value={@settings_domain}
-                      placeholder={"#{@deployment.app_template.slug}.yourdomain.com"}
-                      class="w-full rounded-lg bg-base-100 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                    />
-                    <p class="text-[10px] text-base-content/40">
-                      Add a domain to go live; until then the app isn't reachable externally.
-                    </p>
-                    <%!-- A warning, not a block: reaching a VPN client's own control UI is
-                          a real thing to want, just not what most people typing here mean. --%>
-                    <div
-                      :if={netns_donor_domain?(@deployment.app_template, @settings_domain)}
-                      class="rounded-lg bg-warning/10 border border-warning/20 p-2.5 text-[11px] text-base-content/70 leading-relaxed"
-                    >
-                      {@deployment.app_template.name} is a network container. A domain here
-                      routes to it rather than to anything running inside its network, and
-                      attaches it to the proxy network as a second interface its firewall was
-                      not told about. The deployments sharing its network carry their own
-                      domains, served from this container's address.
-                    </div>
-                  </div>
-
-                  <div class="flex flex-col gap-2">
-                    <div class="flex items-center justify-between">
-                      <label class="text-xs font-medium text-base-content/50">
-                        App port — where the proxy sends traffic
-                      </label>
-                      <button
-                        type="button"
-                        phx-click="settings_add_port"
-                        class="text-xs text-primary hover:text-primary/80"
-                      >
-                        + Add port
-                      </button>
-                    </div>
-                    <p :if={@settings_ports == []} class="text-[11px] text-warning">
-                      No port set — the proxy will fall back to port 80, which is almost
-                      certainly not what the app listens on.
-                    </p>
-                    <div
-                      :for={{port, idx} <- Enum.with_index(@settings_ports)}
-                      class="space-y-1"
-                    >
-                      <div class="flex items-center gap-2">
-                        <label class="flex items-center gap-1.5 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="settings[routed_port]"
-                            value={port["internal"]}
-                            checked={@settings_routed_port == to_string(port["internal"])}
-                            class="radio radio-xs radio-primary"
-                          />
-                          <span class="text-[10px] text-base-content/40 w-10">route</span>
-                        </label>
-                        <input
-                          type="text"
-                          name={"settings[ports][#{idx}][internal]"}
-                          value={port["internal"]}
-                          placeholder="container port"
-                          class="w-28 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                        />
-                        <input
-                          type="hidden"
-                          name={"settings[ports][#{idx}][role]"}
-                          value={port["role"]}
-                        />
-                        <select
-                          name={"settings[ports][#{idx}][protocol]"}
-                          class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                        >
-                          <option
-                            :for={proto <- ~w(tcp udp)}
-                            value={proto}
-                            selected={proto == Access.port_protocol(port)}
-                          >
-                            {String.upcase(proto)}
-                          </option>
-                        </select>
-                        <input
-                          type="text"
-                          name={"settings[ports][#{idx}][description]"}
-                          value={port["description"]}
-                          placeholder="what it's for (optional)"
-                          class="flex-1 rounded-lg bg-base-100 border-0 text-xs py-1.5 px-2 text-base-content/60"
-                        />
-                        <button
-                          type="button"
-                          phx-click="settings_remove_port"
-                          phx-value-index={idx}
-                          class="text-base-content/30 hover:text-error"
-                        >
-                          <.icon name="hero-x-mark" class="size-4" />
-                        </button>
-                      </div>
-
-                      <%!-- Publishing a port the proxy is NOT carrying is the whole point
-                            of this row: a git server routes its web UI through Traefik and
-                            still needs SSH on a host port, because a reverse proxy has
-                            nothing to say about SSH. Offered per port -- the container is
-                            reached one way per PORT, not one way overall. --%>
-                      <div class="flex items-center gap-2 pl-[4.25rem]">
-                        <label
-                          class={[
-                            "flex items-center gap-1.5",
-                            if(guarded_port?(port, @settings_routed_port, @settings_auth),
-                              do: "cursor-not-allowed opacity-40",
-                              else: "cursor-pointer"
-                            )
-                          ]}
-                          title={
-                            guarded_port?(port, @settings_routed_port, @settings_auth) &&
-                              "This is the port Traefik forwards to. Publishing it on the host would serve the app with no #{if @settings_auth == "private", do: "IP allowlist", else: "SSO"} in front of it."
-                          }
-                        >
-                          <input
-                            type="checkbox"
-                            name={"settings[ports][#{idx}][published]"}
-                            value="true"
-                            checked={publish_checked?(port, @settings_routed_port, @settings_auth)}
-                            disabled={guarded_port?(port, @settings_routed_port, @settings_auth)}
-                            class="checkbox checkbox-xs checkbox-warning"
-                          />
-                          <span class="text-[10px] text-base-content/40">publish on host</span>
-                        </label>
-                        <input
-                          type="text"
-                          name={"settings[ports][#{idx}][external]"}
-                          value={port["external"]}
-                          placeholder={"host port (default #{port["internal"]})"}
-                          class="w-40 rounded-lg bg-base-100 border-0 text-xs font-mono py-1 px-2"
-                        />
-                        <%!-- The INTERFACE, same as the host-mode editor. Without an input
-                              here an adopted `127.0.0.1:` binding would be widened to every
-                              interface by the first save on this page. --%>
-                        <input
-                          type="text"
-                          name={"settings[ports][#{idx}][host_ip]"}
-                          value={port["host_ip"]}
-                          placeholder="all interfaces"
-                          title="Publish on one interface only, e.g. 127.0.0.1. Blank means all interfaces."
-                          class="w-32 rounded-lg bg-base-100 border-0 text-xs font-mono py-1 px-2"
-                        />
-                      </div>
-                    </div>
-                    <p class="text-[10px] text-base-content/40">
-                      The selected port is the one Traefik forwards to inside the container.
-                      Any other port can also be published straight to the host — for a
-                      protocol the proxy can't carry, like SSH.
-                    </p>
-                    <p
-                      :if={@settings_auth in ~w(sso_protected private)}
-                      class="text-[10px] text-base-content/40"
-                    >
-                      The routed port itself can't be published here: Traefik applies {if @settings_auth ==
-                                                                                            "private",
-                                                                                          do:
-                                                                                            "the IP allowlist",
-                                                                                          else: "SSO"} per route, so a host binding on that port would hand out the app with
-                      no check in front of it.
-                    </p>
-                    <p
-                      :if={
-                        @settings_auth == "public" &&
-                          Enum.any?(
-                            @settings_ports,
-                            &publish_checked?(&1, @settings_routed_port, @settings_auth)
-                          )
-                      }
-                      class="text-[10px] text-warning"
-                    >
-                      A published port answers over plain TCP on the host — no TLS and none
-                      of the proxy's headers. That's what you want for SSH; it's rarely what
-                      you want for HTTP.
-                    </p>
-                  </div>
-
-                  <div class="space-y-2 rounded-lg bg-base-200/40 p-3">
-                    <div class="flex items-center justify-between">
-                      <span class="text-xs font-medium text-base-content">Extra path routes</span>
-                      <button
-                        type="button"
-                        phx-click="settings_add_route"
-                        class="text-[10px] text-primary hover:underline cursor-pointer"
-                      >
-                        + Add route
-                      </button>
-                    </div>
-                    <p class="text-[10px] text-base-content/40 leading-snug">
-                      Send one path to a <em>different</em>
-                      port in the same container. An app that serves
-                      a second protocol from a second port needs this — Laravel Reverb answers
-                      websockets on 6001 while the app itself is on 8000, so <code>/app</code>
-                      has to reach 6001 or every handshake lands on the HTTP server.
-                    </p>
-
-                    <div
-                      :for={{route, idx} <- Enum.with_index(@settings_routes)}
-                      class="flex items-center gap-2"
-                    >
-                      <input
-                        type="text"
-                        name={"settings[routes][#{idx}][path_prefix]"}
-                        value={route["path_prefix"]}
-                        placeholder="/app"
-                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
-                      />
-                      <span class="text-[10px] text-base-content/40">→</span>
-                      <input
-                        type="text"
-                        inputmode="numeric"
-                        name={"settings[routes][#{idx}][port]"}
-                        value={route["port"]}
-                        placeholder="6001"
-                        class="w-24 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
-                      />
-                      <button
-                        type="button"
-                        phx-click="settings_remove_route"
-                        phx-value-index={idx}
-                        class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
-                        aria-label={"Remove route #{route["path_prefix"]}"}
-                      >
-                        <.icon name="hero-trash" class="size-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div class="space-y-2 rounded-lg bg-base-200/40 p-3">
-                    <div class="flex items-center justify-between">
-                      <span class="text-xs font-medium text-base-content">Additional domains</span>
-                      <button
-                        type="button"
-                        phx-click="settings_add_domain"
-                        class="text-[10px] text-primary hover:underline cursor-pointer"
-                      >
-                        + Add domain
-                      </button>
-                    </div>
-                    <p class="text-[10px] text-base-content/40 leading-snug">
-                      Route another <em>hostname</em>
-                      to this same container. Leave the path blank to send the whole host;
-                      set one to scope it — Synapse answers on <code>matrix.example.com</code>
-                      while <code>example.com/.well-known/matrix</code>
-                      serves only the delegation files, leaving the rest of the apex free.
-                      Leave the port blank to reuse the routed port, or set one to reach a
-                      different backend (a sibling app inside a shared gluetun network).
-                    </p>
-
-                    <div
-                      :for={{domain, idx} <- Enum.with_index(@settings_additional_domains)}
-                      class="flex items-center gap-2"
-                    >
-                      <input
-                        type="text"
-                        name={"settings[domains][#{idx}][host]"}
-                        value={domain["host"]}
-                        placeholder="example.com"
-                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
-                      />
-                      <input
-                        type="text"
-                        name={"settings[domains][#{idx}][path_prefix]"}
-                        value={domain["path_prefix"]}
-                        placeholder="/.well-known/matrix (optional)"
-                        class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
-                      />
-                      <span class="text-[10px] text-base-content/40">→</span>
-                      <input
-                        type="text"
-                        inputmode="numeric"
-                        name={"settings[domains][#{idx}][port]"}
-                        value={domain["port"]}
-                        placeholder="port"
-                        class="w-20 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
-                      />
-                      <button
-                        type="button"
-                        phx-click="settings_remove_domain"
-                        phx-value-index={idx}
-                        class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
-                        aria-label={"Remove domain #{domain["host"]}"}
-                      >
-                        <.icon name="hero-trash" class="size-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <div class="space-y-1">
-                    <label
-                      for="settings-backend-scheme"
-                      class="text-xs font-medium text-base-content"
-                    >
-                      Backend protocol
-                    </label>
-                    <select
-                      id="settings-backend-scheme"
-                      name="settings[backend_scheme]"
-                      class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-                    >
-                      <option value="http" selected={@settings_backend_scheme != "https"}>
-                        HTTP — the proxy terminates TLS (almost every app)
-                      </option>
-                      <option value="https" selected={@settings_backend_scheme == "https"}>
-                        HTTPS — the container serves TLS itself
-                      </option>
-                    </select>
-                    <p class="text-[10px] text-base-content/40 leading-snug">
-                      How Traefik talks to the container, not how browsers reach it — the
-                      public side is HTTPS either way. An app that terminates TLS itself
-                      (code-server, a Unifi controller, anything started with <code>--cert</code>) answers a plaintext request with <span class="font-mono">400 Bad Request</span>.
-                      The certificate is not verified on this hop: it is a container name on a
-                      private network, and nothing issues certificates for those.
-                    </p>
-                  </div>
-
-                  <label class="flex items-start gap-2 cursor-pointer">
-                    <input type="hidden" name="settings[sticky]" value="false" />
-                    <input
-                      type="checkbox"
-                      name="settings[sticky]"
-                      value="true"
-                      checked={@settings_sticky}
-                      class="checkbox checkbox-xs checkbox-primary mt-0.5"
-                    />
-                    <span class="flex flex-col gap-0.5">
-                      <span class="text-xs font-medium text-base-content">Sticky sessions</span>
-                      <span class="text-[10px] text-base-content/40 leading-snug">
-                        Pins each client to one replica. Websockets and LiveView are proxied
-                        automatically, but with more than one replica a reconnect can land on a
-                        different container and drop the session.
-                      </span>
-                    </span>
-                  </label>
-                </div>
-
-                <div :if={@settings_access == "host"} class="space-y-2 rounded-lg bg-base-200/40 p-3">
-                  <div class="flex items-center justify-between">
-                    <label class="text-xs font-medium text-base-content/50">
-                      Container → host ports
-                    </label>
-                    <button
-                      type="button"
-                      phx-click="settings_add_port"
-                      class="text-xs text-primary hover:text-primary/80"
-                    >
-                      + Add port
-                    </button>
-                  </div>
-                  <p :if={@settings_ports == []} class="text-[11px] text-base-content/30">
-                    No ports yet — add a container→host mapping.
-                  </p>
-                  <div
-                    :for={{port, idx} <- Enum.with_index(@settings_ports)}
-                    class="flex items-center gap-2"
-                  >
-                    <input
-                      type="text"
-                      name={"settings[ports][#{idx}][internal]"}
-                      value={port["internal"]}
-                      placeholder="container"
-                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                    />
-                    <span class="text-base-content/30">→</span>
-                    <input
-                      type="text"
-                      name={"settings[ports][#{idx}][external]"}
-                      value={port["external"]}
-                      placeholder="host"
-                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                    />
-                    <select
-                      name={"settings[ports][#{idx}][protocol]"}
-                      class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                    >
-                      <option
-                        :for={proto <- ~w(tcp udp)}
-                        value={proto}
-                        selected={proto == Access.port_protocol(port)}
-                      >
-                        {String.upcase(proto)}
-                      </option>
-                    </select>
-                    <%!-- The INTERFACE this binds on. Adoption captures `127.0.0.1` from
-                          the original container, and with no input for it any save here
-                          would widen the binding to every interface — putting a
-                          deliberately host-local database on the LAN. --%>
-                    <input
-                      type="text"
-                      name={"settings[ports][#{idx}][host_ip]"}
-                      value={port["host_ip"]}
-                      placeholder="all interfaces"
-                      title="Publish on one interface only, e.g. 127.0.0.1. Blank means all interfaces."
-                      class="w-32 rounded-lg bg-base-100 border-0 text-sm font-mono py-1.5 px-2"
-                    />
-                    <input
-                      type="hidden"
-                      name={"settings[ports][#{idx}][role]"}
-                      value={port["role"] || "other"}
-                    />
-                    <button
-                      type="button"
-                      phx-click="settings_remove_port"
-                      phx-value-index={idx}
-                      class="text-base-content/30 hover:text-error ml-auto"
-                    >
-                      <.icon name="hero-x-mark" class="size-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <%!-- Host network: the container is IN the host's namespace, so there is no
-                   mapping to edit. The ports are still worth keeping — they drive the
-                   healthcheck — and rendering them keeps `ports_override` from being
-                   silently dropped on save, which would fall back to the template. --%>
-                <div
-                  :if={@settings_access == "host_network"}
-                  class="space-y-2 rounded-lg bg-base-200/40 p-3"
-                >
-                  <div class="flex items-center justify-between">
-                    <label class="text-xs font-medium text-base-content/50">
-                      Ports it listens on
-                    </label>
-                    <button
-                      type="button"
-                      phx-click="settings_add_port"
-                      class="text-xs text-primary hover:text-primary/80"
-                    >
-                      + Add port
-                    </button>
-                  </div>
-                  <p class="text-[11px] text-base-content/40">
-                    On the host's network these are the host's ports — nothing is mapped, so
-                    there is no separate host port to choose. A port already in use on the host
-                    will keep the container from starting.
-                  </p>
-                  <div
-                    :for={{port, idx} <- Enum.with_index(@settings_ports)}
-                    class="flex items-center gap-2"
-                  >
-                    <input
-                      type="text"
-                      name={"settings[ports][#{idx}][internal]"}
-                      value={port["internal"]}
-                      placeholder="port"
-                      class="w-24 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                    />
-                    <%!-- Nothing is mapped in this mode, but the protocol still has to
-                       round-trip: dropping it rewrites the stored port map to tcp on
-                       save, which the healthcheck and any later mode switch then read. --%>
-                    <select
-                      name={"settings[ports][#{idx}][protocol]"}
-                      class="w-20 rounded-lg bg-base-100 border-0 text-sm py-1.5 px-2"
-                    >
-                      <option
-                        :for={proto <- ~w(tcp udp)}
-                        value={proto}
-                        selected={proto == Access.port_protocol(port)}
-                      >
-                        {String.upcase(proto)}
-                      </option>
-                    </select>
-                    <input
-                      type="hidden"
-                      name={"settings[ports][#{idx}][role]"}
-                      value={port["role"] || "other"}
-                    />
-                    <button
-                      type="button"
-                      phx-click="settings_remove_port"
-                      phx-value-index={idx}
-                      class="text-base-content/30 hover:text-error ml-auto"
-                    >
-                      <.icon name="hero-x-mark" class="size-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <p
-                  :if={@settings_access == "internal"}
-                  class="text-[11px] text-base-content/40 rounded-lg bg-base-200/40 p-3"
-                >
-                  Internal only — reachable on the container network, with no host port or public route.
-                </p>
-
-                <%!-- Resilience: resource limits + healthcheck (closes the readiness gate) --%>
-                <div class="space-y-3 border-t border-base-content/5 pt-4">
-                  <label class="text-xs font-medium text-base-content/50">Resilience</label>
-                  <div class="grid grid-cols-2 gap-3">
-                    <div class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">Memory (MB)</label>
-                      <input
-                        type="number"
-                        min="1"
-                        name="settings[memory_mb]"
-                        value={@settings_memory_mb}
-                        placeholder="256"
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
-                      />
-                    </div>
-                    <div class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">CPU shares</label>
-                      <input
-                        type="number"
-                        min="1"
-                        name="settings[cpu_shares]"
-                        value={@settings_cpu_shares}
-                        placeholder="512"
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
-                      />
-                    </div>
-                  </div>
-
-                  <%!-- GPU. A reservation, not a limit: it decides WHICH NODE the task
-                        lands on, and whether a device is in the container at all. --%>
-                  <div class="grid grid-cols-2 gap-3">
-                    <div class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">GPU</label>
-                      <select
-                        name="settings[gpu_vendor]"
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
-                      >
-                        <option value="" selected={@settings_gpu_vendor in [nil, ""]}>None</option>
-                        <option value="nvidia" selected={@settings_gpu_vendor == "nvidia"}>
-                          NVIDIA
-                        </option>
-                        <option value="amd" selected={@settings_gpu_vendor == "amd"}>
-                          AMD (ROCm)
-                        </option>
-                      </select>
-                    </div>
-                    <div :if={@settings_gpu_vendor in ["nvidia", "amd"]} class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">Devices</label>
-                      <input
-                        type="text"
-                        name="settings[gpu_devices]"
-                        value={@settings_gpu_devices}
-                        placeholder="all"
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono py-1.5 px-2.5"
-                      />
-                    </div>
-                  </div>
-
-                  <div :if={@settings_gpu_vendor in ["nvidia", "amd"]} class="grid grid-cols-2 gap-3">
-                    <div class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">GPUs to reserve</label>
-                      <input
-                        type="number"
-                        min="1"
-                        name="settings[gpu_count]"
-                        value={@settings_gpu_count}
-                        placeholder="1"
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
-                      />
-                    </div>
-                    <div class="flex flex-col gap-1">
-                      <label class="text-[10px] text-base-content/40">
-                        Swarm resource kind
-                      </label>
-                      <input
-                        type="text"
-                        name="settings[gpu_kind]"
-                        value={@settings_gpu_kind}
-                        list="gpu-kinds"
-                        placeholder={Homelab.Deployments.GpuSpec.default_kind(@settings_gpu_vendor)}
-                        class="w-full rounded-lg bg-base-200 border-0 text-sm font-mono py-1.5 px-2.5"
-                      />
-                      <datalist id="gpu-kinds">
-                        <option :for={kind <- @gpu_advertised_kinds} value={kind}></option>
-                      </datalist>
-                    </div>
-                  </div>
-
-                  <div
-                    :if={@settings_gpu_vendor in ["nvidia", "amd"]}
-                    class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2 space-y-1"
-                  >
-                    <p class="text-[11px] text-base-content/70 leading-snug">
-                      <strong>Swarm cannot pass a device.</strong>
-                      A GPU is reachable only as a generic resource the node declares in its
-                      <code class="font-mono">daemon.json</code>
-                      — the reservation decides which node the task lands on, and the vendor
-                      runtime (set as that node's <code class="font-mono">default-runtime</code>)
-                      is what actually puts the device in the container.
-                    </p>
-                    <p :if={@gpu_advertised_kinds == []} class="text-[11px] text-warning leading-snug">
-                      No node in this swarm currently advertises a GPU. Deploying this would
-                      leave the task pending forever, so it will be refused with the exact
-                      <code class="font-mono">daemon.json</code>
-                      change needed.
-                    </p>
-                    <p :if={@gpu_advertised_kinds != []} class="text-[11px] text-base-content/60">
-                      Nodes advertise: {Enum.join(@gpu_advertised_kinds, ", ")}
-                    </p>
-                  </div>
-                  <div class="flex flex-col gap-1">
-                    <label class="text-[10px] text-base-content/40">Health check path</label>
-                    <input
-                      type="text"
-                      name="settings[health_path]"
-                      value={@settings_health_path}
-                      placeholder="/health"
-                      class="w-full rounded-lg bg-base-200 border-0 text-sm py-1.5 px-2.5"
-                    />
-                    <p class="text-[10px] text-base-content/40">
-                      An HTTP path probed for readiness. Set memory, CPU, and a path to clear the resilience gate.
-                    </p>
-                  </div>
-                </div>
-
-                <div class="flex gap-2 pt-1">
-                  <button
-                    type="button"
-                    phx-click="cancel_settings_edit"
-                    class="px-3 py-1.5 rounded-lg text-sm text-base-content/70 hover:bg-base-200"
-                  >
-                    Cancel
-                  </button>
-                  <.button
-                    type="submit"
-                    label="Save and recreate"
-                    data-confirm={"Recreate #{@deployment.app_template.name}? The app restarts briefly while the new configuration is applied."}
-                    class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-medium"
-                  />
-                </div>
-              </.form>
-            <% else %>
-              <% access = Access.access_of(Access.effective_exposure(@deployment)) %>
-              <dl class="space-y-3 text-sm">
-                <div class="flex justify-between gap-4">
-                  <dt class="text-base-content/50">Access</dt>
-                  <dd class="text-base-content">{settings_access_label(@deployment)}</dd>
-                </div>
-                <div :if={access == "proxy"} class="flex justify-between gap-4">
-                  <dt class="text-base-content/50">Domain</dt>
-                  <dd class="text-base-content font-mono">
-                    {@deployment.domain || "— (add to go live)"}
-                  </dd>
-                </div>
-                <div :if={access == "host"} class="flex justify-between gap-4">
-                  <dt class="text-base-content/50">Host ports</dt>
-                  <dd class="text-base-content font-mono text-right">
-                    <%= case Access.effective_ports(@deployment) do %>
-                      <% [] -> %>
-                        —
-                      <% ports -> %>
-                        <span :for={p <- ports} class="block">
-                          {p["internal"]} → {p["external"] || p["internal"]}
-                        </span>
-                    <% end %>
-                  </dd>
-                </div>
-                <%!-- Host network: nothing is MAPPED, so these are shown as-is rather
-                   than as `container → host` pairs, which would imply a rule exists. --%>
-                <div :if={access == "host_network"} class="flex justify-between gap-4">
-                  <dt class="text-base-content/50">Listening on host</dt>
-                  <dd class="text-base-content font-mono text-right">
-                    <%= case Access.effective_ports(@deployment) do %>
-                      <% [] -> %>
-                        —
-                      <% ports -> %>
-                        <span :for={p <- ports} class="block">{p["internal"]}</span>
-                    <% end %>
-                  </dd>
-                </div>
-              </dl>
-            <% end %>
-          </div>
+          <DeploymentSettings.settings_tab
+            form={@settings_form}
+            base={@settings_base}
+            deployment={@deployment}
+            editing={@settings_edit_mode}
+            netns_candidates={@netns_candidates}
+            gpu_kinds={@gpu_advertised_kinds}
+            available_tags={@available_tags}
+            review={@settings_review}
+            netns_donor={@netns_donor}
+            netns_children={@netns_children}
+            netns_donor_env={@netns_donor_env}
+          />
         </div>
 
         <%!-- Environment tab --%>
@@ -3100,7 +1664,27 @@ defmodule HomelabWeb.DeploymentLive do
 
     socket
     |> assign(:readiness, Readiness.checks(deployment))
+    |> assign_settings_form(deployment)
     |> assign_netns(deployment)
+  end
+
+  # Seeded whenever the deployment is (re)loaded, not only on entering edit mode: the
+  # Settings tab renders the whole configuration in READ mode too, and a form that only
+  # existed while editing is why the page used to show three rows and every screenshot
+  # of it was taken mid-edit.
+  #
+  # An open editor keeps what the operator has typed. A save or an external update
+  # re-seeds both copies, which is also what clears the dirty count.
+  defp assign_settings_form(%{assigns: %{settings_edit_mode: true}} = socket, deployment) do
+    assign(socket, :settings_base, SettingsForm.from_deployment(deployment))
+  end
+
+  defp assign_settings_form(socket, deployment) do
+    form = SettingsForm.from_deployment(deployment)
+
+    socket
+    |> assign(:settings_form, form)
+    |> assign(:settings_base, form)
   end
 
   # What every config save does to the page. `assign_releases/1` is the part that is
@@ -3112,6 +1696,7 @@ defmodule HomelabWeb.DeploymentLive do
   defp assign_applied(socket, updated) do
     socket
     |> assign(:deployment, updated)
+    |> assign(:settings_edit_mode, false)
     |> assign_derived()
     |> assign_releases()
   end
@@ -3201,217 +1786,6 @@ defmodule HomelabWeb.DeploymentLive do
   # while the very same variable was masked in the wizard. See `Homelab.SecretKeys`.
   defp secret_key?(key), do: Homelab.SecretKeys.sensitive?(key)
 
-  # An inherit/custom pair plus a textarea. The pair exists because a blank textarea
-  # alone cannot distinguish "use the catalog's" from "explicitly nothing", and for
-  # entrypoint those mean genuinely different things to Docker.
-  attr :name, :string, required: true
-  attr :label, :string, required: true
-  attr :hint, :string, required: true
-  attr :mode, :string, required: true
-  attr :value, :string, required: true
-
-  defp runtime_list_field(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-1.5">
-      <label class="text-xs font-medium text-base-content/50">{@label}</label>
-      <select
-        name={"runtime[#{@name}_mode]"}
-        class="rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-      >
-        <option value="inherit" selected={@mode == "inherit"}>Inherit from catalog</option>
-        <option value="custom" selected={@mode == "custom"}>Custom</option>
-      </select>
-      <textarea
-        :if={@mode == "custom"}
-        name={"runtime[#{@name}]"}
-        rows="3"
-        class="rounded-lg bg-base-200 border-0 text-sm font-mono text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
-      >{@value}</textarea>
-      <p class="text-xs text-base-content/40">{@hint}</p>
-    </div>
-    """
-  end
-
-  defp swarm?, do: Homelab.Config.orchestrator() == Homelab.Orchestrators.DockerSwarm
-
-  defp format_list(nil), do: "—"
-  defp format_list([]), do: "(none)"
-  defp format_list(values), do: Enum.join(values, " ")
-
-  defp format_ports([]), do: "no known ports"
-  defp format_ports(ports), do: Enum.map_join(ports, ", ", &to_string/1)
-
-  defp format_devices([]), do: "(none)"
-
-  defp format_devices(devices) do
-    Enum.map_join(devices, ", ", fn device ->
-      "#{device["host_path"]} → #{device["container_path"]} (#{device["permissions"]})"
-    end)
-  end
-
-  defp format_sysctls(sysctls) when map_size(sysctls) == 0, do: "(none)"
-
-  defp format_sysctls(sysctls) do
-    sysctls
-    |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
-  end
-
-  # The added capabilities that reach past the container, so the form can say so while
-  # the operator is typing. A warning, never a refusal — NET_ADMIN is exactly what a
-  # VPN client legitimately needs.
-  defp privileged_caps("custom", text) do
-    text
-    |> parse_capability_field_preview()
-    |> Enum.filter(&RuntimeSpec.privileged_capability?/1)
-  end
-
-  defp privileged_caps(_inherit, _text), do: []
-
-  defp parse_capability_field_preview(text) do
-    (text || "")
-    |> String.split("\n")
-    |> RuntimeSpec.parse_capabilities()
-  end
-
-  # One argument per line, not a shell string. Splitting `--flag "a b"` on whitespace
-  # gets it wrong, and the alternative is implementing shell quoting in a form field.
-  defp assign_list_field(socket, key, nil) do
-    socket
-    |> assign(:"runtime_#{key}_mode", "inherit")
-    |> assign(:"runtime_#{key}", "")
-  end
-
-  defp assign_list_field(socket, key, values) when is_list(values) do
-    socket
-    |> assign(:"runtime_#{key}_mode", "custom")
-    |> assign(:"runtime_#{key}", Enum.join(values, "\n"))
-  end
-
-  # "inherit" is nil; "custom" is a list, and an EMPTY custom list is a real value —
-  # clearing an image's entrypoint is a Docker instruction, not an absent setting.
-  defp parse_list_field("custom", text) do
-    (text || "")
-    |> String.split("\n")
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp parse_list_field(_inherit, _text), do: nil
-
-  # Capabilities are a list field too, but normalized on the way in so `cap_net_admin`
-  # and `NET_ADMIN` are stored as one permission rather than two.
-  defp parse_capability_field("custom", text),
-    do: RuntimeSpec.parse_capabilities(parse_list_field("custom", text))
-
-  defp parse_capability_field(_inherit, _text), do: nil
-
-  # Same inherit-vs-custom rule as the list fields: [] is "explicitly no devices",
-  # which is a real instruction when the template passes one.
-  defp parse_devices_field("custom", rows), do: RuntimeSpec.parse_devices(rows)
-  defp parse_devices_field(_inherit, _rows), do: nil
-
-  defp parse_sysctls_field("custom", rows) do
-    rows
-    |> sysctl_rows_from_params()
-    |> Enum.reject(&(String.trim(&1["key"]) == ""))
-    |> Map.new(fn row -> {String.trim(row["key"]), row["value"]} end)
-  end
-
-  defp parse_sysctls_field(_inherit, _rows), do: nil
-
-  defp assign_device_rows(socket, nil) do
-    socket
-    |> assign(:runtime_devices_mode, "inherit")
-    |> assign(:runtime_devices, [])
-  end
-
-  defp assign_device_rows(socket, devices) when is_list(devices) do
-    socket
-    |> assign(:runtime_devices_mode, "custom")
-    |> assign(:runtime_devices, RuntimeSpec.parse_device_rows(devices))
-  end
-
-  defp assign_sysctl_rows(socket, nil) do
-    socket
-    |> assign(:runtime_sysctls_mode, "inherit")
-    |> assign(:runtime_sysctls, [])
-  end
-
-  defp assign_sysctl_rows(socket, sysctls) when is_map(sysctls) do
-    rows =
-      sysctls
-      |> Enum.sort_by(fn {key, _value} -> key end)
-      |> Enum.map(fn {key, value} -> %{"key" => key, "value" => to_string(value)} end)
-
-    socket
-    |> assign(:runtime_sysctls_mode, "custom")
-    |> assign(:runtime_sysctls, rows)
-  end
-
-  # Indexed form params (`%{"0" => %{"key" => ..., "value" => ...}}`) back to ordered
-  # rows, blanks KEPT so a just-added row survives the change event.
-  defp sysctl_rows_from_params(nil), do: []
-
-  defp sysctl_rows_from_params(params) when is_map(params) do
-    params
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} ->
-      %{"key" => to_string(row["key"] || ""), "value" => to_string(row["value"] || "")}
-    end)
-  end
-
-  defp sysctl_rows_from_params(rows) when is_list(rows) do
-    Enum.map(rows, fn row ->
-      %{"key" => to_string(row["key"] || ""), "value" => to_string(row["value"] || "")}
-    end)
-  end
-
-  defp to_int(value) when is_integer(value), do: value
-
-  defp to_int(value) do
-    case Integer.parse(to_string(value)) do
-      {n, _rest} -> n
-      _ -> 0
-    end
-  end
-
-  # Blank means "the platform default", which is what nil resolves to.
-  defp parse_replicas(value) do
-    case Integer.parse(to_string(value)) do
-      {n, _rest} when n > 0 -> n
-      _ -> nil
-    end
-  end
-
-  # A version change is `apply_config/3` with a different image — the pull-and-converge
-  # sequence was always there, it had just never been handed anything different to run.
-  #
-  # `stack?` is computed here rather than left to default `false`, and the omission was a
-  # real bug: a version bump on a netns DONOR took the standalone branch, re-creating the
-  # donor's container and leaving every child's `NetworkMode` naming a container that no
-  # longer exists — dead until something else re-created them. The settings form had
-  # worked this out (`netns_member?/2`); the version control had not, so the one edit
-  # guaranteed to replace the container was the one that ignored the group.
-  defp apply_version(socket, override) do
-    deployment = socket.assigns.deployment
-    stack? = netns_member?(deployment, deployment.network_parent_id)
-
-    case apply_config(deployment, %{image_override: override}, stack?) do
-      {:ok, updated, _release} ->
-        target = if override, do: "Now running #{override}", else: "Reset to the catalog default"
-
-        {:noreply,
-         socket
-         |> assign_applied(updated)
-         |> assign(version_edit_mode: false, available_tags: :idle)
-         |> put_flash(:info, "#{target} — #{release_started_flash(stack?)}")}
-
-      {:error, message} ->
-        {:noreply, put_flash(socket, :error, message)}
-    end
-  end
-
   # The one sentence every config save ends with. A save no longer applies anything
   # itself — it plans a release and hands it to `ReleaseRunner` — so the flash points at
   # the place that shows what is actually happening instead of asserting it is done.
@@ -3427,7 +1801,7 @@ defmodule HomelabWeb.DeploymentLive do
   # probe's dedicated supervisor — per-open-page UI work must not borrow the bounded
   # worker pool and starve real background jobs — reached a simpler way.
   defp load_available_tags(socket) do
-    image = socket.assigns.version_image
+    image = socket.assigns.settings_form.image
 
     if connected?(socket) and Tags.supported?(image) do
       socket
@@ -3446,6 +1820,42 @@ defmodule HomelabWeb.DeploymentLive do
   # to say which of the two happened: the save is synchronous and done, the apply is a
   # saga that has only just been enqueued. Every flash on this path used to promise
   # "recreating the container" in the past tense for work that had not started.
+  # Every settings edit is the same shape: transform the struct, then settle it against
+  # the rules it cannot break, so the page never renders a configuration the save would
+  # refuse.
+  defp update_settings(socket, fun) do
+    assign(socket, :settings_form, SettingsForm.normalize(fun.(socket.assigns.settings_form)))
+  end
+
+  defp update_health(socket, fun) do
+    update_settings(socket, fn form ->
+      %{form | health: Map.update(form.health, "args", [""], fun)}
+    end)
+  end
+
+  defp first_route_host(%SettingsForm{routes: [%{"host" => host} | _rest]}), do: host
+  defp first_route_host(%SettingsForm{}), do: ""
+
+  # The port a new route points at: the first one already proxied, else the first port
+  # at all. A route added with no backend is the one mistake this table can silently
+  # make, because an empty select posts nothing.
+  defp default_route_port(%SettingsForm{ports: ports}) do
+    port =
+      Enum.find(ports, &(&1["exposure"] == "proxy")) || List.first(ports)
+
+    to_string(port && port["internal"])
+  end
+
+  # Read from the CLUSTER rather than from our conventions: Swarm matches the kind
+  # byte-for-byte against daemon.json, so offering a guess would be offering a task
+  # that hangs pending.
+  defp advertised_gpu_kinds do
+    case Homelab.Infrastructure.GpuFacts.advertised_kinds() do
+      {:ok, kinds} -> kinds
+      {:error, _reason} -> []
+    end
+  end
+
   defp apply_config(deployment, attrs, stack? \\ false) do
     with {:ok, updated} <- Deployments.update_deployment(deployment, attrs),
          {:ok, release} <- reconverge(updated, stack?) do
@@ -3504,16 +1914,6 @@ defmodule HomelabWeb.DeploymentLive do
       Homelab.Deployments.Netns.donor?(deployment)
   end
 
-  # "" is the operator choosing "its own network"; a missing key means the control was
-  # not rendered at all (no eligible donors), which must not clear an existing choice.
-  defp parse_network_parent(settings, socket) do
-    case Map.get(settings, "network_parent_id", :absent) do
-      :absent -> socket.assigns.deployment.network_parent_id
-      "" -> nil
-      value -> to_int(value)
-    end
-  end
-
   # Deployments in the same space that could host this one's network namespace.
   # Excludes itself, anything already inside another namespace (chains are not
   # supported) and host-networked containers (which have no namespace to share).
@@ -3527,76 +1927,6 @@ defmodule HomelabWeb.DeploymentLive do
     end)
     |> Enum.sort_by(& &1.app_template.name)
   end
-
-  # A container inside another's namespace has no ports of its own to bind and no
-  # namespace of its own to replace, so both host modes are unreachable from here.
-  defp netns_forbidden_access?(parent_id, access) when parent_id not in [nil, ""],
-    do: access in ["host", "host_network"]
-
-  defp netns_forbidden_access?(_parent_id, _access), do: false
-
-  # A namespace donor being given a hostname of its own.
-  defp netns_donor_domain?(%{netns_donor_kind: kind}, domain)
-       when is_binary(kind) and is_binary(domain),
-       do: String.trim(domain) != ""
-
-  defp netns_donor_domain?(_template, _domain), do: false
-
-  # Normalizes stored ports into the container->host rows the Host editor renders.
-  # Carries the ROLE through the form. The settings form used to post only
-  # internal/external, so `ConfigForm` re-inferred the role from the port number on
-  # every save — and an app on a non-obvious port lost its explicit "web"
-  # designation, which is the one the reverse proxy routes to.
-  #
-  # PROTOCOL rides along for the same reason, and it fails worse: a port the form does
-  # not post defaults back to tcp on save, so editing anything else on a UDP deployment
-  # would quietly republish its port on the wrong transport and take the service down.
-  defp editable_ports(ports) do
-    Enum.map(ports, fn p ->
-      %{
-        "internal" => to_string(p["internal"] || p["container_port"] || ""),
-        "external" => to_string(p["external"] || p["host_port"] || ""),
-        "role" => p["role"] || "other",
-        "protocol" => Access.port_protocol(p),
-        # nil renders as a blank field, which means "all interfaces" — the same thing
-        # it means in the stored map and to Docker.
-        "host_ip" => p["host_ip"],
-        "description" => p["description"] || "",
-        "optional" => p["optional"] == true,
-        # Carried, or the "publish on host" box would render UNticked for a port that is
-        # currently published — and the next save, reading the box rather than the stored
-        # map, would quietly take the binding away. Merely opening Settings would have
-        # unpublished a git server's SSH port.
-        "published" => p["published"] == true
-      }
-    end)
-  end
-
-  # Reads the live form's indexed port params, keeping every row (incl. blanks)
-  # so add/remove don't drop a row mid-edit. Save uses ConfigForm for the final
-  # normalized override.
-  defp ports_from_params(ports) when is_map(ports) do
-    ports
-    |> Enum.sort_by(fn {i, _} -> String.to_integer(i) end)
-    |> Enum.map(fn {_, p} ->
-      %{
-        "internal" => p["internal"] || "",
-        "external" => p["external"] || "",
-        "role" => p["role"] || "other",
-        "protocol" => Access.port_protocol(p),
-        # Round-tripped like every other field, or the interface would revert to "all"
-        # under the operator's cursor on the next change event.
-        "host_ip" => p["host_ip"],
-        "description" => p["description"] || "",
-        "optional" => p["optional"] == "true",
-        # Round-tripped for the same reason as `host_ip` just above: without it the
-        # checkbox would revert to unticked on the next keystroke anywhere in the form.
-        "published" => p["published"] == "true"
-      }
-    end)
-  end
-
-  defp ports_from_params(_), do: []
 
   # Off-process: the probe is a TLS handshake against a possibly-unreachable host, and
   # the page must not freeze for its timeout. async_nolink so a failed probe cannot take
@@ -3665,66 +1995,6 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  # Whether Traefik's auth stands in front of this port, making a host binding on it a
-  # bypass rather than a second door. `SpecBuilder.build_ports/1` is the authority and
-  # drops such a port regardless of what the form says; this is the same rule stated at
-  # the checkbox, so the operator is told BEFORE saving instead of finding the port
-  # missing afterwards.
-  #
-  # Only the routed port is checked here, not the extra-route or additional-domain
-  # backends the spec builder also guards. Those live in free-text inputs that are not
-  # round-tripped into assigns on change, so a check against them would read a stale port
-  # and disable the wrong checkbox. `guarded_publish_conflicts/2` reports those at save,
-  # where the values are real.
-  defp guarded_port?(port, routed_port, auth) do
-    auth in ~w(sso_protected private) and
-      to_string(port["internal"]) == to_string(routed_port)
-  end
-
-  # A guarded port renders unchecked as well as disabled: a disabled checkbox posts
-  # nothing, so showing it ticked would promise a binding the save cannot make.
-  defp publish_checked?(port, routed_port, auth) do
-    not guarded_port?(port, routed_port, auth) and port["published"] in [true, "true"]
-  end
-
-  # Which ports the form is asking to bind on the host.
-  #
-  # Host mode publishes every listed port -- that mode's whole meaning, and its editor
-  # renders no per-port checkbox because there would be nothing to uncheck. Proxy mode
-  # publishes exactly the ports whose "publish on host" box is ticked, which
-  # `ConfigForm.parse_ports/1` has already read off the form; passing it through
-  # untouched is what lets a git server keep 22 on the host while 3000 stays behind
-  # Traefik. Everything else (internal, host network) binds nothing.
-  #
-  # This used to be `Map.put(&1, "published", access == "host")` for every mode at once,
-  # which is why proxy mode could not express a host port at all.
-  defp apply_publish_flag(port, "host"), do: Map.put(port, "published", true)
-  defp apply_publish_flag(port, "proxy"), do: port
-  defp apply_publish_flag(port, _access), do: Map.put(port, "published", false)
-
-  # routed_port is the operator's decision and wins outright; only a deployment that
-  # has never made one falls back to SpecBuilder's guess (mirrored here so the form
-  # never shows a different port than the one the spec will use).
-  #
-  # Read ONCE, into `@settings_routed_port`, when the editor opens. It used to be
-  # recomputed from the PERSISTED deployment on every render — and since
-  # `@settings_ports` is rebuilt on every change event, the whole comprehension
-  # re-rendered on each keystroke and re-asserted `checked` from the old value. Selecting
-  # a different route port and then editing any other field reverted the selection under
-  # the operator's cursor, and the save persisted the port they had before. It was the
-  # only field in this form not round-tripped through `settings_changed`.
-  defp checked_routed_port(%{routed_port: port}, _ports) when is_integer(port),
-    do: to_string(port)
-
-  defp checked_routed_port(_deployment, ports) do
-    port =
-      Enum.find(ports, &(&1["role"] == "web")) ||
-        Enum.find(ports, &(&1["optional"] != true)) ||
-        List.first(ports)
-
-    to_string(port && port["internal"])
-  end
-
   # Volume rows, as the Volumes tab holds them. `target` is the shape a spec-built
   # volume carries; `container_path` the shape the template and the override carry.
   # Both go through VolumeSpec. This used to carry its own inference ("a volume with a
@@ -3760,279 +2030,6 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   defp derived_volume_name(_deployment, _path), do: nil
-
-  # Extra path routes, as the form holds them (strings) and as the DB holds them (a
-  # path plus an integer port).
-  defp editable_routes(routes) do
-    routes
-    |> List.wrap()
-    |> Enum.map(fn route ->
-      %{
-        "path_prefix" => route["path_prefix"] || "",
-        "port" => to_string(route["port"] || "")
-      }
-    end)
-  end
-
-  defp routes_from_params(nil), do: []
-
-  defp routes_from_params(params) when is_map(params) do
-    params
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} ->
-      %{"path_prefix" => row["path_prefix"] || "", "port" => row["port"] || ""}
-    end)
-  end
-
-  # A half-filled row is dropped, not saved as a broken route. The changeset would
-  # reject it anyway; discarding it here means an operator who added a row and changed
-  # their mind isn't blocked by a validation error on a field they left blank.
-  defp parse_routes(params) do
-    params
-    |> routes_from_params()
-    |> Enum.reject(fn route ->
-      String.trim(route["path_prefix"]) == "" or String.trim(to_string(route["port"])) == ""
-    end)
-    |> Enum.map(fn route ->
-      %{
-        "path_prefix" => String.trim(route["path_prefix"]),
-        "port" => parse_routed_port(to_string(route["port"]))
-      }
-    end)
-  end
-
-  defp editable_domains(domains) do
-    domains
-    |> List.wrap()
-    |> Enum.map(fn domain ->
-      %{
-        "host" => domain["host"] || "",
-        "path_prefix" => domain["path_prefix"] || "",
-        "port" => to_string(domain["port"] || "")
-      }
-    end)
-  end
-
-  defp domains_from_params(nil), do: []
-
-  defp domains_from_params(params) when is_map(params) do
-    params
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} ->
-      %{
-        "host" => row["host"] || "",
-        "path_prefix" => row["path_prefix"] || "",
-        "port" => row["port"] || ""
-      }
-    end)
-  end
-
-  # Alias rows the operator typed, plus any host the primary field carried beyond the
-  # first. Explicit rows come FIRST and win on collision: a row can carry a path_prefix
-  # and a port, and a bare name lifted out of the domain field carries neither -- so
-  # letting the bare one through would silently strip the `/.well-known/matrix` scoping
-  # off an alias the operator had already configured.
-  #
-  # Compared on the NORMALIZED host on both sides. `parse_additional_domains/1` only
-  # trims (canonicalization happens later, in the changeset) while `extra_hosts` arrives
-  # already normalized out of `Hostname.split/1`, so a row reading `Matrix.Example.com`
-  # would not have matched `matrix.example.com` -- and the two would become separate
-  # entries that normalize to the same host, which is two routers racing for one
-  # certificate.
-  defp merge_alias_hosts(rows, extra_hosts) do
-    known = MapSet.new(rows, &Hostname.normalize(&1["host"]))
-
-    rows ++
-      for host <- extra_hosts, not MapSet.member?(known, Hostname.normalize(host)) do
-        %{"host" => host, "path_prefix" => nil, "port" => nil}
-      end
-  end
-
-  # Only `host` is required. A row with a blank host is dropped (the operator added it and
-  # walked away); a blank path or port on a real host means "the whole host to the routed
-  # port", so they collapse to nil rather than being rejected.
-  defp parse_additional_domains(params) do
-    params
-    |> domains_from_params()
-    |> Enum.reject(fn domain -> String.trim(domain["host"]) == "" end)
-    |> Enum.map(fn domain ->
-      %{
-        "host" => String.trim(domain["host"]),
-        "path_prefix" => blank_to_nil(String.trim(domain["path_prefix"])),
-        "port" => parse_routed_port(to_string(domain["port"]))
-      }
-    end)
-  end
-
-  # The radio carries the port NUMBER, not its row index -- an index would silently
-  # re-point the proxy at a different port if the rows were ever reordered.
-  defp parse_routed_port(value) when is_binary(value) and value != "" do
-    case Integer.parse(value) do
-      {port, ""} -> port
-      _ -> nil
-    end
-  end
-
-  defp parse_routed_port(_value), do: nil
-
-  # Proxy-only options. Sticky sessions pin a client to one replica: Traefik
-  # round-robins otherwise, and a websocket (or LiveView) reconnect landing on a
-  # different container drops the session.
-  # The settings fields that simply round-trip: whatever the form posted, or what the
-  # assigns already held when it posted nothing for them.
-  #
-  # A table rather than one `||` per field in `settings_changed`. Written out, that
-  # handler was a single function with fourteen branches — past what Credo will pass,
-  # and past what anyone reads line by line to find the one field behaving oddly.
-  #
-  # `""` survives, which matters: it is a real value for `network_parent_id`, where it
-  # means the operator chose "its own network" and must not fall back to the previous
-  # parent.
-  @round_tripped_settings [
-    {:settings_domain, "domain"},
-    {:settings_access, "access"},
-    {:settings_auth, "auth"},
-    {:settings_backend_scheme, "backend_scheme"},
-    {:settings_memory_mb, "memory_mb"},
-    {:settings_cpu_shares, "cpu_shares"},
-    # Vendor drives whether the rest of the GPU fields are even rendered, so it has to
-    # round-trip on every change or picking NVIDIA would collapse the form again.
-    {:settings_gpu_vendor, "gpu_vendor"},
-    {:settings_gpu_count, "gpu_count"},
-    {:settings_gpu_devices, "gpu_devices"},
-    {:settings_gpu_kind, "gpu_kind"},
-    {:settings_health_path, "health_path"},
-    # Drives which access tiles are even selectable, so it has to round-trip on every
-    # change rather than only at save.
-    {:settings_network_parent_id, "network_parent_id"},
-    # The last field that was NOT round-tripped. Its radio recomputed `checked` from the
-    # persisted deployment on every render, so a new selection reverted on the next
-    # keystroke and the save wrote the old port.
-    {:settings_routed_port, "routed_port"}
-  ]
-
-  defp carry_settings(socket, settings) do
-    Enum.reduce(@round_tripped_settings, socket, fn {key, param}, acc ->
-      assign(acc, key, settings[param] || acc.assigns[key])
-    end)
-  end
-
-  defp proxy_options(settings, "proxy") do
-    %{
-      "sticky" => settings["sticky"] == "true",
-      "backend_scheme" => backend_scheme_param(settings["backend_scheme"])
-    }
-  end
-
-  defp proxy_options(_settings, _access), do: %{}
-
-  # The select posts one of two values, but a stale tab or a hand-built payload can post
-  # anything -- and "anything" would fail the changeset's validation rather than quietly
-  # meaning plaintext, taking the whole settings save with it. Everything unrecognised is
-  # the default here, and only the deliberate choice survives.
-  defp backend_scheme_param("https"), do: "https"
-  defp backend_scheme_param(_value), do: "http"
-
-  defp blank_to_nil(v) when v in [nil, ""], do: nil
-  defp blank_to_nil(v), do: v
-
-  # Build the resource-limits override from the form. Only the fields the user
-  # filled are set; an all-blank section means "inherit the template" (nil).
-  defp limits_override(settings) do
-    limits =
-      %{
-        "memory_mb" => parse_pos_int(settings["memory_mb"]),
-        "cpu_shares" => parse_pos_int(settings["cpu_shares"]),
-        "gpu" => gpu_override(settings)
-      }
-      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-      |> Map.new()
-
-    if limits == %{}, do: nil, else: limits
-  end
-
-  # The advertised kinds come from the CLUSTER, not from our conventions: Swarm matches
-  # the kind byte-for-byte against daemon.json, so offering the operator a guess would be
-  # offering them a task that hangs pending. Read once, on entering edit mode.
-  defp assign_gpu_settings(socket, limits) do
-    gpu = Homelab.Deployments.GpuSpec.parse(limits) || %{}
-
-    kinds =
-      case Homelab.Infrastructure.GpuFacts.advertised_kinds() do
-        {:ok, kinds} -> kinds
-        {:error, _reason} -> []
-      end
-
-    socket
-    |> assign(:settings_gpu_vendor, Map.get(gpu, :vendor, ""))
-    |> assign(:settings_gpu_count, to_string(Map.get(gpu, :count, "")))
-    |> assign(:settings_gpu_devices, Map.get(gpu, :devices, ""))
-    |> assign(:settings_gpu_kind, Map.get(gpu, :kind, ""))
-    |> assign(:gpu_advertised_kinds, kinds)
-  end
-
-  # A GPU is a resource reservation, so it rides in resource_limits — which is already a
-  # free-form map on both schemas, hence no migration. "none" means no GPU, not "inherit":
-  # the whole limits map is a wholesale override, so a half-map would silently drop the
-  # memory limit too.
-  defp gpu_override(settings) do
-    case settings["gpu_vendor"] do
-      vendor when vendor in ["nvidia", "amd"] ->
-        %{
-          "vendor" => vendor,
-          "count" => parse_pos_int(settings["gpu_count"]) || 1,
-          "devices" => blank_default(settings["gpu_devices"], "all"),
-          # Must match the node's daemon.json byte-for-byte under Swarm. Prefilled from
-          # what the cluster actually advertises, not from a convention we hope holds.
-          "kind" =>
-            blank_default(settings["gpu_kind"], Homelab.Deployments.GpuSpec.default_kind(vendor))
-        }
-
-      _ ->
-        nil
-    end
-  end
-
-  defp blank_default(value, default) when is_binary(value) do
-    case String.trim(value) do
-      "" -> default
-      trimmed -> trimmed
-    end
-  end
-
-  defp blank_default(_value, default), do: default
-
-  # Build the healthcheck override. A blank path inherits the template; a path
-  # merges onto the effective check so existing intervals/timeouts are kept.
-  defp health_override(deployment, settings) do
-    case blank_to_nil(settings["health_path"]) do
-      nil -> nil
-      path -> Map.put(Access.effective_health_check(deployment), "path", path)
-    end
-  end
-
-  defp parse_pos_int(value) do
-    case value |> to_string() |> Integer.parse() do
-      {n, _} when n > 0 -> n
-      _ -> nil
-    end
-  end
-
-  # Human-readable summary of a deployment's access for the read-only view.
-  defp settings_access_label(deployment) do
-    exposure = Access.effective_exposure(deployment)
-
-    case Access.access_of(exposure) do
-      "proxy" -> "Reverse proxy (#{auth_label(Access.auth_of(exposure))})"
-      "host" -> "Host ports"
-      "host_network" -> "Host network"
-      "internal" -> "Internal only"
-    end
-  end
-
-  defp auth_label("sso_protected"), do: "SSO"
-  defp auth_label("private"), do: "private"
-  defp auth_label(_), do: "no auth"
 
   defp mask_secret(key, val) when is_binary(key) do
     if String.contains?(String.upcase(key), "PASSWORD") or

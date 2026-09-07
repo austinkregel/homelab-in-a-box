@@ -83,9 +83,8 @@ defmodule HomelabWeb.DeploymentNetnsTest do
 
   defp save(view, params) do
     defaults = %{
-      "access" => "proxy",
       "auth" => "public",
-      "domain" => "sonarr.example.com"
+      "routes" => %{"0" => %{"host" => "sonarr.example.com", "port" => "8989"}}
     }
 
     render_submit(view, "save_settings", %{"settings" => Map.merge(defaults, params)})
@@ -95,8 +94,12 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     view = settings_form(conn, app)
     html = render(view)
 
-    assert html =~ "settings[network_parent_id]"
-    assert html =~ "Through Gluetun"
+    assert html =~ "settings[namespace]"
+    assert html =~ "Through another container"
+
+    html = render_change(view, "settings_changed", %{"settings" => %{"namespace" => "donor"}})
+    assert html =~ "settings[donor_id]"
+    assert html =~ "Gluetun"
   end
 
   test "a refused choice says WHY, not 'could not save the configuration'", ctx do
@@ -115,7 +118,7 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     html =
       ctx.conn
       |> settings_form(ctx.app)
-      |> save(%{"network_parent_id" => to_string(stranger.id)})
+      |> save(%{"namespace" => "donor", "donor_id" => to_string(stranger.id)})
 
     assert html =~ "must be in the same space"
     refute html =~ "Could not save the configuration."
@@ -127,7 +130,7 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     donor: donor
   } do
     view = settings_form(conn, app)
-    save(view, %{"network_parent_id" => to_string(donor.id)})
+    save(view, %{"namespace" => "donor", "donor_id" => to_string(donor.id)})
 
     assert Repo.reload!(app).network_parent_id == donor.id
   end
@@ -141,11 +144,12 @@ defmodule HomelabWeb.DeploymentNetnsTest do
 
     html =
       render_change(view, "settings_changed", %{
-        "settings" => %{"network_parent_id" => to_string(donor.id)}
+        "settings" => %{"namespace" => "donor", "donor_id" => to_string(donor.id)}
       })
 
-    assert html =~ "no ports, no network aliases and no address of its own"
+    assert html =~ "The daemon rejects port bindings alongside a container network mode"
     assert html =~ "localhost"
+    assert html =~ "goes round together"
   end
 
   # Multi-homing a VPN client onto the proxy network is what broke a real stack, and
@@ -158,21 +162,21 @@ defmodule HomelabWeb.DeploymentNetnsTest do
 
     html =
       render_change(view, "settings_changed", %{
-        "settings" => %{"access" => "proxy", "domain" => "vpn.example.com"}
+        "settings" => %{"routes" => %{"0" => %{"host" => "vpn.example.com", "port" => "8888"}}}
       })
 
-    assert html =~ "is a network container"
-    # A warning: the field is still there and still takes the value.
-    assert html =~ "settings[domain]"
+    assert html =~ "This is a network container"
+    # A warning: the row is still there and still takes the value.
+    assert html =~ "settings[routes][0][host]"
   end
 
   test "an ordinary deployment's domain is not flagged", %{conn: conn, app: app} do
     html = render(settings_form(conn, app))
 
-    refute html =~ "is a network container"
+    refute html =~ "This is a network container"
   end
 
-  test "host ports and host networking are disabled once a container is chosen", %{
+  test "a port cannot be published once a container is chosen", %{
     conn: conn,
     app: app,
     donor: donor
@@ -181,17 +185,24 @@ defmodule HomelabWeb.DeploymentNetnsTest do
 
     html =
       render_change(view, "settings_changed", %{
-        "settings" => %{"network_parent_id" => to_string(donor.id)}
+        "settings" => %{"namespace" => "donor", "donor_id" => to_string(donor.id)}
       })
 
-    assert html =~ "Not available while routing through another container"
+    # The exposure a shared namespace cannot offer is disabled on every port's control,
+    # rather than being offered and refused at save.
+    assert has_element?(
+             view,
+             ~s(select[name="settings[ports][0][exposure]"] option[value="host"][disabled])
+           )
+
+    assert html =~ "The daemon rejects port bindings alongside a container network mode"
   end
 
   test "choosing 'its own network' clears the setting", %{conn: conn, app: app, donor: donor} do
     {:ok, app} = Deployments.update_deployment(app, %{network_parent_id: donor.id})
 
     view = settings_form(conn, app)
-    save(view, %{"network_parent_id" => ""})
+    save(view, %{"namespace" => "own"})
 
     assert Repo.reload!(app).network_parent_id == nil
   end
@@ -236,7 +247,7 @@ defmodule HomelabWeb.DeploymentNetnsTest do
     # Re-creating the donor mints a new container id, and every other child is pinned to
     # the old one — so they have to go round together or they cannot start.
     view = settings_form(conn, app)
-    save(view, %{"network_parent_id" => to_string(donor.id)})
+    save(view, %{"namespace" => "donor", "donor_id" => to_string(donor.id)})
 
     release = Repo.one!(Homelab.Deployments.Release) |> Repo.preload(:steps)
 
@@ -260,10 +271,13 @@ defmodule HomelabWeb.DeploymentNetnsTest do
         domain: "radarr.example.com"
       )
 
-    html = settings_form(conn, other) |> render()
+    view = settings_form(conn, other)
 
-    assert html =~ "Through Gluetun"
-    refute html =~ "Through Sonarr"
+    html =
+      render_change(view, "settings_changed", %{"settings" => %{"namespace" => "donor"}})
+
+    assert html =~ "Gluetun"
+    refute html =~ "Sonarr"
   end
 
   defp wizard_network_step(conn, template, tenant, params \\ %{}) do
