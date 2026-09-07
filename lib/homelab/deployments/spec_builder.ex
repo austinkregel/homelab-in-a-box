@@ -690,10 +690,8 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
-  # `required_env` says "always"; `env_schema` can add "only when VPN_TYPE is openvpn".
-  # Conditions read the effective env so a mode carried by a template default still
-  # pulls in its branch, but only an OVERRIDE satisfies a requirement — the defaults
-  # ship blank because only the operator can fill them in.
+  # Conditions read the effective env, so a mode carried by a template default still
+  # pulls in its branch. Only an OVERRIDE satisfies a requirement.
   defp validate_required_env(template, overrides) do
     overrides = overrides || %{}
     effective_env = Map.merge(template.default_env || %{}, overrides)

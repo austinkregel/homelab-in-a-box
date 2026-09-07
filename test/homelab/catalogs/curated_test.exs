@@ -94,10 +94,7 @@ defmodule Homelab.Catalogs.CuratedTest do
       assert "VPN_SERVICE_PROVIDER" in entry.required_env
     end
 
-    # Gluetun speaks WireGuard or OpenVPN, never both, and each needs its own
-    # credentials. Demanded flat, the WireGuard keys were asked of an OpenVPN operator
-    # who has none — so the only way past the check was to invent them, and the deploy
-    # then succeeded on a configuration that cannot open a tunnel.
+    # Gluetun speaks WireGuard or OpenVPN, never both, and each needs its own credentials.
     test "Gluetun asks for the credentials of the protocol in use and not the other one" do
       assert {:ok, entry} = Curated.app_details("Gluetun")
 
