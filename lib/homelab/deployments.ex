@@ -245,18 +245,16 @@ defmodule Homelab.Deployments do
     end
   end
 
-  # Whether this workload has a network endpoint that CAN be attached to another network.
-  #
-  # A container living in another container's namespace does not: the daemon refuses
-  # `/networks/<n>/connect` on it with a 403 ("container sharing network namespace with
-  # another container or host cannot be connected to any other network"). It is still
-  # proxy-mode with a domain — a tunneled *arr app behind gluetun is exactly that — so
-  # every other measure says it should be published, and attempting it would fail the
-  # release's publish step and roll the whole deploy back.
-  #
-  # Its route is real, it is just served by its DONOR, which SpecBuilder multi-homes onto
-  # ingress at create time via `bridge_networks`. There is nothing for this to do.
-  defp attachable?(%Deployment{} = deployment) do
+  @doc """
+  Whether this workload has a network endpoint that CAN be attached to another network.
+
+  A container living in another container's namespace does not: the daemon refuses
+  `/networks/<n>/connect` on it with a 403. It is still proxy-mode with a domain — a
+  tunneled *arr app behind gluetun is exactly that — but its route is served by its
+  DONOR, which SpecBuilder multi-homes onto ingress at create time via
+  `bridge_networks`. There is nothing for an attach to do.
+  """
+  def attachable?(%Deployment{} = deployment) do
     not Netns.child?(deployment) and not Access.host_network_mode?(deployment)
   end
 
@@ -680,16 +678,21 @@ defmodule Homelab.Deployments do
     end)
   end
 
-  # A no-op for rows the caller already loaded — which is all of them on the common
-  # path, where re-fetching by id would query the same deployment three times.
-  defp with_associations(%Deployment{} = deployment),
+  @doc """
+  The deployment with the associations every access-mode predicate reads.
+
+  A no-op for rows the caller already loaded — which is all of them on the common path,
+  where re-fetching by id would query the same deployment three times.
+  """
+  def with_associations(%Deployment{} = deployment),
     do: Repo.preload(deployment, [:tenant, :app_template])
 
   @doc """
   Provisions a deployment (and any companion deployments) durably via the release
   saga instead of the imperative in-request path: plans the ordered steps and
   enqueues `ReleaseRunner`. Companions are deployed and awaited healthy before the
-  app, the app is awaited, then ingress is published (when the app has a domain).
+  app, the app is awaited, then the name and reachability steps run — each of which
+  skips itself at runtime when the deployment holds no name to publish.
 
   Both `app` and each companion must already exist as `:pending` deployment rows
   (their `env_overrides` carry any shared credentials). Returns `{:ok, release}`.
@@ -713,17 +716,10 @@ defmodule Homelab.Deployments do
     all_companions = companion_set(app, companions)
 
     steps =
-      ingress_proxy_steps(app) ++
-        Enum.flat_map(all_companions, fn companion ->
-          [
-            %{type: :dependency_container, resource_handle: %{"deployment_id" => companion.id}},
-            %{type: :await_health, resource_handle: %{"deployment_id" => companion.id}}
-          ] ++ datastore_grant_steps(app, companion)
-        end) ++
-        [
-          %{type: :app_container, resource_handle: %{}},
-          %{type: :await_health, resource_handle: %{}}
-        ] ++ ingress_steps(app)
+      prepare_steps() ++
+        Enum.flat_map(all_companions, &dependency_steps(app, &1)) ++
+        workload_steps() ++
+        ingress_steps()
 
     with :ok <- ensure_none_in_flight([app | all_companions]) do
       Releases.plan_release(app, steps)
@@ -775,27 +771,25 @@ defmodule Homelab.Deployments do
     |> Enum.uniq_by(& &1.id)
   end
 
-  # Does this deployment answer to a name of its OWN? Distinct from `routed?/1`, and
-  # the distinction is the netns donor: a name is a property of the deployment that
-  # holds it, while reachability is a property of the container Traefik can resolve,
-  # and for a tunneled stack those are two different deployments.
-  defp own_domain?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
+  @doc """
+  Does this deployment answer to a name of its OWN? Distinct from `routed?/1`, and
+  the distinction is the netns donor: a name is a property of the deployment that
+  holds it, while reachability is a property of the container Traefik can resolve,
+  and for a tunneled stack those are two different deployments.
+  """
+  def own_domain?(%Deployment{domain: domain}), do: is_binary(domain) and domain != ""
 
-  # Does traffic from the proxy reach this deployment? The ONE definition of "routed",
-  # because several step lists key off it and a second inlined copy is exactly how a
-  # plan ends up ensuring a proxy for a release that never publishes a route.
-  #
-  # A donor with routed children is routed even with no domain of its own — which is
-  # the ordinary gluetun shape, where every name in the stack belongs to a child. This
-  # is not a widening for its own sake: `SpecBuilder` already emits `traefik.enable` and
-  # multi-homes that donor onto the ingress network, because a child has no endpoint for
-  # Traefik to discover and its route resolves to the DONOR's address. Reading only
-  # `domain` planned no proxy and no ingress for the one topology that needs both.
-  #
-  # Matched to SpecBuilder's rule exactly, `Access.proxy_mode?` included: a donor whose
-  # children are `:service` or `:host` is not multi-homed there either, and publishing
-  # ingress for it would attach a container Traefik has no labels for.
-  defp routed?(%Deployment{} = deployment) do
+  @doc """
+  Does traffic from the proxy reach this deployment? The ONE definition of "routed",
+  read by `ReleaseFacts` and by anything else that has to agree with it.
+
+  A donor with routed children is routed even with no domain of its own — the ordinary
+  gluetun shape, where every name in the stack belongs to a child. `SpecBuilder` emits
+  `traefik.enable` and multi-homes such a donor onto the ingress network, because a
+  child has no endpoint for Traefik to discover and its route resolves to the DONOR's
+  address.
+  """
+  def routed?(%Deployment{} = deployment) do
     own_domain?(deployment) or carries_child_routes?(deployment)
   end
 
@@ -814,76 +808,74 @@ defmodule Homelab.Deployments do
   defp routes_via_donor?(%Deployment{} = child),
     do: own_domain?(child) and Access.proxy_mode?(Repo.preload(child, :app_template))
 
-  # The proxy has to exist before anything that routes through it. Planned at position
-  # 1, ahead of every container: it is a precondition of the route, not a product of
-  # it, and failing there means no container has been created yet. See
-  # `ReleaseSteps.EnsureIngressProxy` for why it has no compensation.
-  #
-  # Public (but undocumented) because `Adoption` is the third planner and lives in
-  # another module. It gets the SAME predicate rather than a fourth inlined copy — the
-  # one thing this whole seam exists to prevent.
+  # Every planner emits the same stages; each handler's `skip?/2` decides at runtime
+  # whether its step acts.
+
+  # The proxy has to exist before anything that routes through it, and the credentials
+  # before the containers that consume them. Public for `Adoption`, the third planner.
   @doc false
-  def ingress_proxy_steps(app) do
-    if routed?(app), do: [%{type: :ensure_ingress_proxy, resource_handle: %{}}], else: []
+  def prepare_steps do
+    [
+      %{stage: :prepare, type: :ensure_ingress_proxy, resource_handle: %{}},
+      %{stage: :prepare, type: :provision_credentials, resource_handle: %{}}
+    ]
   end
 
-  # Claiming a NAME: the local `Domain` row and the A records that resolve it. Keyed off
-  # `own_domain?/1`, not `routed?/1` — these belong to whichever deployment holds the
-  # domain, which for a tunneled stack is the child, not the donor carrying its route.
-  # `handle` targets them; an empty handle means the release's own deployment.
-  defp name_steps(deployment, handle \\ %{}) do
-    if own_domain?(deployment) do
-      [
-        %{type: :sync_domain, resource_handle: handle},
-        %{type: :publish_dns, resource_handle: handle}
-      ]
-    else
-      []
-    end
+  # One companion: bring it up, wait for it, then reconcile the app's credentials
+  # against it.
+  defp dependency_steps(%Deployment{} = app, %Deployment{} = companion) do
+    [
+      %{
+        stage: :dependencies,
+        type: :dependency_container,
+        resource_handle: %{"deployment_id" => companion.id}
+      },
+      %{
+        stage: :dependencies,
+        type: :await_health,
+        resource_handle: %{"deployment_id" => companion.id}
+      }
+    ] ++ datastore_grant_steps(app, companion)
+  end
+
+  # The release's own workload.
+  defp workload_steps do
+    [
+      %{stage: :workload, type: :app_container, resource_handle: %{}},
+      %{stage: :workload, type: :await_health, resource_handle: %{}}
+    ]
+  end
+
+  # One container living in the donor's namespace, created after the donor exists
+  # because the donor's container id is part of the child's create payload.
+  defp namespace_steps(%Deployment{} = child) do
+    [
+      %{
+        stage: :namespace,
+        type: :netns_child_container,
+        resource_handle: %{"deployment_id" => child.id}
+      },
+      %{
+        stage: :namespace,
+        type: :await_health,
+        resource_handle: %{"deployment_id" => child.id}
+      }
+    ]
+  end
+
+  # Claiming a NAME: the local `Domain` row and the A records that resolve it. `handle`
+  # targets them; an empty handle means the release's own deployment.
+  defp name_steps(handle \\ %{}) do
+    [
+      %{stage: :naming, type: :sync_domain, resource_handle: handle},
+      %{stage: :naming, type: :publish_dns, resource_handle: handle}
+    ]
   end
 
   # Granting REACHABILITY: attaching the workload to the shared ingress network so
-  # Traefik can resolve it.
-  #
-  # The condition is `publish_deployment/1`'s OWN runtime gate, reused verbatim rather
-  # than approximated, so that planned implies acted. Three shapes are proxy-routed by
-  # every other measure and still cannot be attached, and each was previously planned a
-  # step that fell through to `:ok` while recording `"published" => true`:
-  #
-  #   * a netns CHILD holding its own domain — the Sonarr-behind-gluetun shape. Its route
-  #     is real and is served by its DONOR, which `SpecBuilder` multi-homes onto ingress
-  #     via `bridge_networks` at create time. (`attachable?/1`)
-  #   * a `:host_network` deployment — a container in the host namespace has no endpoint
-  #     on any user-defined network. (`attachable?/1`)
-  #   * a `:service`/`:host` deployment carrying a stray domain — not proxy-routed at all.
-  #     (`ingress_published?/1`, via `Access.proxy_mode?/1`)
-  #
-  # A domainless donor with routed children is the fourth: genuinely routed, but it holds
-  # no name of its own, so `ingress_published?/1` is false and its ingress membership
-  # comes from `bridge_networks` too.
-  #
-  # Any predicate narrower than the runtime gate re-opens this, because the question
-  # "will this step do anything" has exactly one correct answer and it already lives in
-  # `publish_deployment/1`. A step that reports success for work it did not do is the
-  # defect class this tier exists to remove.
-  #
-  # `ensure_ingress_proxy` deliberately does NOT share this gate: the proxy must exist
-  # for a child's route whether or not the donor is itself attachable.
-  #
-  # Reusing the gate means reusing its PRELOAD too. `publish_deployment/1` opens with
-  # `Repo.preload(deployment, [:tenant, :app_template])` before it evaluates either
-  # predicate, because `Access.effective_exposure/1` reads the template. Restating the
-  # predicates without it gave `deploy_release/2` a precondition its pre-image (a plain
-  # `domain` field match) never had, and failed it by RAISING `KeyError :exposure_mode`
-  # on the caller's struct — for a struct `publish_deployment/1` itself accepts.
-  # `Repo.preload/2` on an already-loaded association is a no-op, so this costs nothing
-  # on the common path.
-  defp reachability_steps(deployment) do
-    deployment = with_associations(deployment)
-
-    if ingress_published?(deployment) and attachable?(deployment),
-      do: [%{type: :publish_ingress, resource_handle: %{}}],
-      else: []
+  # Traefik can resolve it. The condition is `PublishIngress.skip?/2`.
+  defp reachability_steps do
+    [%{stage: :reachability, type: :publish_ingress, resource_handle: %{}}]
   end
 
   # The tail of a routed release, all of it after the app is healthy: claim the name
@@ -894,67 +886,31 @@ defmodule Homelab.Deployments do
   # row. The verification is last because it is the only step that observes the result of
   # all three rather than performing one of them.
   #
-  # Public (but undocumented) for `Adoption`, for the reason on `ingress_proxy_steps/1`.
+  # Public (but undocumented) for `Adoption`, the third planner.
   @doc false
-  def ingress_steps(app) do
-    name_steps(app) ++ reachability_steps(app) ++ verify_steps(app)
+  def ingress_steps do
+    name_steps() ++ reachability_steps() ++ verify_steps()
   end
 
-  # Does the release end by confirming the URL works?
-  #
-  # Keyed off `own_domain?/1` rather than `routed?/1`, and the difference is the netns
-  # donor: a donor carries its CHILD's Traefik labels, so it is routed while having no
-  # URL of its own to check. The child holds the name, and the child's own
-  # `verify_public_url` step is what checks it — planned by `name_steps/2`'s sibling in
-  # `redeploy_netns_stack/2`, against the child.
-  #
-  # Without a name there is nothing to verify, and a step that reports "no domain" on
-  # every internal deployment is noise on the one view that should read as a checklist.
-  defp verify_steps(deployment) do
-    if own_domain?(deployment),
-      do: [%{type: :verify_public_url, resource_handle: %{}}],
-      else: []
+  # Does the URL answer? `handle` targets one deployment, so each netns child checks the
+  # name it holds rather than the donor that serves it.
+  defp verify_steps(handle \\ %{}) do
+    [%{stage: :verification, type: :verify_public_url, resource_handle: handle}]
   end
 
-  @doc false
   # Reconciles the app's credentials against a datastore companion, AFTER that companion
-  # is healthy and BEFORE the app starts.
-  #
-  # `EnsureDatastoreGrants` was registered, implemented and tested at the SQL level, and
-  # no planner ever emitted it — so `Grants.reconcile/1` had exactly one caller and that
-  # caller was unreachable. The bug it exists for is real and quiet: a datastore whose
-  # volume already holds data ignores MARIADB_USER/PASSWORD (the image's init runs once,
-  # on an empty data dir), so the app is handed a password the database never took. The
-  # release still reaches `:running`, because `AwaitHealth` only checks that the
-  # container is healthy — and the failure surfaces later as `Access denied` from inside
-  # the app.
-  #
-  # Only for engines `Grants` can actually drive; anything else is left alone rather
-  # than planned as a step that would fail.
-  #
-  # Note `ProvisionCredentials` is deliberately still unplanned. It is the other half of
-  # this seam, but the deploy wizard already generates and shares the credential pair by
-  # writing it into both deployments' `env_overrides` (`wire_db_secrets`). Planning
-  # `ProvisionCredentials` as well would generate a SECOND, different password and hand
-  # the two sides mismatched values — worse than the gap it would close.
+  # is healthy and BEFORE the app starts. See `Datastore.Grants`.
   defp datastore_grant_steps(%Deployment{} = app, %Deployment{} = companion) do
-    companion = Repo.preload(companion, :app_template)
-
-    case Homelab.Deployments.Datastore.Grants.engine_for_image(companion.app_template.image) do
-      {:ok, _engine} ->
-        [
-          %{
-            type: :ensure_datastore_grants,
-            resource_handle: %{
-              "deployment_id" => companion.id,
-              "app_deployment_id" => app.id
-            }
-          }
-        ]
-
-      {:error, _unsupported} ->
-        []
-    end
+    [
+      %{
+        stage: :dependencies,
+        type: :ensure_datastore_grants,
+        resource_handle: %{
+          "deployment_id" => companion.id,
+          "app_deployment_id" => app.id
+        }
+      }
+    ]
   end
 
   # A netns child's donor is a dependency in the strictest sense: the child's create
@@ -1001,45 +957,20 @@ defmodule Homelab.Deployments do
         parent -> parent
       end
 
-    # Children carry their templates: `routed?/1` reads each child's effective exposure
-    # to decide whether the donor needs ingress at all, and a shallow preload would make
-    # that one query per child.
+    # Children carry their templates: `carries_child_routes?/1` reads each child's
+    # effective exposure, and a shallow preload would make that one query per child.
     donor =
       Repo.preload(donor, [:tenant, :app_template, network_children: [:app_template, :tenant]])
 
     children = Netns.children(donor)
 
-    child_steps =
-      Enum.flat_map(children, fn child ->
-        [
-          %{type: :netns_child_container, resource_handle: %{"deployment_id" => child.id}},
-          %{type: :await_health, resource_handle: %{"deployment_id" => child.id}}
-        ]
-      end)
-
-    # Each child's OWN name, published after that child is healthy.
-    #
-    # These used to be absent entirely: the routing steps all carried an empty handle,
-    # so they targeted the donor, and a child in a redeployed stack got no `Domain` row
-    # and no A record — while the same child deployed standalone through
-    # `deploy_release/2` got both. That gap sat on the operation most likely to need
-    # them: a stack redeploy is usually TRIGGERED by a child's route changing, since a
-    # child's Traefik labels live on the donor. So the one path that moves a child's
-    # name was the one that never republished it.
+    # Each child's OWN name and URL: the donor carries its Traefik labels, but the name
+    # being served belongs to the child.
     child_name_steps =
-      Enum.flat_map(children, &name_steps(&1, %{"deployment_id" => &1.id}))
+      Enum.flat_map(children, &name_steps(%{"deployment_id" => &1.id}))
 
-    # A tunneled child is the case where "routed" and "holds a URL" come apart: the
-    # DONOR carries the child's Traefik labels and so gets `ingress_steps/1`, while the
-    # name being served belongs to the child. Verifying the donor would check a URL it
-    # does not have, so each child that holds a name checks its own — targeted by handle,
-    # the same way its Domain row and A records are.
     child_verify_steps =
-      Enum.flat_map(children, fn child ->
-        if own_domain?(child),
-          do: [%{type: :verify_public_url, resource_handle: %{"deployment_id" => child.id}}],
-          else: []
-      end)
+      Enum.flat_map(children, &verify_steps(%{"deployment_id" => &1.id}))
 
     # Ingress LAST, after the children exist.
     #
@@ -1050,11 +981,13 @@ defmodule Homelab.Deployments do
     # names that had been working a moment earlier. The proxy still goes first: it is a
     # precondition, not an advertisement.
     steps =
-      ingress_proxy_steps(donor) ++
-        [
-          %{type: :app_container, resource_handle: %{}},
-          %{type: :await_health, resource_handle: %{}}
-        ] ++ child_steps ++ child_name_steps ++ ingress_steps(donor) ++ child_verify_steps
+      prepare_steps() ++
+        workload_steps() ++
+        Enum.flat_map(children, &namespace_steps/1) ++
+        name_steps() ++
+        child_name_steps ++
+        reachability_steps() ++
+        verify_steps() ++ child_verify_steps
 
     # Settled first, for the reason on `reconverge_release/1`: the newest plan wins, and a
     # refusal must not have reset the donor and its children on the way to being refused.
@@ -1083,73 +1016,54 @@ defmodule Homelab.Deployments do
   the one-active-per-deployment constraint would reject a new plan, and
   re-driving a live release would race the running saga. When there is no prior
   release, deploys the single deployment standalone.
+
+  A member of a network-namespace group goes round as a GROUP, through
+  `redeploy_netns_stack/1`. Re-creating any member mints a container id the others are
+  pinned to, so re-running a donor alone leaves its children naming a container that no
+  longer exists, and re-running a child alone does the same to its siblings.
   """
   def redeploy(%Deployment{} = deployment) do
-    if netns_stack_member?(deployment) do
-      redeploy_netns_stack(deployment, plan: %{"kind" => "redeploy"})
-    else
-      redeploy_standalone(deployment)
+    release = Releases.driving_release(deployment.id)
+
+    cond do
+      release && not Release.terminal?(release) -> {:error, :release_active}
+      netns_member?(deployment) -> redeploy_netns_stack(deployment)
+      is_nil(release) -> deploy_standalone(deployment)
+      true -> replay(release)
     end
   end
 
-  # A member of a network-namespace group is re-driven as a GROUP, whichever member the
-  # operator pressed the button on.
-  #
-  # Without this, "Re-run deploy" on a tunneled app did the one thing the whole netns
-  # cascade exists to prevent. `driving_release/1` resolves a stack release from either
-  # end, so pressing it on Sonarr returned the release anchored on gluetun; the branch
-  # below then took `release.deployment_id` as the app — the DONOR — and looked for
-  # companions among `:dependency_container` steps, of which a stack release has none
-  # (its children are `:netns_child_container`). So it planned a release that re-created
-  # gluetun ALONE.
-  #
-  # Which is worse than doing nothing. Re-creating the donor mints a new container id,
-  # and every child's `NetworkMode` still names the old one — so the button whose job is
-  # to un-stick a stack left every app in it unstartable, and the release it planned
-  # reached `:running` having deployed nothing the operator asked about.
-  #
-  # The children are deliberately NOT folded into the companion list as a fix: a
-  # companion is deployed BEFORE the app, and a netns child must be created AFTER the
-  # donor whose container id it names. They are different orderings, which is why
-  # `redeploy_netns_stack/2` exists rather than a longer companion list.
-  defp netns_stack_member?(%Deployment{network_parent_id: parent_id}) when not is_nil(parent_id),
-    do: true
+  defp netns_member?(%Deployment{} = deployment),
+    do: Netns.child?(deployment) or Netns.donor?(deployment)
 
-  defp netns_stack_member?(%Deployment{} = deployment), do: Netns.donor?(deployment)
+  defp deploy_standalone(deployment) do
+    with {:ok, app} <- reset_to_pending(deployment) do
+      deploy_release(app)
+    end
+  end
 
-  defp redeploy_standalone(%Deployment{} = deployment) do
-    case Releases.driving_release(deployment.id) do
-      nil ->
-        with {:ok, app} <- reset_to_pending(deployment) do
-          deploy_release(app)
-        end
+  # The same app and companion set the prior release drove, reset and planned afresh.
+  defp replay(%Release{} = release) do
+    app = get_deployment!(release.deployment_id)
 
-      %{__struct__: Release} = release ->
-        if Release.terminal?(release) do
-          app = get_deployment!(release.deployment_id)
+    companions =
+      release.steps
+      |> Enum.filter(&(&1.type == :dependency_container))
+      |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.map(&get_deployment!/1)
 
-          companions =
-            release.steps
-            |> Enum.filter(&(&1.type == :dependency_container))
-            |> Enum.map(&get_in(&1.resource_handle, ["deployment_id"]))
-            |> Enum.reject(&is_nil/1)
-            |> Enum.uniq()
-            |> Enum.map(&get_deployment!/1)
-
-          with {:ok, app} <- reset_to_pending(app),
-               {:ok, companions} <- reset_all_to_pending(companions) do
-            deploy_release(app, companions)
-          end
-        else
-          {:error, :release_active}
-        end
+    with {:ok, app} <- reset_to_pending(app),
+         {:ok, companions} <- reset_all_to_pending(companions) do
+      deploy_release(app, companions)
     end
   end
 
   @doc """
   Re-drives ONE deployment through the release saga after its configuration changed:
-  plans `ingress_proxy → app_container → await_health → ingress` against the row as it
-  now stands, resets it to `:pending`, and enqueues `ReleaseRunner`.
+  plans the lifecycle backbone with no companions against the row as it now stands,
+  resets it to `:pending`, and enqueues `ReleaseRunner`.
 
   This is what a config save runs. It replaces `recreate_deployment/1` on that path,
   which called `start_deployment/1` synchronously inside the LiveView process — the
@@ -1169,8 +1083,8 @@ defmodule Homelab.Deployments do
   minting a new container id and taking the datastore down for a change that never
   touched it.
 
-  So the step list is `plan_deploy_release/3`'s tail with the companion block omitted.
-  The ingress steps ARE included: a config save is the operation most likely to move a
+  So the step list is `plan_deploy_release/3`'s with the companion block omitted. The
+  ingress steps ARE included: a config save is the operation most likely to move a
   route, and the labels that serve it live on the container this release replaces.
 
   A companion that must come along is not silently skipped — it is refused. A netns
@@ -1191,12 +1105,7 @@ defmodule Homelab.Deployments do
   def reconverge_release(%Deployment{} = deployment) do
     deployment = with_associations(deployment)
 
-    steps =
-      ingress_proxy_steps(deployment) ++
-        [
-          %{type: :app_container, resource_handle: %{}},
-          %{type: :await_health, resource_handle: %{}}
-        ] ++ ingress_steps(deployment)
+    steps = prepare_steps() ++ workload_steps() ++ ingress_steps()
 
     # Settled BEFORE the reset, so a refused save leaves the row exactly as the caller
     # persisted it. Resetting first would clear `external_id` on a deployment another

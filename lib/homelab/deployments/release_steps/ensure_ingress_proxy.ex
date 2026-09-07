@@ -47,8 +47,8 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   argument:
 
     * The attach is genuinely fail-closed, on every topology. Where `publish_ingress`
-      is planned it happens there; where it is NOT planned (netns donor, netns child,
-      `:host_network`) it still happens at container-create time via
+      runs it happens there; where it skips (netns donor, netns child, `:host_network`)
+      it still happens at container-create time via
       `DockerEngine.maybe_connect_routing_network/2`, which returns
       `{:network_attach_failed, _, _}` rather than swallowing it.
     * So "the workload is on the ingress network" is guaranteed. "Something is
@@ -58,9 +58,9 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   is why the failure is recorded rather than merely logged: to the ActivityLog, to
   `resource_handle` as `"ingress_proxy" => "unavailable"` with the reason, and — since
   neither of those reaches the operator, one being a 100-entry ring buffer and the
-  other rendered nowhere — onto the step's own `error_message`, which the release card
-  renders underneath the step. The release is green and says why the route may not
-  resolve.
+  other rendered nowhere — onto the step's own `reason_message`, typed `"note"`, which
+  the release card renders underneath the step. The release is green and says why the
+  route may not resolve.
 
   Not failing the release is still right: `{:error, :dns_token_missing}` is the
   expected-normal return for a LAN-only install and for anyone running Traefik from
@@ -80,8 +80,19 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureIngressProxy do
   require Logger
 
   alias Homelab.Deployments.Releases
+  alias Homelab.Deployments.ReleaseSteps.Conditions
   alias Homelab.Infrastructure
   alias Homelab.Services.ActivityLog
+
+  # Wider than `publish_ingress`'s gate on purpose: the proxy must exist for a child's
+  # route whether or not the donor is itself attachable.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.any(ctx.facts, [
+      {:own_domain?, "it holds no domain"},
+      {:carries_child_routes?, "no routed child publishes through it"}
+    ])
+  end
 
   @impl true
   def run(step, ctx) do

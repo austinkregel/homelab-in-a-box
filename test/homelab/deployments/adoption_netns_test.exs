@@ -153,6 +153,8 @@ defmodule Homelab.Deployments.AdoptionNetnsTest do
       assert wait.resource_handle["timeout_ms"] > 120_000
 
       assert Enum.take_while(types, &(&1 != :await_health)) == [
+               :ensure_ingress_proxy,
+               :provision_credentials,
                :backup_verify,
                :quiesce_old,
                :migrate_volume,

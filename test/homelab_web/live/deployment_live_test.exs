@@ -118,6 +118,63 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert render(view) =~ "Completed"
     end
 
+    # The same stages in the same order whichever planner built the release, with the
+    # steps that did not apply saying why in place.
+    test "releases tab groups steps by stage and shows a skip reason", %{
+      conn: conn,
+      deployment: dep
+    } do
+      alias Homelab.Deployments.Releases
+
+      {:ok, release} =
+        Releases.plan_release(dep, [
+          %{stage: :workload, type: :app_container},
+          %{stage: :naming, type: :publish_dns}
+        ])
+
+      dns = Enum.find(release.steps, &(&1.type == :publish_dns))
+
+      {:ok, _} =
+        Releases.transition_step(dns, :skipped, [:pending],
+          reason: {"skipped", "it holds no domain to resolve"}
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      assert html =~ "Workload"
+      assert html =~ "Naming"
+      assert html =~ "Skipped"
+      assert html =~ "it holds no domain to resolve"
+    end
+
+    test "a note on a green step renders as a warning, not as a failure", %{
+      conn: conn,
+      deployment: dep
+    } do
+      alias Homelab.Deployments.Releases
+
+      {:ok, release} =
+        Releases.plan_release(dep, [
+          %{stage: :prepare, type: :ensure_ingress_proxy},
+          %{stage: :workload, type: :app_container}
+        ])
+
+      [proxy, container] = Enum.sort_by(release.steps, & &1.position)
+
+      :ok = Releases.record_step_note(proxy, "Traefik not ensured: dns_token_missing")
+      {:ok, _} = Releases.transition_step(proxy, :completed, [:pending])
+
+      {:ok, _} =
+        Releases.transition_step(container, :failed, [:pending], reason: {"error", "boom"})
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      assert has_element?(view, "p.text-warning", "Traefik not ensured")
+      assert has_element?(view, "p.text-error", "boom")
+    end
+
     test "companion deployment surfaces the app's driving release", %{
       conn: conn,
       tenant: tenant,
@@ -2144,7 +2201,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
       html = render_click(view, "switch_tab", %{"tab" => "overview"})
 
       refute html =~ "Re-run deploy"
-      assert html =~ "Container created", "the button should name the step the release is on"
+
+      # Every release opens with the prepare stage, so that is the step it is on.
+      assert html =~ "Reverse proxy running", "the button should name the step the release is on"
       assert has_element?(view, "button[phx-click=\"redeploy\"][disabled]")
     end
   end

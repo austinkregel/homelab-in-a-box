@@ -250,8 +250,11 @@ defmodule Homelab.Services.Reconciler do
   #   * Not leased, like every other sweep.
   defp adopt_stranded_pending(leased) do
     Deployments.list_stranded_pending(stranded_before())
-    |> Enum.reject(&MapSet.member?(leased, &1.id))
-    |> Enum.reject(&Releases.driving_release(&1.id))
+    # `or` short-circuits, so the lease check (a MapSet lookup) runs before the release
+    # lookup (a query) and a leased deployment costs nothing to skip.
+    |> Enum.reject(
+      &(MapSet.member?(leased, &1.id) or not is_nil(Releases.driving_release(&1.id)))
+    )
     |> Enum.each(fn deployment ->
       case Deployments.redeploy(deployment) do
         {:ok, _release} ->

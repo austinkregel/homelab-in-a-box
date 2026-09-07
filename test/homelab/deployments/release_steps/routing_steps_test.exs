@@ -76,6 +76,18 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       assert handle["error"] =~ "dns_token_missing"
     end
 
+    test "the note is typed, so a green step's message is not read as a failure" do
+      app = routed_deployment("noted.example.test")
+      {_release, step} = persisted_step(app, :ensure_ingress_proxy)
+
+      assert {:ok, _handle} = EnsureIngressProxy.run(step, ctx(app))
+
+      noted = reread(step)
+      assert noted.reason_type == "note"
+      assert noted.reason_message =~ "Traefik not ensured"
+      assert noted.status == :pending
+    end
+
     # Traefik is a shared singleton: every routed deployment on the host resolves
     # through the same container. Compensating this step would sever every OTHER
     # deployment's route because one release rolled back.

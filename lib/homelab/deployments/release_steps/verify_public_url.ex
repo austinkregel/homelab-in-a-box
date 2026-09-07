@@ -55,9 +55,17 @@ defmodule Homelab.Deployments.ReleaseSteps.VerifyPublicUrl do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.ReleaseSteps.Conditions
 
   @default_timeout_ms 90_000
   @default_interval_ms 3_000
+
+  # A donor carries its CHILD's Traefik labels, so it is routed while having no URL of
+  # its own; each child verifies its own name.
+  @impl true
+  def skip?(_step, ctx) do
+    Conditions.all(ctx.facts, [{:own_domain?, "it holds no domain to answer at"}])
+  end
 
   @impl true
   def run(step, ctx) do

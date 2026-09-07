@@ -39,6 +39,29 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  # A handler that always declines. Reports the same way `TestHandler` does, so a test
+  # can prove it neither ran nor was compensated.
+  defmodule SkippingHandler do
+    @behaviour Homelab.Deployments.ReleaseStep.Handler
+
+    @impl true
+    def skip?(_step, _ctx), do: {:skip, "nothing for this deployment to do"}
+
+    @impl true
+    def run(step, _ctx) do
+      send(pid(), {:run, step.position, step.type})
+      {:ok, %{}}
+    end
+
+    @impl true
+    def compensate(step, _ctx) do
+      send(pid(), {:compensate, step.position, step.type})
+      :ok
+    end
+
+    defp pid, do: Application.get_env(:homelab, :test_release_handler).pid
+  end
+
   setup context do
     # Route every step type through the controllable handler. RESTORE (not delete)
     # the original registry on exit, or other tests (e.g. the greenfield release
@@ -94,6 +117,84 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
     end
   end
 
+  defp skipping_registry do
+    Application.put_env(:homelab, :release_step_handlers, %{
+      default: TestHandler,
+      publish_dns: SkippingHandler
+    })
+  end
+
+  describe "skipped steps" do
+    test "a handler that declines records the reason instead of running" do
+      skipping_registry()
+      release = plan(insert(:deployment), [:app_container, :publish_dns, :publish_ingress])
+
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      refute_received {:run, 2, :publish_dns}
+
+      release = Releases.get_release(release.id)
+      assert release.status == :running
+
+      skipped = Enum.find(release.steps, &(&1.type == :publish_dns))
+      assert skipped.status == :skipped
+      assert skipped.reason_type == "skipped"
+      assert skipped.reason_message == "nothing for this deployment to do"
+    end
+
+    # `skip?/2` is optional, so a handler that performs work unconditionally implements
+    # none. `TestHandler` is one.
+    test "a handler that implements no skip?/2 runs every step" do
+      release = plan(insert(:deployment), [:app_container, :publish_dns])
+
+      refute function_exported?(TestHandler, :skip?, 2)
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      assert_received {:run, 1, :app_container}
+      assert_received {:run, 2, :publish_dns}
+
+      release = Releases.get_release(release.id)
+      assert Enum.all?(release.steps, &(&1.status == :completed))
+    end
+
+    # The reason the dispatch asks `Code.ensure_loaded?/1` first: a module that has not
+    # been loaded yet exports nothing, and its condition would be read as "run".
+    test "a handler not yet loaded is still asked whether to skip" do
+      release = plan(insert(:deployment), [:app_container, :publish_dns])
+
+      Application.put_env(:homelab, :release_step_handlers, %{
+        default: TestHandler,
+        publish_dns: Homelab.Support.AlwaysSkipsHandler
+      })
+
+      :code.purge(Homelab.Support.AlwaysSkipsHandler)
+      :code.delete(Homelab.Support.AlwaysSkipsHandler)
+      refute function_exported?(Homelab.Support.AlwaysSkipsHandler, :skip?, 2)
+
+      assert :ok = ReleaseRunner.run(release.id, owner: "t1")
+
+      skipped = Enum.find(Releases.get_release(release.id).steps, &(&1.type == :publish_dns))
+      assert skipped.status == :skipped
+      assert skipped.reason_message == "this handler never has anything to do"
+    end
+
+    # A skipped `publish_dns` that got compensated would delete a DNS record the
+    # release never created.
+    @tag fail_at: 3
+    test "a rollback walks past a skipped step" do
+      skipping_registry()
+      release = plan(insert(:deployment), [:app_container, :publish_dns, :publish_ingress])
+
+      assert {:cancel, {:rolled_back, _}} = ReleaseRunner.run(release.id, owner: "t1")
+
+      assert_received {:compensate, 1, :app_container}
+      refute_received {:compensate, 2, :publish_dns}
+
+      release = Releases.get_release(release.id)
+      assert Enum.find(release.steps, &(&1.type == :publish_dns)).status == :skipped
+    end
+  end
+
   describe "advisory steps" do
     # `:verify_public_url` observes rather than performs, and everything it waits on is
     # outside the deploy — a DNS TTL at the provider, an ACME order, a resolver cache.
@@ -132,7 +233,7 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       # And the check that did not pass says so, in place, with a reason.
       verify = Enum.find(release.steps, &(&1.type == :verify_public_url))
       assert verify.status == :failed
-      assert verify.error_message =~ "url_unreachable"
+      assert verify.reason_message =~ "url_unreachable"
 
       # Nothing was undone: the steps before it are still completed.
       assert Enum.find(release.steps, &(&1.type == :app_container)).status == :completed

@@ -5,6 +5,7 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.Readiness
+  alias Homelab.Deployments.ReleaseStep
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.VolumeSpec
@@ -17,6 +18,11 @@ defmodule HomelabWeb.DeploymentLive do
   alias HomelabWeb.SecretReveal
 
   @log_poll_interval 3_000
+
+  # Both re-run refusals mean the same thing to the operator: something else is driving
+  # a deployment this would touch.
+  @release_in_flight_flash "A release is already in flight for this stack. " <>
+                             "Wait for it to finish before re-running."
 
   @impl true
   def mount(_params, _session, socket) do
@@ -854,12 +860,10 @@ defmodule HomelabWeb.DeploymentLive do
          |> put_flash(:info, "Re-running the deployment — watch the Releases tab.")}
 
       {:error, :release_active} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "A release is already in flight for this stack. Wait for it to finish before re-running."
-         )}
+        {:noreply, put_flash(socket, :error, @release_in_flight_flash)}
+
+      {:error, {:release_in_flight, _id}} ->
+        {:noreply, put_flash(socket, :error, @release_in_flight_flash)}
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Could not start a new release.")}
@@ -1059,7 +1063,7 @@ defmodule HomelabWeb.DeploymentLive do
 
           <%!-- Why the stack is stuck: a companion's failure lives on the app's
                 release, so surface the failed step here even when this row has no
-                error_message of its own. --%>
+                error of its own. --%>
           <div
             :if={failed_step(@driving_release)}
             class="rounded-lg bg-error/10 border border-error/20 px-4 py-3 flex items-start gap-3"
@@ -1070,10 +1074,10 @@ defmodule HomelabWeb.DeploymentLive do
                 Deploy stopped at "{humanize_step(failed_step(@driving_release).type)}"
               </p>
               <p
-                :if={failed_step(@driving_release).error_message}
+                :if={failed_step(@driving_release).reason_message}
                 class="text-sm text-error/80 mt-0.5 font-mono break-words"
               >
-                {failed_step(@driving_release).error_message}
+                {failed_step(@driving_release).reason_message}
               </p>
               <p class="text-xs text-error/60 mt-1">
                 See the Releases tab for every step, or use "Re-run deploy" to try again.
@@ -4339,7 +4343,7 @@ defmodule HomelabWeb.DeploymentLive do
   # to the release's own status once every step is done but the saga has not settled.
   defp release_progress(%Homelab.Deployments.Release{} = release) do
     steps = Enum.sort_by(release.steps, & &1.position)
-    done = Enum.count(steps, &(&1.status == :completed))
+    done = Enum.count(steps, &(&1.status in [:completed, :skipped]))
 
     case next_pending_or_running(steps) do
       nil -> format_status(release.status)
@@ -4380,6 +4384,43 @@ defmodule HomelabWeb.DeploymentLive do
   defp humanize_step(:adopt_container), do: "Container adopted"
   defp humanize_step(:verify_integrity), do: "Copied data verified"
   defp humanize_step(type), do: type |> to_string() |> String.replace("_", " ")
+
+  # The steps in lifecycle order, grouped by stage. Releases planned before stages
+  # existed carry none, and render as one flat list.
+  defp staged_steps(release) do
+    release.steps
+    |> Enum.sort_by(& &1.position)
+    |> Enum.group_by(& &1.stage)
+    |> in_stage_order()
+  end
+
+  defp in_stage_order(%{nil => steps} = grouped) when map_size(grouped) == 1,
+    do: [{nil, steps}]
+
+  defp in_stage_order(grouped),
+    do: Enum.flat_map(ReleaseStep.stages() ++ [nil], &stage_group(grouped, &1))
+
+  defp stage_group(grouped, stage) do
+    case grouped[stage] do
+      nil -> []
+      steps -> [{stage, steps}]
+    end
+  end
+
+  defp stage_label(:prepare), do: "Prepare"
+  defp stage_label(:dependencies), do: "Dependencies"
+  defp stage_label(:workload), do: "Workload"
+  defp stage_label(:namespace), do: "Shared network namespace"
+  defp stage_label(:naming), do: "Naming"
+  defp stage_label(:reachability), do: "Reachability"
+  defp stage_label(:verification), do: "Verification"
+  defp stage_label(_stage), do: "Steps"
+
+  # A step's message is styled by what KIND of message it is: a failure, a condition
+  # that did not hold, or a note from a step that succeeded anyway.
+  defp reason_classes("error"), do: "text-error"
+  defp reason_classes("note"), do: "text-warning"
+  defp reason_classes(_skipped), do: "text-base-content/50"
 
   # What KIND of event this release was, which its steps cannot say: a config save and a
   # first deploy of an app with no companions plan an identical list. Only the planner
@@ -4432,24 +4473,32 @@ defmodule HomelabWeb.DeploymentLive do
         {@release.error_message}
       </div>
 
-      <ul class="divide-y divide-base-content/5">
-        <li
-          :for={step <- Enum.sort_by(@release.steps, & &1.position)}
-          class="flex items-start gap-3 px-4 py-2.5"
+      <div :for={{stage, steps} <- staged_steps(@release)}>
+        <p
+          :if={stage}
+          class="px-4 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-base-content/40"
         >
-          <% {icon, icon_class} = step_icon(step.status) %>
-          <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
-          <div class="min-w-0">
-            <p class="text-sm text-base-content">
-              {humanize_step(step.type)}
-              <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
-            </p>
-            <p :if={step.error_message} class="text-xs text-error mt-0.5 break-words">
-              {step.error_message}
-            </p>
-          </div>
-        </li>
-      </ul>
+          {stage_label(stage)}
+        </p>
+        <ul class="divide-y divide-base-content/5">
+          <li :for={step <- steps} class="flex items-start gap-3 px-4 py-2.5">
+            <% {icon, icon_class} = step_icon(step.status) %>
+            <.icon name={icon} class={["size-4 mt-0.5 shrink-0", icon_class]} />
+            <div class="min-w-0">
+              <p class="text-sm text-base-content">
+                {humanize_step(step.type)}
+                <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
+              </p>
+              <p
+                :if={step.reason_message}
+                class={["text-xs mt-0.5 break-words", reason_classes(step.reason_type)]}
+              >
+                {step.reason_message}
+              </p>
+            </div>
+          </li>
+        </ul>
+      </div>
     </div>
     """
   end

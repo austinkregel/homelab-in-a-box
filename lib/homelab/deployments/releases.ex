@@ -356,14 +356,14 @@ defmodule Homelab.Deployments.Releases do
   end
 
   @doc """
-  Compare-and-set a step status. `opts` may carry `:error` and `:handle` (stored
-  in `resource_handle`). Returns `{:ok, step}` or `{:noop, step}`.
+  Compare-and-set a step status. `opts` may carry `:reason` (`{type, message}`) and
+  `:handle` (stored in `resource_handle`). Returns `{:ok, step}` or `{:noop, step}`.
   """
   def transition_step(%ReleaseStep{id: id}, to, from_states, opts \\ [])
       when is_atom(to) and is_list(from_states) do
     set =
       [status: to, updated_at: naive_now()]
-      |> put_kw(:error_message, Keyword.get(opts, :error))
+      |> put_reason(Keyword.get(opts, :reason))
       |> put_fetch(:resource_handle, Keyword.fetch(opts, :handle))
 
     {count, _} =
@@ -428,11 +428,11 @@ defmodule Homelab.Deployments.Releases do
   but a green step with no message is how a release reports `:running` for a route
   nothing is proxying.
 
-  It writes `error_message` because that is the field the release card renders under a
-  step. A second "warning" column would be the tidier schema and would show up nowhere.
+  Typed `"note"`, so the release card can render it as what it is rather than as a
+  failure on a step that succeeded.
 
   Safe against the runner's completion compare-and-set, which sets `status` and
-  `resource_handle` and passes no `:error` — `put_kw/3` skips a nil, so the note
+  `resource_handle` and passes no `:reason` — `put_reason/2` skips a nil, so the note
   survives the step being completed.
 
   Like `record_step_handle/2`: not a CAS (the step is `:running` and owned by this
@@ -444,7 +444,7 @@ defmodule Homelab.Deployments.Releases do
   def record_step_note(%ReleaseStep{id: id}, note) when is_binary(note) do
     ReleaseStep
     |> where([s], s.id == ^id)
-    |> Repo.update_all(set: [error_message: note, updated_at: naive_now()])
+    |> Repo.update_all(set: [reason_type: "note", reason_message: note, updated_at: naive_now()])
 
     :ok
   end
@@ -619,6 +619,11 @@ defmodule Homelab.Deployments.Releases do
 
   defp put_kw(set, _key, nil), do: set
   defp put_kw(set, key, value), do: Keyword.put(set, key, value)
+
+  defp put_reason(set, {type, message}) when is_binary(message),
+    do: Keyword.merge(set, reason_type: to_string(type), reason_message: message)
+
+  defp put_reason(set, _reason), do: set
 
   defp put_fetch(set, key, {:ok, value}), do: Keyword.put(set, key, value)
   defp put_fetch(set, _key, :error), do: set

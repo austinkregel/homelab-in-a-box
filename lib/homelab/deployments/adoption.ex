@@ -176,13 +176,17 @@ defmodule Homelab.Deployments.Adoption do
   # records its own `run/2` CREATED, never one it merely upserted over. A name the
   # operator was already resolving survives the rollback, exactly as `SyncDomain` already
   # refuses to delete a `Domain` row it only reclaimed.
-  defp steps(service, donor, deployment) do
-    Deployments.ingress_proxy_steps(deployment) ++
-      service.phase1 ++
+  # An adoption's cutover IS its workload stage: the phases replace the container the
+  # deployment is served by.
+  defp steps(service, donor, _deployment) do
+    Deployments.prepare_steps() ++
+      staged(service.phase1, :workload) ++
       donor_barrier(donor) ++
-      service.phase2 ++
-      Deployments.ingress_steps(deployment)
+      staged(service.phase2, :workload) ++
+      Deployments.ingress_steps()
   end
+
+  defp staged(steps, stage), do: Enum.map(steps, &Map.put(&1, :stage, stage))
 
   defp donor_barrier(nil), do: []
 
@@ -202,6 +206,7 @@ defmodule Homelab.Deployments.Adoption do
   defp donor_barrier(donor) do
     [
       %{
+        stage: :dependencies,
         type: :await_health,
         resource_handle: %{
           "deployment_id" => donor.id,
