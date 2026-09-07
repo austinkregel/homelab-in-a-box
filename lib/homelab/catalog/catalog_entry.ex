@@ -19,6 +19,9 @@ defmodule Homelab.Catalog.CatalogEntry do
     required_volumes: [],
     default_env: %{},
     required_env: [],
+    # Which of those are required only in some modes, plus per-key form metadata. A flat
+    # list cannot say "the WireGuard keys, but only when VPN_TYPE is wireguard".
+    env_schema: %{},
     # Kernel privileges the app needs to work AT ALL, and whether it can host other
     # containers' networking. A VPN client with neither is not a degraded VPN client —
     # it cannot open a tunnel, so listing it without these is listing something that

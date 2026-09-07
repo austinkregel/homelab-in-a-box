@@ -1726,10 +1726,55 @@
       "VPN_TYPE": "wireguard",
       "WIREGUARD_PRIVATE_KEY": "",
       "WIREGUARD_ADDRESSES": "",
+      "OPENVPN_USER": "",
+      "OPENVPN_PASSWORD": "",
+      "OPENVPN_CUSTOM_CONFIG": "",
       "SERVER_COUNTRIES": "",
       "TZ": "UTC"
     },
-    "required_env": ["VPN_SERVICE_PROVIDER", "WIREGUARD_PRIVATE_KEY", "WIREGUARD_ADDRESSES"]
+    "required_env": ["VPN_SERVICE_PROVIDER"],
+    "env_schema": {
+      "VPN_SERVICE_PROVIDER": {
+        "label": "VPN provider",
+        "description": "The provider whose servers to dial, lowercase as gluetun spells it (mullvad, nordvpn, protonvpn...). Use \"custom\" when you are supplying your own OpenVPN config.",
+        "required": true
+      },
+      "VPN_TYPE": {
+        "label": "Tunnel protocol",
+        "description": "Which protocol to open the tunnel with. Each one needs its own credentials below.",
+        "enum": ["wireguard", "openvpn"],
+        "required": true
+      },
+      "WIREGUARD_PRIVATE_KEY": {
+        "label": "WireGuard private key",
+        "description": "The PrivateKey line from the WireGuard config your provider issued.",
+        "secret": true,
+        "required_when": {"VPN_TYPE": "wireguard"}
+      },
+      "WIREGUARD_ADDRESSES": {
+        "label": "WireGuard address",
+        "description": "The Address line from that same config, including the mask (10.64.0.2/32).",
+        "required_when": {"VPN_TYPE": "wireguard"}
+      },
+      "OPENVPN_USER": {
+        "label": "OpenVPN username",
+        "description": "Your provider's OpenVPN username, which is often not your account login.",
+        "required_when": {"VPN_TYPE": "openvpn"}
+      },
+      "OPENVPN_PASSWORD": {
+        "label": "OpenVPN password",
+        "secret": true,
+        "required_when": {"VPN_TYPE": "openvpn"}
+      },
+      "OPENVPN_CUSTOM_CONFIG": {
+        "label": "Custom OpenVPN config path",
+        "description": "Path INSIDE the container to your own .ovpn file. Only honoured with VPN_SERVICE_PROVIDER set to \"custom\": under any other provider gluetun ignores this file's remote line and dials its own server list instead, and nothing logs that it did."
+      },
+      "SERVER_COUNTRIES": {
+        "label": "Server countries",
+        "description": "Comma-separated countries to pick an exit server from. Blank lets the provider choose."
+      }
+    }
   },
   {
     "name": "Technitium DNS",

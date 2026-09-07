@@ -9,6 +9,7 @@ defmodule Homelab.Catalogs.Curated do
   @behaviour Homelab.Behaviours.ApplicationCatalog
 
   alias Homelab.Catalog.CatalogEntry
+  alias Homelab.Catalog.EnvSchema
   alias Homelab.Deployments.RuntimeSpec
 
   @cache_key {__MODULE__, :entries}
@@ -91,6 +92,7 @@ defmodule Homelab.Catalogs.Curated do
       required_volumes: parse_volumes(item["volumes"] || []),
       default_env: item["env"] || %{},
       required_env: item["required_env"] || [],
+      env_schema: EnvSchema.parse(item["env_schema"]),
       # Normalized through RuntimeSpec so the JSON can use whichever spelling reads
       # best — `NET_ADMIN` or `CAP_NET_ADMIN`, `"/dev/net/tun"` or the long form.
       capabilities_add: RuntimeSpec.parse_capabilities(item["cap_add"]),
