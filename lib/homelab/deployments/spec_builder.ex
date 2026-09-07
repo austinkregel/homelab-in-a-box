@@ -55,6 +55,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   follow-up: it should toggle the web's ingress membership, not a Traefik-per-net.
   """
 
+  alias Homelab.Catalog.EnvSchema
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.GpuSpec
@@ -689,10 +690,17 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
+  # Conditions read the effective env, so a mode carried by a template default still
+  # pulls in its branch. Only an OVERRIDE satisfies a requirement.
   defp validate_required_env(template, overrides) do
+    overrides = overrides || %{}
+    effective_env = Map.merge(template.default_env || %{}, overrides)
+
     missing =
-      (template.required_env || [])
-      |> Enum.reject(fn key -> Map.has_key?(overrides || %{}, key) end)
+      ((template.required_env || []) ++
+         EnvSchema.required_keys(Map.get(template, :env_schema), effective_env))
+      |> Enum.uniq()
+      |> Enum.reject(fn key -> Map.has_key?(overrides, key) end)
 
     case missing do
       [] -> :ok

@@ -1,6 +1,7 @@
 defmodule Homelab.Catalogs.CuratedTest do
   use ExUnit.Case, async: true
 
+  alias Homelab.Catalog.EnvSchema
   alias Homelab.Catalogs.Curated
 
   setup do
@@ -88,9 +89,46 @@ defmodule Homelab.Catalogs.CuratedTest do
       # WireGuard's packets are dropped by reverse-path filtering without this.
       assert entry.sysctls == %{"net.ipv4.conf.all.src_valid_mark" => "1"}
 
-      # And the keys without which it cannot connect at all are marked required, so the
-      # wizard asks for them rather than deploying something that will fail.
-      assert "WIREGUARD_PRIVATE_KEY" in entry.required_env
+      # And the key without which it cannot connect under any protocol is marked
+      # required, so the wizard asks for it rather than deploying something that fails.
+      assert "VPN_SERVICE_PROVIDER" in entry.required_env
+    end
+
+    # Gluetun speaks WireGuard or OpenVPN, never both, and each needs its own credentials.
+    test "Gluetun asks for the credentials of the protocol in use and not the other one" do
+      assert {:ok, entry} = Curated.app_details("Gluetun")
+
+      wireguard = EnvSchema.required_keys(entry.env_schema, %{"VPN_TYPE" => "wireguard"})
+      openvpn = EnvSchema.required_keys(entry.env_schema, %{"VPN_TYPE" => "openvpn"})
+
+      assert "WIREGUARD_PRIVATE_KEY" in wireguard
+      assert "WIREGUARD_ADDRESSES" in wireguard
+      refute "OPENVPN_USER" in wireguard
+
+      assert "OPENVPN_USER" in openvpn
+      assert "OPENVPN_PASSWORD" in openvpn
+      refute "WIREGUARD_PRIVATE_KEY" in openvpn
+
+      # Neither protocol's credentials belong in the flat list, which cannot express
+      # the choice.
+      refute "WIREGUARD_PRIVATE_KEY" in entry.required_env
+      refute "OPENVPN_USER" in entry.required_env
+    end
+
+    test "Gluetun offers its protocol as a choice rather than free text, and marks its secrets" do
+      assert {:ok, entry} = Curated.app_details("Gluetun")
+
+      assert EnvSchema.enum(entry.env_schema, "VPN_TYPE") == ["wireguard", "openvpn"]
+      assert EnvSchema.secret?(entry.env_schema, "WIREGUARD_PRIVATE_KEY")
+      assert EnvSchema.secret?(entry.env_schema, "OPENVPN_PASSWORD")
+      refute EnvSchema.secret?(entry.env_schema, "VPN_TYPE")
+    end
+
+    test "the OpenVPN branch can carry a custom config" do
+      assert {:ok, entry} = Curated.app_details("Gluetun")
+
+      assert Map.has_key?(entry.default_env, "OPENVPN_CUSTOM_CONFIG")
+      assert Map.has_key?(entry.env_schema, "OPENVPN_CUSTOM_CONFIG")
     end
 
     test "Gluetun is declared as a network donor, which is what derives its firewall rules" do
@@ -115,6 +153,7 @@ defmodule Homelab.Catalogs.CuratedTest do
       assert entry.devices == []
       assert entry.sysctls == %{}
       assert entry.netns_donor_kind == nil
+      assert entry.env_schema == %{}
     end
   end
 end

@@ -255,6 +255,107 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  @vpn_schema %{
+    "VPN_TYPE" => %{"enum" => ["wireguard", "openvpn"], "required" => true},
+    "WIREGUARD_PRIVATE_KEY" => %{
+      "secret" => true,
+      "required_when" => %{"VPN_TYPE" => "wireguard"}
+    },
+    "OPENVPN_USER" => %{"required_when" => %{"VPN_TYPE" => "openvpn"}}
+  }
+
+  defp vpn_template(default_vpn_type) do
+    build_template(%{
+      required_env: ["VPN_SERVICE_PROVIDER"],
+      default_env: %{"VPN_TYPE" => default_vpn_type},
+      env_schema: @vpn_schema
+    })
+  end
+
+  describe "conditionally required env (a template whose required set depends on a mode)" do
+    test "a template with no schema behaves exactly as it did without one" do
+      tenant = build_tenant()
+      template = build_template(%{required_env: ["DATABASE_URL"], env_schema: %{}})
+
+      assert {:error, {:missing_required_env, ["DATABASE_URL"]}} =
+               SpecBuilder.build(build_deployment(tenant, template, %{env_overrides: %{}}))
+    end
+
+    test "the unselected mode's keys are not demanded" do
+      tenant = build_tenant()
+
+      deployment =
+        build_deployment(tenant, vpn_template("wireguard"), %{
+          env_overrides: %{
+            "VPN_SERVICE_PROVIDER" => "custom",
+            "VPN_TYPE" => "openvpn",
+            "OPENVPN_USER" => "user",
+            "OPENVPN_PASSWORD" => "pw"
+          }
+        })
+
+      assert {:ok, _spec} = SpecBuilder.build(deployment)
+    end
+
+    test "the selected mode's keys are demanded" do
+      tenant = build_tenant()
+
+      deployment =
+        build_deployment(tenant, vpn_template("wireguard"), %{
+          env_overrides: %{"VPN_SERVICE_PROVIDER" => "mullvad", "VPN_TYPE" => "openvpn"}
+        })
+
+      assert {:error, {:missing_required_env, missing}} = SpecBuilder.build(deployment)
+      assert "OPENVPN_USER" in missing
+      refute "WIREGUARD_PRIVATE_KEY" in missing
+    end
+
+    test "a mode carried by a template default still selects its branch" do
+      tenant = build_tenant()
+
+      deployment =
+        build_deployment(tenant, vpn_template("wireguard"), %{
+          env_overrides: %{"VPN_SERVICE_PROVIDER" => "mullvad"}
+        })
+
+      assert {:error, {:missing_required_env, missing}} = SpecBuilder.build(deployment)
+      assert "WIREGUARD_PRIVATE_KEY" in missing
+    end
+
+    test "a template default does not satisfy a requirement" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          required_env: [],
+          default_env: %{"VPN_TYPE" => "wireguard", "WIREGUARD_PRIVATE_KEY" => ""},
+          env_schema: @vpn_schema
+        })
+
+      deployment = build_deployment(tenant, template, %{env_overrides: %{}})
+
+      assert {:error, {:missing_required_env, missing}} = SpecBuilder.build(deployment)
+      assert "WIREGUARD_PRIVATE_KEY" in missing
+      assert "VPN_TYPE" in missing
+    end
+
+    test "a key named by both the flat list and the schema is reported once" do
+      tenant = build_tenant()
+
+      template =
+        build_template(%{
+          required_env: ["VPN_TYPE"],
+          default_env: %{},
+          env_schema: @vpn_schema
+        })
+
+      deployment = build_deployment(tenant, template, %{env_overrides: %{}})
+
+      assert {:error, {:missing_required_env, missing}} = SpecBuilder.build(deployment)
+      assert Enum.count(missing, &(&1 == "VPN_TYPE")) == 1
+    end
+  end
+
   describe "adoption: volume passthrough and user" do
     test "passes an explicit volume source and type through verbatim" do
       tenant = build_tenant()
