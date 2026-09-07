@@ -208,8 +208,13 @@ defmodule Homelab.Services.DockerEventListener do
   end
 
   # Sustained unhealthy: sever the public route and demote so it can recover.
+  #
+  # A donor keeps its ingress endpoint: it is its children's only address, restored only
+  # by re-creating the container, and a gluetun donor is unhealthy on every start.
   defp apply_event("health_status: unhealthy", deployment, _attrs) do
-    Deployments.unpublish_deployment(deployment)
+    if not Deployments.carries_child_routes?(deployment) do
+      Deployments.unpublish_deployment(deployment)
+    end
 
     case Deployments.transition_status(deployment, :deploying, [:running]) do
       {:ok, _} -> broadcast_status(deployment.id, :deploying)

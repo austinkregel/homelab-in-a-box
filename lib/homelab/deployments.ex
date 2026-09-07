@@ -199,7 +199,29 @@ defmodule Homelab.Deployments do
   def publish_deployment(%Deployment{} = deployment) do
     deployment = Repo.preload(deployment, [:tenant, :app_template])
 
-    if ingress_published?(deployment) and attachable?(deployment) do
+    # Keyed on the deployment's OWN name — the route a release grants. A donor's ingress
+    # membership belongs to its children and is granted by `ensure_ingress_membership/1`.
+    if ingress_published?(deployment) do
+      ensure_ingress_membership(deployment)
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  Attaches a workload to the shared ingress network when it must hold an endpoint there:
+  a proxy-mode deployment with a domain, or a netns donor carrying a routed child's
+  labels. Matches `SpecBuilder`'s `bridge_networks` rule, so a donor with no routed child
+  stays single-homed. Idempotent — the driver reads "already exists in network" as
+  success.
+  """
+  def ensure_ingress_membership(%Deployment{external_id: nil}), do: :ok
+
+  def ensure_ingress_membership(%Deployment{} = deployment) do
+    deployment = Repo.preload(deployment, [:tenant, :app_template])
+
+    if (ingress_published?(deployment) or carries_child_routes?(deployment)) and
+         attachable?(deployment) do
       Homelab.Config.orchestrator().publish(deployment.external_id, ingress_network())
     else
       :ok
@@ -230,8 +252,12 @@ defmodule Homelab.Deployments do
   Severs a deployment's public path by detaching its workload from the shared ingress
   network — Traefik loses the backend address and stops routing to it.
 
-  Always safe to call: detaching something already detached is a no-op, so this also
-  cleans up a stale route after an access-mode change.
+  Detaching something already detached is a no-op, so this also cleans up a stale route
+  after an access-mode change.
+
+  NOT safe at a netns donor carrying a routed child's labels: that endpoint is its
+  children's only address and is restored only by re-creating the container. Callers on
+  a transient path must check `carries_child_routes?/1` first.
   """
   def unpublish_deployment(%Deployment{external_id: nil}), do: :ok
 
@@ -247,11 +273,27 @@ defmodule Homelab.Deployments do
     end
   end
 
-  @doc "Lists all ingress-published deployments (any status), preloaded."
+  @doc """
+  Every deployment whose ingress membership the reconciler's invariant owns (any
+  status), preloaded: those holding a domain, plus netns donors of a domain-holding
+  child. A gluetun donor holds no domain, so a `domain`-only filter cannot see it.
+
+  `Access.proxy_mode?/1` has no SQL form, so the subquery narrows the rows and
+  `carries_child_routes?/1` decides them against the preloaded children.
+  """
   def list_ingress_deployments do
+    donors_of_named_children =
+      from(c in Deployment,
+        where: not is_nil(c.network_parent_id) and not is_nil(c.domain) and c.domain != "",
+        select: c.network_parent_id
+      )
+
     Deployment
-    |> where([d], not is_nil(d.domain) and d.domain != "")
-    |> preload([:tenant, :app_template])
+    |> where(
+      [d],
+      (not is_nil(d.domain) and d.domain != "") or d.id in subquery(donors_of_named_children)
+    )
+    |> preload([:tenant, :app_template, network_children: :app_template])
     |> Repo.all()
   end
 
@@ -737,8 +779,16 @@ defmodule Homelab.Deployments do
   # children are `:service` or `:host` is not multi-homed there either, and publishing
   # ingress for it would attach a container Traefik has no labels for.
   defp routed?(%Deployment{} = deployment) do
-    own_domain?(deployment) or Enum.any?(Netns.children(deployment), &routes_via_donor?/1)
+    own_domain?(deployment) or carries_child_routes?(deployment)
   end
+
+  @doc """
+  True when a routed child's public path runs through this deployment's container, so
+  the donor holds an ingress endpoint that is not its own route. See
+  `Homelab.Deployments.Netns`. Reads preloaded `:network_children` when present.
+  """
+  def carries_child_routes?(%Deployment{} = deployment),
+    do: Enum.any?(Netns.children(deployment), &routes_via_donor?/1)
 
   # `Access.proxy_mode?/1` reads the template, and a caller's preloaded
   # `:network_children` is not guaranteed to carry one — `Repo.preload/2` on an

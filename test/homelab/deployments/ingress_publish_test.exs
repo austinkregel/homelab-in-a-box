@@ -109,4 +109,38 @@ defmodule Homelab.Deployments.IngressPublishTest do
 
     assert :ok = Deployments.unpublish_deployment(deployment)
   end
+
+  test "a domainless donor carrying a child's route IS attached", ctx do
+    _child = tunneled_child(ctx.tenant, ctx.donor)
+    ingress = Homelab.Infrastructure.internal_network()
+
+    expect(Homelab.Mocks.Orchestrator, :publish, fn "gluetun-1", ^ingress -> :ok end)
+
+    assert Deployments.carries_child_routes?(ctx.donor)
+    assert :ok = Deployments.ensure_ingress_membership(ctx.donor)
+  end
+
+  test "a donor with no routed children stays single-homed", ctx do
+    # `SpecBuilder` hands this donor `bridge_networks: []`, so there is no endpoint to
+    # keep and attaching one would put a container Traefik has no labels for on ingress.
+    insert(:deployment,
+      tenant: ctx.tenant,
+      app_template: insert(:app_template, slug: "qbit", exposure_mode: :service, ports: []),
+      domain: nil,
+      network_parent_id: ctx.donor.id,
+      status: :running,
+      external_id: "qbit-1"
+    )
+
+    refute Deployments.carries_child_routes?(ctx.donor)
+    assert :ok = Deployments.ensure_ingress_membership(ctx.donor)
+  end
+
+  test "a release still publishes no ingress for a domainless donor", ctx do
+    # The donor's membership is `SpecBuilder`'s to grant at container-create time; the
+    # release step is keyed on a name of the deployment's own.
+    _child = tunneled_child(ctx.tenant, ctx.donor)
+
+    assert :ok = Deployments.publish_deployment(ctx.donor)
+  end
 end
