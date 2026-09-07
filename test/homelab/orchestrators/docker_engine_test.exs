@@ -350,7 +350,11 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "connects bridge networks and the routing network when traefik enabled" do
       test_pid = self()
 
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/version", _opts -> {:ok, %{"ApiVersion" => "1.55"}}
+        _path, _opts -> {:ok, %{}}
+      end)
+
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
@@ -381,6 +385,106 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                        %{"Container" => "cid"}}
     end
 
+    # A gluetun donor with routed children: SpecBuilder names ingress in
+    # `bridge_networks` AND merges the children's `traefik.enable` onto it, so ingress
+    # arrives twice. The second connect is a 403 that would fail the deploy.
+    test "a donor asks for ingress once, not once per source that named it" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/version", _opts -> {:ok, %{"ApiVersion" => "1.55"}}
+        _path, _opts -> {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "donor-cid"}}
+
+          String.ends_with?(path, "/connect") ->
+            send(test_pid, {:connect, path, body})
+            {:ok, %{}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec =
+        base_spec(%{
+          bridge_networks: ["homelab-iab-internal"],
+          labels: %{"traefik.enable" => "true"}
+        })
+
+      assert {:ok, "donor-cid"} = DockerEngine.deploy(spec)
+
+      assert_received {:connect, "/networks/homelab-iab-internal/connect",
+                       %{"Container" => "donor-cid"}}
+
+      refute_received {:connect, "/networks/homelab-iab-internal/connect", _body}
+    end
+
+    test "a 403 whose container IS on the network is the state we asked for" do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        if path == "/networks/homelab-iab-internal" do
+          {:ok, %{"Containers" => %{"cid-full-id" => %{"Name" => "myapp"}}}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "cid-full-id"}}
+
+          String.ends_with?(path, "/connect") ->
+            {:error, {:http_error, 403, %{"message" => "endpoint already exists in network"}}}
+
+          true ->
+            send(test_pid, {:post, path})
+            {:ok, %{}}
+        end
+      end)
+
+      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+
+      assert {:ok, "cid-full-id"} = DockerEngine.deploy(spec)
+      assert_received {:post, "/containers/cid-full-id/start"}
+    end
+
+    test "a 403 whose container is NOT on the network still fails the deploy" do
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts ->
+        {:ok, %{"Containers" => %{}}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
+        cond do
+          String.starts_with?(path, "/containers/create") ->
+            {:ok, %{"Id" => "cid"}}
+
+          String.ends_with?(path, "/connect") ->
+            {:error, {:http_error, 403, %{"message" => "endpoint already exists in network"}}}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
+
+      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+
+      assert {:error, {:network_attach_failed, "homelab-iab-internal", _}} =
+               DockerEngine.deploy(spec)
+    end
+
     # THE ordering invariant, and the reason aut.hair served gateway timeouts off a
     # perfectly healthy container.
     #
@@ -396,7 +500,11 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "joins every network BEFORE starting, so Traefik cannot observe it unattached" do
       test_pid = self()
 
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/version", _opts -> {:ok, %{"ApiVersion" => "1.55"}}
+        _path, _opts -> {:ok, %{}}
+      end)
+
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
@@ -957,7 +1065,11 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "a failed BRIDGE attach fails the deploy too" do
       # This is how a gluetun donor is multi-homed onto ingress so its children's routes
       # resolve. Silently skipping it produces a tunnel whose apps are unreachable.
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/version", _opts -> {:ok, %{"ApiVersion" => "1.55"}}
+        _path, _opts -> {:ok, %{}}
+      end)
+
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, _body, _opts ->
@@ -1137,7 +1249,10 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
     test "a DONOR is attached to ingress via its bridge networks" do
       test_pid = self()
 
-      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:ok, %{}} end)
+      stub(Homelab.Mocks.DockerClient, :get, fn path, _opts ->
+        if path == "/version", do: {:ok, %{"ApiVersion" => "1.55"}}, else: {:ok, %{}}
+      end)
+
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
       stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
@@ -1161,6 +1276,100 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                        %{
                          "Container" => "donor-cid"
                        }}
+    end
+  end
+
+  # Ingress always attaches last, so without a priority it wins a donor's default route.
+  describe "deploy/1 — default route on a multi-homed donor" do
+    defp create_body_with_daemon(spec, api_version) do
+      test_pid = self()
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/version", _opts ->
+          if api_version, do: {:ok, %{"ApiVersion" => api_version}}, else: {:ok, %{}}
+
+        _path, _opts ->
+          {:ok, %{}}
+      end)
+
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+
+      stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+        if String.starts_with?(path, "/containers/create") do
+          send(test_pid, {:create_body, body})
+          {:ok, %{"Id" => "cid"}}
+        else
+          {:ok, %{}}
+        end
+      end)
+
+      assert {:ok, "cid"} = DockerEngine.deploy(spec)
+      assert_received {:create_body, body}
+      body
+    end
+
+    test "a donor pins its default route to the tenant network it is created on" do
+      body =
+        create_body_with_daemon(base_spec(%{bridge_networks: ["homelab-iab-internal"]}), "1.55")
+
+      assert body["NetworkingConfig"]["EndpointsConfig"]["myapp_net"]["GwPriority"] == 100
+      assert body["HostConfig"]["NetworkMode"] == "myapp_net"
+    end
+
+    # Donor-only on purpose: writing this for every routed workload would move the egress
+    # path, and the source subnet upstreams see, across a whole install in one redeploy.
+    test "a single-homed workload keeps the daemon's own choice of default route" do
+      body = create_body_with_daemon(base_spec(%{labels: %{"traefik.enable" => "true"}}), "1.55")
+
+      refute Map.has_key?(body, "NetworkingConfig")
+    end
+
+    test "aliases and the gateway priority share the one endpoint the daemon accepts" do
+      spec =
+        base_spec(%{
+          bridge_networks: ["homelab-iab-internal"],
+          network_aliases: ["gluetun", "vpn"]
+        })
+
+      endpoint =
+        create_body_with_daemon(spec, "1.55")["NetworkingConfig"]["EndpointsConfig"]["myapp_net"]
+
+      assert endpoint["Aliases"] == ["gluetun", "vpn"]
+      assert endpoint["GwPriority"] == 100
+    end
+
+    # Below API 1.48 the daemon drops the field silently and it reads back as 0.
+    test "a daemon too old for GwPriority is left alone, not sent a field it discards" do
+      body =
+        create_body_with_daemon(base_spec(%{bridge_networks: ["homelab-iab-internal"]}), "1.45")
+
+      refute Map.has_key?(body, "NetworkingConfig")
+    end
+
+    test "a daemon that will not say what it speaks is treated as too old" do
+      body = create_body_with_daemon(base_spec(%{bridge_networks: ["homelab-iab-internal"]}), nil)
+
+      refute Map.has_key?(body, "NetworkingConfig")
+    end
+
+    # The daemon rejects `NetworkingConfig` alongside a container or host network mode.
+    test "a netns child and a host-network container are never sent one" do
+      child =
+        base_spec(%{
+          network: "container:gluetun-abc",
+          netns_child: true,
+          bridge_networks: ["homelab-iab-internal"]
+        })
+
+      host =
+        base_spec(%{
+          network: "host",
+          host_network: true,
+          bridge_networks: ["homelab-iab-internal"]
+        })
+
+      refute Map.has_key?(create_body_with_daemon(child, "1.55"), "NetworkingConfig")
+      refute Map.has_key?(create_body_with_daemon(host, "1.55"), "NetworkingConfig")
     end
   end
 

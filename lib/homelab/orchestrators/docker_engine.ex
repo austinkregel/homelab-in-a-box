@@ -29,6 +29,13 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # colliding with an existing stack's `homelab-internal`).
   @routing_network "homelab-iab-internal"
 
+  # Docker gives the default route to whichever endpoint attached last at equal priority,
+  # and ingress always attaches last. Anything above the default 0 outranks it.
+  @primary_gw_priority 100
+
+  # `GwPriority` landed in Engine 28.0. Older daemons drop the field without erroring.
+  @gw_priority_min_api {1, 48}
+
   @impl true
   def deploy(spec) do
     # Pull FIRST, then ensure the network immediately before create. The image pull
@@ -283,14 +290,29 @@ defmodule Homelab.Orchestrators.DockerEngine do
       Map.get(spec, :bridge_networks, []) ++
         if spec.labels["traefik.enable"] == "true", do: [@routing_network], else: []
 
-    Enum.reduce_while(networks, :ok, fn net, :ok ->
-      with :ok <- ensure_network(net),
-           {:ok, _} <- Client.post("/networks/#{net}/connect", %{"Container" => container_id}) do
-        {:cont, :ok}
-      else
+    networks
+    |> Enum.uniq()
+    |> Enum.reduce_while(:ok, fn net, :ok ->
+      case connect_network(container_id, net) do
+        :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:network_attach_failed, net, reason}}}
       end
     end)
+  end
+
+  # A 403 "already exists" is the state we asked for, but only once the network confirms
+  # it: the same message comes from a dead predecessor's leftover endpoint.
+  defp connect_network(container_id, net) do
+    with :ok <- ensure_network(net),
+         {:ok, _} <- Client.post("/networks/#{net}/connect", %{"Container" => container_id}) do
+      :ok
+    else
+      {:error, {:http_error, 403, body}} = error ->
+        if already_exists?(body) and attached?(container_id, net), do: :ok, else: error
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @impl true
@@ -350,7 +372,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # 502s. So ask the network who is actually on it rather than trusting the string.
   defp already_attached_or_error(container_id, network, body) do
     cond do
-      not (body |> error_message() |> String.downcase() =~ "already exists") ->
+      not already_exists?(body) ->
         {:error, {:publish_failed, container_id, network, {:http_error, 403, body}}}
 
       attached?(container_id, network) ->
@@ -359,6 +381,10 @@ defmodule Homelab.Orchestrators.DockerEngine do
       true ->
         reclaim_stale_endpoint(container_id, network, body)
     end
+  end
+
+  defp already_exists?(body) do
+    body |> error_message() |> String.downcase() =~ "already exists"
   end
 
   # The network's own `Containers` map is the daemon's answer to "is this attached",
@@ -515,6 +541,7 @@ defmodule Homelab.Orchestrators.DockerEngine do
     |> maybe_put_capabilities(spec)
     |> maybe_put_sysctls(Map.get(spec, :sysctls))
     |> maybe_put_aliases(spec)
+    |> maybe_put_gw_priority(spec)
     |> maybe_put_list("Cmd", Map.get(spec, :command))
     |> maybe_put_list("Entrypoint", Map.get(spec, :entrypoint))
   end
@@ -603,15 +630,75 @@ defmodule Homelab.Orchestrators.DockerEngine do
 
   defp maybe_put_aliases(payload, spec) do
     case Map.get(spec, :network_aliases, []) do
-      [] ->
+      [] -> payload
+      aliases -> put_primary_endpoint(payload, spec, %{"Aliases" => aliases})
+    end
+  end
+
+  # Pins a donor's default route to the tenant network it is created on, so gluetun's
+  # kill-switch rules bind to the tunnel's egress and not to ingress. Gated on
+  # `bridge_networks`, which only a donor with routed children sets.
+  defp maybe_put_gw_priority(payload, %{host_network: true}), do: payload
+  defp maybe_put_gw_priority(payload, %{netns_child: true}), do: payload
+
+  defp maybe_put_gw_priority(payload, spec) do
+    require Logger
+
+    cond do
+      Map.get(spec, :bridge_networks, []) == [] ->
         payload
 
-      aliases ->
-        Map.put(payload, "NetworkingConfig", %{
-          "EndpointsConfig" => %{
-            spec.network => %{"Aliases" => aliases}
-          }
-        })
+      gw_priority_supported?() ->
+        put_primary_endpoint(payload, spec, %{"GwPriority" => @primary_gw_priority})
+
+      true ->
+        Logger.warning(
+          "[DockerEngine] Daemon API is older than v1.48; #{spec.service_name} will take its " <>
+            "default route from whichever network attached last, not from #{spec.network}"
+        )
+
+        payload
+    end
+  end
+
+  # The create-time endpoint (the `NetworkMode` one) has several producers, so they merge
+  # rather than put: whichever ran last would otherwise erase the others.
+  defp put_primary_endpoint(payload, spec, fields) do
+    endpoints = get_in(payload, ["NetworkingConfig", "EndpointsConfig"]) || %{}
+    endpoint = Map.get(endpoints, spec.network, %{})
+
+    Map.put(payload, "NetworkingConfig", %{
+      "EndpointsConfig" => Map.put(endpoints, spec.network, Map.merge(endpoint, fields))
+    })
+  end
+
+  # The daemon's own maximum API version; the client negotiates down to it, never above.
+  # An answer we cannot read is treated as unsupported.
+  defp gw_priority_supported? do
+    case Client.get("/version") do
+      {:ok, %{"ApiVersion" => version}} when is_binary(version) ->
+        case parse_api_version(version) do
+          {:ok, parsed} -> parsed >= @gw_priority_min_api
+          :error -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  # Both "1.55" and "v1.55" are reported, depending on who is asked.
+  defp parse_api_version(version) do
+    parsed =
+      version
+      |> String.trim_leading("v")
+      |> String.split(".")
+      |> Enum.take(2)
+      |> Enum.map(&Integer.parse/1)
+
+    case parsed do
+      [{major, ""}, {minor, ""}] -> {:ok, {major, minor}}
+      _ -> :error
     end
   end
 
