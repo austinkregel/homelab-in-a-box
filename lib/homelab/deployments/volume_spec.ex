@@ -24,6 +24,15 @@ defmodule Homelab.Deployments.VolumeSpec do
   here. Before this module each producer invented its own shape, and the ones that
   forgot `type`/`source` silently downgraded a folder mount to an empty named volume.
 
+  ## Kinds
+
+  The two editors — the deploy wizard and the post-deploy Volumes tab — offer THREE
+  choices over these two types: managed, shared and folder. A managed and a shared
+  volume are both `type: "volume"` and differ only in whether `source` is set, which is
+  a distinction no single control can post. `kind/1` and `apply_kind/1` are that
+  translation, and `normalize/1` applies it, so a row may state its `kind` or its
+  `type`/`source` and mean the same thing.
+
   ## Inference
 
   `type` is inferred ONLY when absent, and only from the shape of `source`: an absolute
@@ -50,23 +59,76 @@ defmodule Homelab.Deployments.VolumeSpec do
   just-added blank row has to survive the next change event instead of vanishing under
   the operator's cursor.
   """
-  def parse_rows(nil), do: []
+  def parse_rows(volumes), do: volumes |> ordered_rows() |> Enum.map(&normalize/1)
 
-  def parse_rows(volumes) when is_map(volumes) do
+  @doc """
+  Like `parse_rows/1`, but each row also carries the `"kind"` it is edited as — see
+  `kind/1`. For an editor's working state only: the key is derived, and `normalize/1`
+  does not put it on a row bound for storage.
+  """
+  def parse_editor_rows(volumes) do
+    volumes
+    |> ordered_rows()
+    |> Enum.map(&Map.put(normalize(&1), "kind", kind(&1)))
+  end
+
+  defp ordered_rows(nil), do: []
+
+  defp ordered_rows(volumes) when is_map(volumes) do
     volumes
     |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} -> normalize(row) end)
+    |> Enum.map(fn {_idx, row} -> row end)
   end
 
-  def parse_rows(volumes) when is_list(volumes) do
-    Enum.map(volumes, &normalize/1)
+  defp ordered_rows(volumes) when is_list(volumes), do: volumes
+
+  @doc """
+  The kind of row an editor shows this volume as: `"managed"`, `"shared"` or `"bind"`.
+
+  Three choices over two mount types, because the two named-volume rows differ only in
+  whether `source` is set, and an editor cannot offer that as a checkbox without asking
+  the operator to reason about a field being ABSENT. A row that names a volume is shown
+  as shared even when this deployment owns it — the name is pinned to the row either
+  way, and `borrowed` is what records who owns the data.
+
+  A row that already carries a `"kind"` — one posted by an editor — is taken at its
+  word. That matters for the one state the stored shape cannot express: a row just
+  switched to shared, whose volume has not been picked yet, is indistinguishable from a
+  managed row until it is.
+  """
+  def kind(%{"kind" => kind}) when kind in ["managed", "shared", "bind"], do: kind
+
+  def kind(vol) when is_map(vol) do
+    source = trim(vol["source"])
+
+    cond do
+      infer_type(vol["type"], source) == "bind" -> "bind"
+      is_nil(source) -> "managed"
+      true -> "shared"
+    end
   end
+
+  @doc """
+  Resolves an editor's `"kind"` into the `type`/`source` pair it stands for.
+
+  Managed clears the source, which is the whole of what makes a volume managed:
+  `SpecBuilder` derives the name from the mount path when the row carries none. A row
+  with no `"kind"` is left exactly as it came — every producer other than the two
+  editors states its `type` directly.
+  """
+  def apply_kind(%{"kind" => "managed"} = vol),
+    do: Map.merge(vol, %{"type" => "volume", "source" => ""})
+
+  def apply_kind(%{"kind" => "shared"} = vol), do: Map.put(vol, "type", "volume")
+  def apply_kind(%{"kind" => "bind"} = vol), do: Map.put(vol, "type", "bind")
+  def apply_kind(vol), do: vol
 
   @doc """
   Canonicalizes a single volume map. Accepts the legacy `"path"` and `"target"` keys
   for the mount path, and form booleans as the strings `"true"`/`"false"`.
   """
   def normalize(vol) when is_map(vol) do
+    vol = apply_kind(vol)
     source = trim(vol["source"])
     container_path = trim(vol["container_path"] || vol["path"] || vol["target"])
 

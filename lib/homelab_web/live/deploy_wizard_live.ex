@@ -19,6 +19,10 @@ defmodule HomelabWeb.DeployWizardLive do
 
   @steps ~w(type app network config review)
 
+  # Stands in for a managed volume's name where the wizard cannot know it yet — see
+  # `managed_volume_name/4`.
+  @unnamed_managed_volume "named after this app and mount path"
+
   @impl true
   def mount(_params, _session, socket) do
     tenants = Tenants.list_active_tenants()
@@ -1591,6 +1595,8 @@ defmodule HomelabWeb.DeployWizardLive do
               adv_routed_port={@adv_routed_port}
               volumes={@volumes}
               known_volumes={@known_volumes}
+              tenant_id={@tenant_id}
+              tenants={@tenants}
               env_vars={@env_vars}
               revealed_env={@revealed_env}
               db_suggestions={@db_suggestions}
@@ -2018,6 +2024,13 @@ defmodule HomelabWeb.DeployWizardLive do
   # ============================================================
 
   defp step_config(assigns) do
+    # The tenant, for the name a managed volume will be given: it is chosen on the step
+    # before this one, so by here it is known.
+    tenant =
+      Enum.find(assigns.tenants, fn t -> to_string(t.id) == to_string(assigns.tenant_id) end)
+
+    assigns = assign(assigns, :tenant, tenant)
+
     ~H"""
     <div>
       <button
@@ -2362,38 +2375,81 @@ defmodule HomelabWeb.DeployWizardLive do
                     </button>
                   </div>
                   <div class="flex gap-2">
-                    <div class="w-28 shrink-0">
+                    <%!-- The row posts its KIND, not Docker's mount type: a managed and a
+                          shared volume are both `type: "volume"` and differ only in
+                          whether the name is set, which no single control can say. --%>
+                    <div class="w-32 shrink-0">
                       <label class="block text-[10px] text-base-content/30 mb-0.5">
                         Storage
                       </label>
                       <select
-                        name={"volumes[#{idx}][type]"}
+                        name={"volumes[#{idx}][kind]"}
                         class="w-full rounded-md bg-base-200 border-0 text-xs text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
                       >
-                        <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
-                        <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
+                        <option value="managed" selected={VolumeSpec.kind(vol) == "managed"}>
+                          Managed
+                        </option>
+                        <option value="shared" selected={VolumeSpec.kind(vol) == "shared"}>
+                          Shared volume
+                        </option>
+                        <option value="bind" selected={VolumeSpec.kind(vol) == "bind"}>
+                          Folder
+                        </option>
                       </select>
                     </div>
-                    <%!-- A managed volume gets its name field here too, not only after
-                          deploying. An app that reads a library another app already owns
-                          — one media tree behind Plex and Sonarr — had to be deployed
-                          against an empty derived volume first and re-pointed from the
-                          storage page afterwards, which is a recreate and a wrong first
-                          boot for something the operator knew at deploy time. --%>
-                    <div class="flex-1">
+                    <%!-- An existing volume is reachable here, not only after deploying.
+                          An app that reads a library another app already owns — one media
+                          tree behind Plex and Sonarr — had to be deployed against an empty
+                          derived volume first and re-pointed from the storage page
+                          afterwards, which is a recreate and a wrong first boot for
+                          something the operator knew at deploy time. --%>
+                    <div class="flex-1 min-w-0">
                       <label class="block text-[10px] text-base-content/30 mb-0.5">
-                        {if vol["type"] == "bind", do: "Host folder", else: "Volume name"}
+                        {volume_source_label(VolumeSpec.kind(vol))}
                       </label>
+                      <%!-- A managed volume is not named by the operator — the name
+                            follows the mount path — so the row shows the name it will get
+                            rather than a box that reads as an invitation to type a
+                            different one. Typing one there made the row a different kind
+                            of mount without saying so. --%>
+                      <div
+                        :if={VolumeSpec.kind(vol) == "managed"}
+                        class="w-full truncate rounded-md bg-base-200/60 text-xs font-mono text-base-content/50 py-1.5 px-2"
+                        title="Docker owns this volume and it is named after the mount path"
+                      >
+                        {managed_volume_name(vol, @tenant, @selected_template, @compose_services)}
+                      </div>
+                      <%!-- Picked from a list rather than spelled out, because a name that
+                            matches no volume on this host is not a shared volume at all:
+                            Docker mints an empty one under it and the app comes up with no
+                            data. Required, so a row switched to shared and left unpicked
+                            cannot deploy as a silent managed one — with no name the two
+                            are the same row by the time it reaches the server. The row's
+                            own volume is always an option, so a compose file naming one
+                            this host does not have yet keeps it. --%>
+                      <select
+                        :if={VolumeSpec.kind(vol) == "shared"}
+                        name={"volumes[#{idx}][source]"}
+                        required
+                        class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option value="" selected={vol["source"] in [nil, ""]}>
+                          Choose a volume…
+                        </option>
+                        <option
+                          :for={name <- shared_volume_options(vol, @known_volumes)}
+                          value={name}
+                          selected={vol["source"] == name}
+                        >
+                          {name}
+                        </option>
+                      </select>
                       <input
+                        :if={VolumeSpec.kind(vol) == "bind"}
                         type="text"
                         name={"volumes[#{idx}][source]"}
                         value={vol["source"] || ""}
-                        list={vol["type"] != "bind" && "known-volumes"}
-                        placeholder={
-                          if vol["type"] == "bind",
-                            do: "/home/you/.homelab/app/data",
-                            else: "new volume named after this app"
-                        }
+                        placeholder="/home/you/.homelab/app/data"
                         class="w-full rounded-md bg-base-200 border-0 text-xs font-mono text-base-content py-1.5 px-2 focus:ring-2 focus:ring-primary/50"
                       />
                     </div>
@@ -2411,20 +2467,28 @@ defmodule HomelabWeb.DeployWizardLive do
                     </div>
                   </div>
                   <p
-                    :if={vol["type"] == "bind"}
+                    :if={VolumeSpec.kind(vol) == "bind"}
                     class="mt-1 text-[10px] text-base-content/40 leading-snug"
                   >
                     Mounts a directory that already exists on the host — the data stays where
                     it is. Must be an absolute path: Docker reads a bare name as a named
                     volume and would mount an empty one instead.
                   </p>
-                  <%!-- The two answers a typed name can have, said out loud. They differ
-                        in what the app OWNS, and the difference is invisible otherwise: a
-                        typo'd library name is a valid new volume, and Docker mints it
-                        empty at first mount with nothing to suggest the app is not
-                        looking at the data the operator meant. --%>
                   <p
-                    :if={vol["type"] != "bind" && vol["source"] in @known_volumes}
+                    :if={VolumeSpec.kind(vol) == "managed"}
+                    class="mt-1 text-[10px] text-base-content/40 leading-snug"
+                  >
+                    A new volume of this app's own. Docker creates it empty on first mount and
+                    names it after the mount path.
+                  </p>
+                  <%!-- The two answers a chosen name can have, said out loud. They differ
+                        in what the app OWNS, and the difference is invisible otherwise:
+                        the dropdown will not offer a volume this host does not have, but
+                        a compose file or a catalog entry can still arrive naming one, and
+                        Docker mints that empty at first mount with nothing to suggest the
+                        app is not looking at the data the operator meant. --%>
+                  <p
+                    :if={VolumeSpec.kind(vol) == "shared" && vol["source"] in @known_volumes}
                     class="mt-1 text-[10px] text-base-content/40 leading-snug"
                   >
                     Borrows the existing <span class="font-mono">{vol["source"]}</span>
@@ -2433,21 +2497,16 @@ defmodule HomelabWeb.DeployWizardLive do
                   </p>
                   <p
                     :if={
-                      vol["type"] != "bind" && vol["source"] not in [nil, ""] &&
+                      VolumeSpec.kind(vol) == "shared" && vol["source"] not in [nil, ""] &&
                         vol["source"] not in @known_volumes
                     }
                     class="mt-1 text-[10px] text-warning/70 leading-snug"
                   >
                     No volume named <span class="font-mono">{vol["source"]}</span>
                     on this host yet. Docker creates it empty on first mount and this app
-                    owns it — if you meant an existing one, check the spelling.
+                    owns it — pick another from the list if you meant an existing one.
                   </p>
                 </div>
-
-                <%!-- One list for every row's name field; a datalist is referenced by id. --%>
-                <datalist id="known-volumes">
-                  <option :for={name <- @known_volumes} value={name}></option>
-                </datalist>
 
                 <button
                   type="button"
@@ -4015,14 +4074,21 @@ defmodule HomelabWeb.DeployWizardLive do
 
   # `type` and `source` ride along, or switching a row to Folder and typing its host path
   # would be discarded the moment the operator added or removed another row.
+  # `kind` is merged in and then resolved, so the row's `type`/`source` follow the choice
+  # the operator just made — and the kind itself is KEPT on the row, because the one
+  # state it expresses that `type`/`source` cannot is a row switched to shared whose
+  # volume is not picked yet. Dropping it would snap the select back to Managed on the
+  # very change event that opened the dropdown.
   defp sync_volumes(params, existing) do
     merge_indexed(existing, params, fn row, p ->
       row
       |> put_present(p, "container_path")
+      |> put_present(p, "kind")
       |> put_present(p, "type")
       |> put_present(p, "source")
       |> put_present(p, "read_only")
       |> put_present(p, "borrowed")
+      |> VolumeSpec.apply_kind()
     end)
   end
 
@@ -4555,6 +4621,42 @@ defmodule HomelabWeb.DeployWizardLive do
   # create it, and deleting the app must not read as deleting that data. Compared against
   # the template's own rows so a volume this app already owns is not re-read as borrowed
   # the second time it is deployed.
+  defp volume_source_label("bind"), do: "Host folder"
+  defp volume_source_label("shared"), do: "Shared volume"
+  defp volume_source_label(_kind), do: "Volume name"
+
+  # The host's volumes plus the one this row already names — a compose file or a catalog
+  # entry can name a volume this host has never had, and a dropdown with no option for it
+  # would drop it the moment the step renders.
+  defp shared_volume_options(vol, known_volumes) do
+    case vol["source"] do
+      source when is_binary(source) and source != "" ->
+        known_volumes |> List.insert_at(0, source) |> Enum.uniq() |> Enum.sort()
+
+      _ ->
+        known_volumes
+    end
+  end
+
+  # The name a managed row will be given, shown before the deploy that creates it.
+  #
+  # It is only knowable when ONE deployment comes out of this wizard: a compose import
+  # applies these rows to every service it found, and each service is its own app with
+  # its own derived name, so there is no single answer to show. Naming one of them would
+  # be worse than naming none.
+  defp managed_volume_name(vol, tenant, template, []) when not is_nil(tenant) do
+    case vol["container_path"] || vol["path"] do
+      path when is_binary(path) and path != "" and not is_nil(template) ->
+        SpecBuilder.volume_name(tenant.slug, template.slug, path)
+
+      _ ->
+        @unnamed_managed_volume
+    end
+  end
+
+  defp managed_volume_name(_vol, _tenant, _template, _compose_services),
+    do: @unnamed_managed_volume
+
   defp parse_volume_params(volumes, socket, template) do
     VolumeSpec.mark_borrowed(
       VolumeSpec.parse(volumes),

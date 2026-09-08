@@ -495,7 +495,7 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("volumes_changed", _params, socket), do: {:noreply, socket}
 
   def handle_event("add_volume", _params, socket) do
-    blank = %{"container_path" => "", "description" => ""}
+    blank = %{"container_path" => "", "description" => "", "kind" => "managed"}
     {:noreply, assign(socket, :volumes_rows, socket.assigns.volumes_rows ++ [blank])}
   end
 
@@ -507,10 +507,11 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("save_volumes", params, socket) do
     deployment = socket.assigns.deployment
 
-    # `source` is preserved for a MANAGED volume too, not just a bind: adoption names the
+    # `source` is preserved for a named volume, not just a bind: adoption names the
     # volume it moved the data into (PermanentHome), and dropping that name here would
     # make SpecBuilder derive a synthetic one -- mounting an empty volume and orphaning
-    # the adopted data. A blank source is the only one that gets derived.
+    # the adopted data. Only a MANAGED row -- one the operator said is named after its
+    # mount path -- gets derived, and `VolumeSpec.apply_kind/1` is what clears its source.
     # Which rows borrow their data is decided against what this deployment mounted
     # BEFORE this save, so re-pointing a row at an existing volume marks it while editing
     # any other field leaves the answer alone.
@@ -1429,27 +1430,70 @@ defmodule HomelabWeb.DeploymentLive do
                 :for={{vol, idx} <- Enum.with_index(@volumes_rows)}
                 class="flex items-center gap-2"
               >
+                <%!-- The row posts its KIND, not its Docker mount type. Docker has two
+                      kinds of mount and the operator has three choices, because the two
+                      named-volume rows differ only in whether `source` is set — an
+                      absence, which no control can post. Whichever kind is chosen decides
+                      `type` and `source` together, in `VolumeSpec.apply_kind/1`. --%>
                 <select
-                  name={"volumes[#{idx}][type]"}
-                  class="w-32 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2"
+                  name={"volumes[#{idx}][kind]"}
+                  class="w-36 rounded-lg bg-base-200 border-0 text-xs py-1.5 px-2"
                 >
-                  <option value="volume" selected={vol["type"] != "bind"}>Managed</option>
-                  <option value="bind" selected={vol["type"] == "bind"}>Folder</option>
+                  <option value="managed" selected={VolumeSpec.kind(vol) == "managed"}>
+                    Managed
+                  </option>
+                  <option value="shared" selected={VolumeSpec.kind(vol) == "shared"}>
+                    Shared volume
+                  </option>
+                  <option value="bind" selected={VolumeSpec.kind(vol) == "bind"}>Folder</option>
                 </select>
-                <%!-- The source is editable for a MANAGED volume too, not only a bind.
-                      Rendering it for binds alone meant a managed row posted no source
-                      at all: the name of an adopted volume — or of one attached from the
-                      storage page — was dropped on the next save of this form, and
-                      SpecBuilder derived a synthetic name in its place, mounting an empty
-                      volume next to the real data. It is also what puts an existing
-                      volume within reach here, rather than only on the storage page. --%>
+                <%!-- MANAGED rows name nothing. The name is derived from the mount path,
+                      so the row shows the name it will actually get instead of an empty
+                      box: a free text field here read as an invitation to type one, and
+                      typing one turned the row into a different kind of mount without
+                      saying so. --%>
+                <div
+                  :if={VolumeSpec.kind(vol) == "managed"}
+                  class="flex-1 min-w-0 truncate rounded-lg bg-base-200/60 text-xs font-mono py-1.5 px-2 text-base-content/50"
+                  title="Docker owns this volume and it is named after the mount path"
+                >
+                  {managed_volume_name(vol, @deployment)}
+                </div>
+                <%!-- SHARED rows pick an existing volume rather than spelling its name,
+                      because a name that does not match one on this host is not a shared
+                      volume at all — Docker creates an empty one under that name and the
+                      app comes up with no data. The row's own source is always an option,
+                      so a volume the daemon does not list (or did not answer for) is not
+                      dropped by rendering the form. --%>
+                <%!-- Required, so the browser refuses a shared row with nothing picked.
+                      Such a row is indistinguishable from a managed one by the time it
+                      reaches the server — no name means the name is derived — so it would
+                      save as a new empty volume of this deployment's own rather than the
+                      shared one the operator was reaching for. --%>
+                <select
+                  :if={VolumeSpec.kind(vol) == "shared"}
+                  name={"volumes[#{idx}][source]"}
+                  required
+                  class="flex-1 min-w-0 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                >
+                  <option value="" selected={vol["source"] in [nil, ""]}>
+                    Choose a volume…
+                  </option>
+                  <option
+                    :for={name <- shared_volume_options(vol, @known_volumes)}
+                    value={name}
+                    selected={vol["source"] == name}
+                  >
+                    {name}
+                  </option>
+                </select>
                 <input
+                  :if={VolumeSpec.kind(vol) == "bind"}
                   type="text"
                   name={"volumes[#{idx}][source]"}
                   value={vol["source"]}
-                  list={vol["type"] != "bind" && "known-volumes"}
-                  placeholder={volume_source_placeholder(vol, @deployment)}
-                  class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+                  placeholder="/home/you/.homelab/app/data"
+                  class="flex-1 min-w-0 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
                 />
                 <%!-- Carried rather than re-derived: a row is only re-decided when its
                       name changes, and a form that posted nothing here would hand `save`
@@ -1468,7 +1512,7 @@ defmodule HomelabWeb.DeploymentLive do
                   class="flex-1 rounded-lg bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
                 />
                 <input
-                  :if={vol["type"] != "bind"}
+                  :if={VolumeSpec.kind(vol) != "bind"}
                   type="text"
                   name={"volumes[#{idx}][description]"}
                   value={vol["description"]}
@@ -1502,12 +1546,16 @@ defmodule HomelabWeb.DeploymentLive do
                 </button>
               </div>
 
-              <%!-- Every volume the daemon has, offered to each managed row's name field.
-                    One list for the whole form: a datalist is referenced by id, so the
-                    rows share it rather than each repeating the host's volumes. --%>
-              <datalist id="known-volumes">
-                <option :for={name <- @known_volumes} value={name}></option>
-              </datalist>
+              <p
+                :if={
+                  @known_volumes == [] and
+                    Enum.any?(@volumes_rows, &(VolumeSpec.kind(&1) == "shared"))
+                }
+                class="text-[11px] text-base-content/50"
+              >
+                This host reported no volumes, so a shared row can only keep the volume it
+                already names.
+              </p>
 
               <button
                 type="button"
@@ -1520,12 +1568,16 @@ defmodule HomelabWeb.DeploymentLive do
               <div class="rounded-lg bg-warning/10 border border-warning/20 px-3 py-2">
                 <p class="text-[11px] text-base-content/70 leading-snug">
                   <strong>Managed</strong>
-                  — Docker owns the data in a named volume. Name an existing volume to mount
-                  it here — any volume on this host can go into any deployment, which is how
-                  one media library serves several apps. Leave the name blank and one is
-                  derived from the mount path, so <strong>changing that path does not move
-                  the data</strong>: it mounts a new, empty volume and leaves the old one
-                  behind.
+                  — Docker owns the data in a volume of this deployment's own, named after the
+                  mount path. That name is shown, not typed, so <strong>changing the mount path
+                  does not move the data</strong>: it mounts a new, empty volume under the new
+                  name and leaves the old one behind.
+                </p>
+                <p class="text-[11px] text-base-content/70 leading-snug">
+                  <strong>Shared volume</strong>
+                  — an existing volume on this host, picked from the list. Any volume can go into
+                  any deployment, which is how one media library serves several apps. Switching a
+                  row to a different volume does not copy anything; it mounts the other one.
                 </p>
                 <p class="text-[11px] text-base-content/70 leading-snug">
                   <strong>Folder</strong>
@@ -2036,9 +2088,13 @@ defmodule HomelabWeb.DeploymentLive do
   # source is a bind unless it says otherwise") which contradicted SpecBuilder's ("a
   # volume with a source is a VOLUME unless it says otherwise") -- so an adopted named
   # volume displayed as a folder mount, and the two disagreed about what was mounted.
-  defp volume_rows(volumes), do: VolumeSpec.parse_rows(List.wrap(volumes))
+  # `parse_editor_rows` rather than `parse_rows`: the kind the operator picked is carried
+  # on the row, not re-derived from the parsed one. A row switched to SHARED has no
+  # volume picked yet, and a parsed row with no name is MANAGED — re-deriving would snap
+  # the select back under the cursor, before the operator ever reached the list.
+  defp volume_rows(volumes), do: volumes |> List.wrap() |> VolumeSpec.parse_editor_rows()
 
-  defp volume_rows_from_params(params), do: VolumeSpec.parse_rows(params)
+  defp volume_rows_from_params(params), do: VolumeSpec.parse_editor_rows(params)
 
   # What is actually mounted at a row: the name it carries, or — for a managed row that
   # carries none — the name SpecBuilder will derive, through SpecBuilder itself so the
@@ -2050,13 +2106,26 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  # The placeholder is the derived name rather than a generic hint, so a blank field
-  # says which volume leaving it blank will mount.
-  defp volume_source_placeholder(%{"type" => "bind"}, _deployment),
-    do: "/home/you/.homelab/app/data"
+  # The name a managed row will be given. Shown rather than typed, so it says which
+  # volume the row mounts before the save that creates it — and it moves with the mount
+  # path as the operator edits, which is the one thing about a derived name that is easy
+  # to get wrong.
+  defp managed_volume_name(vol, deployment) do
+    derived_volume_name(deployment, vol["container_path"]) || "named after the mount path"
+  end
 
-  defp volume_source_placeholder(vol, deployment) do
-    derived_volume_name(deployment, vol["container_path"]) || "named after this deployment"
+  # The host's volumes plus the one this row already names. A row whose volume the daemon
+  # does not list — it was removed, or `list_volumes` failed and returned nothing — would
+  # otherwise have no option to be selected on, and rendering the form would silently
+  # detach it on the next save.
+  defp shared_volume_options(vol, known_volumes) do
+    case vol["source"] do
+      source when is_binary(source) and source != "" ->
+        known_volumes |> List.insert_at(0, source) |> Enum.uniq() |> Enum.sort()
+
+      _ ->
+        known_volumes
+    end
   end
 
   defp derived_volume_name(%{tenant: %{slug: tenant_slug}, app_template: %{slug: app_slug}}, path)

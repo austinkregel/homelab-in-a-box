@@ -14,8 +14,8 @@ defmodule HomelabWeb.DeployWizardLiveTest do
 
   setup do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
-    # The config step reads the host's volumes to suggest names for a managed row; the
-    # tests about that list override this with volumes of their own.
+    # The config step reads the host's volumes to fill a shared row's dropdown; the tests
+    # about that list override this with volumes of their own.
     stub(Homelab.Mocks.Orchestrator, :list_volumes, fn -> {:ok, []} end)
     :ok
   end
@@ -502,7 +502,7 @@ defmodule HomelabWeb.DeployWizardLiveTest do
     # An app that reads a library another app already owns had to be deployed against an
     # empty derived volume and re-pointed from the storage page afterwards — a recreate,
     # and a wrong first boot, for something known before the deploy button was pressed.
-    test "offers the host's volumes when naming a managed volume", %{
+    test "offers the host's volumes in a shared row's dropdown", %{
       conn: conn,
       template: template
     } do
@@ -510,10 +510,121 @@ defmodule HomelabWeb.DeployWizardLiveTest do
         {:ok, [%{name: "homelab-media-plex-music", driver: "local", labels: %{}}]}
       end)
 
-      {:ok, _view, html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+      {:ok, view, html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
 
-      assert html =~ ~s(<datalist id="known-volumes">)
-      assert html =~ "homelab-media-plex-music"
+      # A row starts managed, and a managed volume is not named by hand at all.
+      refute html =~ ~s(name="volumes[0][source]")
+
+      html =
+        render_change(view, "config_changed", %{"volumes" => %{"0" => %{"kind" => "shared"}}})
+
+      assert html =~ ~s(name="volumes[0][source]")
+      assert html =~ ~s(<option value="homelab-media-plex-music")
+    end
+
+    # The name is derived, not typed, so the row says which volume it will create before
+    # the deploy that creates it.
+    test "a managed row shows the name its mount path derives", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=network&template_id=#{template.id}")
+
+      render_change(view, "update_network", %{"network" => %{"tenant_id" => to_string(tenant.id)}})
+
+      render_click(view, "go_step", %{"step" => "config"})
+
+      html =
+        render_change(view, "config_changed", %{
+          "volumes" => %{"0" => %{"container_path" => "/var/lib/data"}}
+        })
+
+      assert html =~
+               Homelab.Deployments.SpecBuilder.volume_name(
+                 tenant.slug,
+                 template.slug,
+                 "/var/lib/data"
+               )
+    end
+
+    # Deploy is submitted from the review step, which rebuilds every volume from hidden
+    # inputs — so the kind picked on the config step has to have been resolved into the
+    # type/source those inputs carry, or the choice never reaches the deploy at all.
+    test "a row switched to shared carries its volume into the review step", %{
+      conn: conn,
+      template: template
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_change(view, "config_changed", %{
+        "volumes" => %{
+          "0" => %{"kind" => "shared", "source" => "music-library", "container_path" => "/music"}
+        }
+      })
+
+      html = render_click(view, "go_step", %{"step" => "review"})
+
+      assert html =~ ~s(name="volumes[0][source]" value="music-library")
+      assert html =~ ~s(name="volumes[0][type]" value="volume")
+    end
+
+    # Managed means "named after the mount path", which is exactly a blank source —
+    # SpecBuilder derives the rest.
+    test "switching a row to managed drops the name it carried", %{conn: conn, tenant: tenant} do
+      template =
+        insert(:app_template,
+          volumes: [
+            %{"container_path" => "/music", "source" => "music-library", "type" => "volume"}
+          ]
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+
+      render_change(view, "config_changed", %{"volumes" => %{"0" => %{"kind" => "managed"}}})
+
+      html = render_click(view, "go_step", %{"step" => "review"})
+      assert html =~ ~s(name="volumes[0][source]" value="")
+
+      render_submit(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "app.example.com",
+        "exposure_mode" => "public",
+        "volumes" => %{"0" => %{"container_path" => "/music", "type" => "volume", "source" => ""}},
+        "ports" => %{},
+        "env" => %{}
+      })
+
+      {:ok, reloaded} = Homelab.Catalog.get_app_template_by_slug(template.slug)
+      assert [vol] = reloaded.volumes
+      assert vol["source"] == nil
+    end
+
+    # A row switched to shared has no volume picked yet, and a row with no name is a
+    # managed one — so the kind has to be carried, or the select snaps back to Managed on
+    # the change event that opened the dropdown.
+    test "a row switched to shared stays shared before a volume is picked", %{
+      conn: conn,
+      template: template
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deploy/new?step=config&template_id=#{template.id}")
+      render_change(view, "config_changed", %{"volumes" => %{"0" => %{"kind" => "shared"}}})
+
+      html =
+        render_change(view, "config_changed", %{
+          "volumes" => %{"0" => %{"container_path" => "/music"}}
+        })
+
+      assert html =~ ~s(<option value="shared" selected)
       assert html =~ ~s(name="volumes[0][source]")
     end
 

@@ -26,8 +26,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
     |> stub(:display_name, fn -> "Docker" end)
     |> stub(:stats, fn _id -> {:error, :not_found} end)
     |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
-    # The Volumes editor reads the host's volumes to suggest names for a managed row;
-    # the test about that list overrides this with volumes of its own.
+    # The Volumes editor reads the host's volumes to fill a shared row's dropdown; the
+    # tests about that list override this with volumes of its own.
     |> stub(:list_volumes, fn -> {:ok, []} end)
     # Config edits (env/settings) recreate the container; tests that assert the
     # exact recreate calls override these with `expect`.
@@ -1212,7 +1212,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert vol["source"] == "homelab-managed-pg-var-lib-postgresql-data"
     end
 
-    test "offers the volumes on the host as names for a managed row", %{
+    test "offers the volumes on the host in a shared row's dropdown", %{
       conn: conn,
       deployment: dep
     } do
@@ -1222,10 +1222,30 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+
+      html = change_volume_kind(view, "0", "shared")
+
+      assert html =~ ~s(name="volumes[0][source]")
+      assert html =~ ~s(<option value="homelab-media-plex-music")
+    end
+
+    # A managed row names nothing: the name follows the mount path, and the row shows the
+    # one it will get rather than offering a box to type a different one into.
+    test "a managed row shows the name its mount path derives", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
       html = render_click(view, "start_volumes_edit", %{})
 
-      assert html =~ ~s(<datalist id="known-volumes">)
-      assert html =~ "homelab-media-plex-music"
+      derived =
+        Homelab.Deployments.SpecBuilder.volume_name(
+          dep.tenant.slug,
+          dep.app_template.slug,
+          "/data"
+        )
+
+      assert html =~ derived
+      refute html =~ ~s(name="volumes[0][source]")
     end
 
     test "naming an existing volume records the row as borrowed", %{conn: conn, deployment: dep} do
@@ -1236,12 +1256,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       render_click(view, "switch_tab", %{"tab" => "volumes"})
       render_click(view, "start_volumes_edit", %{})
+      change_volume_kind(view, "0", "shared")
 
       view
       |> form("#volumes-form",
         volumes: %{
           "0" => %{
-            "type" => "volume",
             "source" => "music-library",
             "container_path" => "/music"
           }
@@ -1251,6 +1271,101 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
       assert vol["borrowed"] == true
+    end
+
+    # The dropdown is the only way to name a shared volume, so a row pointed at a volume
+    # the daemon does not report — removed, or `list_volumes` failed — has to keep it.
+    # Without the option, rendering the form alone would detach the mount on the next save.
+    test "a shared row keeps a volume the host does not report", %{conn: conn, tenant: tenant} do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn -> {:ok, []} end)
+
+      template =
+        insert(:app_template,
+          volumes: [
+            %{"container_path" => "/music", "source" => "music-library", "type" => "volume"}
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_8"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      html = render_click(view, "start_volumes_edit", %{})
+
+      assert html =~ ~s(<option value="music-library" selected)
+
+      view |> form("#volumes-form") |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == "music-library"
+    end
+
+    # Switching to managed is the operator saying the name should follow the mount path,
+    # which is exactly a blank source — SpecBuilder derives the rest.
+    test "switching a shared row to managed drops the name it carried", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      template =
+        insert(:app_template,
+          volumes: [
+            %{"container_path" => "/music", "source" => "music-library", "type" => "volume"}
+          ]
+        )
+
+      dep =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_9"
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+      change_volume_kind(view, "0", "managed")
+
+      view |> form("#volumes-form") |> render_submit()
+
+      assert [vol] = Homelab.Deployments.get_deployment!(dep.id).volumes_override
+      assert vol["source"] == nil
+      assert vol["type"] == "volume"
+    end
+
+    # A row switched to shared has no volume picked yet, and a row with no name is a
+    # managed one — so the kind has to be carried, or the select snaps back to Managed on
+    # the change event that opened the dropdown.
+    test "a row switched to shared stays shared before a volume is picked", %{
+      conn: conn,
+      deployment: dep
+    } do
+      stub(Homelab.Mocks.Orchestrator, :list_volumes, fn ->
+        {:ok, [%{name: "music-library", driver: "local", labels: %{}}]}
+      end)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+      render_click(view, "start_volumes_edit", %{})
+      change_volume_kind(view, "0", "shared")
+
+      html =
+        view
+        |> form("#volumes-form", volumes: %{"0" => %{"container_path" => "/music"}})
+        |> render_change()
+
+      assert html =~ ~s(<option value="shared" selected)
+      assert html =~ ~s(name="volumes[0][source]")
     end
 
     # The flag has to survive a save that did not touch the name, or a volume this app
@@ -1300,11 +1415,12 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "volumes"})
       render_click(view, "start_volumes_edit", %{})
 
+      change_volume_kind(view, "0", "shared")
+
       view
       |> form("#volumes-form",
         volumes: %{
           "0" => %{
-            "type" => "volume",
             "source" => "homelab-media-plex-music",
             "container_path" => "/music",
             "read_only" => "true"
@@ -2386,5 +2502,13 @@ defmodule HomelabWeb.DeploymentLiveTest do
     assert Enum.any?(release.steps, &(&1.type == :await_health))
 
     release
+  end
+
+  # Picking a row's kind is what decides which name control it gets, so a test that wants
+  # the shared dropdown has to change the kind first, exactly as the browser does.
+  defp change_volume_kind(view, index, kind) do
+    view
+    |> form("#volumes-form", volumes: %{index => %{"kind" => kind}})
+    |> render_change()
   end
 end
