@@ -17,6 +17,22 @@ defmodule HomelabWeb.WorkbenchLiveTest do
     Application.put_env(:homelab, :docker_client, Homelab.Mocks.DockerClient)
     on_exit(fn -> Application.put_env(:homelab, :docker_client, prev) end)
 
+    # The page writes a real workspace under the configured root, keyed by user id, and
+    # nothing reaps it. Give each test a root of its own and take it away afterwards, so
+    # a run leaves nothing in the system temp dir. Quota stays at the configured 1 GB —
+    # the quota bar is asserted against it.
+    workbench = Application.get_env(:homelab, :workbench)
+
+    root =
+      Path.join(System.tmp_dir!(), "workbench-live-test-#{System.unique_integer([:positive])}")
+
+    Application.put_env(:homelab, :workbench, Keyword.put(workbench, :root, root))
+
+    on_exit(fn ->
+      Application.put_env(:homelab, :workbench, workbench)
+      File.rm_rf(root)
+    end)
+
     {:ok, conn: conn, tenant: tenant}
   end
 
