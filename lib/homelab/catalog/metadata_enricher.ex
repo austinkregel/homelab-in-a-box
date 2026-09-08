@@ -4,7 +4,12 @@ defmodule Homelab.Catalog.MetadataEnricher do
   the Docker Registry image inspector and GitHub repo scanner concurrently,
   then merging results with priority ordering.
 
-  Results are cached in :persistent_term so repeated views are instant.
+  Results an enricher actually produced are cached in :persistent_term so repeated
+  views are instant.
+
+  Which enricher modules run is read from the application env, so tests that merely
+  mount a page get a stub instead of a live registry connection. The enrichers
+  themselves are unaffected and are still tested directly.
   """
 
   require Logger
@@ -18,8 +23,15 @@ defmodule Homelab.Catalog.MetadataEnricher do
 
     case :persistent_term.get(cache_key, nil) do
       nil ->
-        enriched = do_enrich(entry, opts)
-        :persistent_term.put(cache_key, enriched)
+        {enriched, enriched?} = do_enrich(entry, opts)
+
+        # Only an answer an enricher actually produced is worth keeping.
+        # :persistent_term is VM-global and never expires, so caching a failure
+        # would pin the empty answer for the life of the node: a registry that was
+        # unreachable for one second would leave the entry permanently
+        # metadata-less, with no way to retry short of a restart.
+        if enriched?, do: :persistent_term.put(cache_key, enriched)
+
         {:ok, enriched}
 
       cached ->
@@ -29,7 +41,7 @@ defmodule Homelab.Catalog.MetadataEnricher do
 
   defp do_enrich(entry, opts) do
     Logger.info("[MetadataEnricher] Enriching #{entry.name} (#{entry.full_ref})")
-    result = run_enrichment(entry, opts)
+    {result, enriched?} = run_enrichment(entry, opts)
 
     env_count = map_size(result.default_env) + length(result.required_env)
     port_count = length(result.required_ports)
@@ -39,7 +51,7 @@ defmodule Homelab.Catalog.MetadataEnricher do
       "[MetadataEnricher] #{entry.name}: #{env_count} env vars, #{port_count} ports, #{vol_count} volumes"
     )
 
-    result
+    {result, enriched?}
   end
 
   defp run_enrichment(entry, opts) do
@@ -49,7 +61,8 @@ defmodule Homelab.Catalog.MetadataEnricher do
 
     image_task =
       if entry.full_ref && entry.full_ref != "" do
-        Task.async(fn -> ImageInspector.inspect(entry.full_ref) end)
+        inspector = image_inspector()
+        Task.async(fn -> inspector.inspect(entry.full_ref) end)
       else
         nil
       end
@@ -73,7 +86,8 @@ defmodule Homelab.Catalog.MetadataEnricher do
 
     repo_task =
       if project_url && project_url != "" do
-        Task.async(fn -> RepoScanner.scan(project_url) end)
+        scanner = repo_scanner()
+        Task.async(fn -> scanner.scan(project_url) end)
       else
         nil
       end
@@ -82,8 +96,14 @@ defmodule Homelab.Catalog.MetadataEnricher do
 
     notify_progress(progress_pid, "merging")
 
-    merge_into_entry(entry, image_result, repo_result)
+    {merge_into_entry(entry, image_result, repo_result), any_result?(image_result, repo_result)}
   end
+
+  defp any_result?(nil, nil), do: false
+  defp any_result?(_image_result, _repo_result), do: true
+
+  defp image_inspector, do: Application.get_env(:homelab, :image_inspector, ImageInspector)
+  defp repo_scanner, do: Application.get_env(:homelab, :repo_scanner, RepoScanner)
 
   defp notify_progress(nil, _stage), do: :ok
   defp notify_progress(pid, stage), do: send(pid, {:enrichment_progress, stage})

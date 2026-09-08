@@ -255,65 +255,141 @@ defmodule Homelab.Catalog.Enrichers.ImageInspectorTest do
   end
 
   describe "inspect/1" do
-    test "returns error for unreachable image" do
+    test "returns the transport failure for an unreachable registry" do
+      # Asserting only `{:error, _}` is what let this pass while never reaching
+      # localhost at all: the ref used to route to Docker Hub, and the real HTTPS
+      # request failed for its own unrelated reasons.
       log =
         capture_log(fn ->
-          result = ImageInspector.inspect("localhost:1/nonexistent:latest")
-          assert {:error, _} = result
+          assert {:error, {:auth_request_failed, _}} =
+                   ImageInspector.inspect("localhost:1/nonexistent:latest")
         end)
 
       assert log =~ "[ImageInspector] Failed to inspect localhost:1/nonexistent:latest"
     end
 
-    test "parses a registry image via bypass" do
+    test "walks token, manifest and config blob to build the metadata map" do
       bypass = Bypass.open()
 
-      Bypass.stub(bypass, "GET", "/v2/", fn conn ->
-        conn
-        |> Plug.Conn.put_resp_header(
-          "www-authenticate",
-          "Bearer realm=\"http://localhost:#{bypass.port}/token\""
-        )
-        |> Plug.Conn.resp(401, "")
-      end)
-
-      Bypass.stub(bypass, "GET", "/token", fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(%{"token" => "test-token"}))
-      end)
-
-      Bypass.stub(bypass, "GET", "/v2/library/alpine/manifests/latest", fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(
-          200,
-          Jason.encode!(%{
-            "config" => %{"digest" => "sha256:abc123"}
-          })
-        )
-      end)
-
-      Bypass.stub(bypass, "GET", "/v2/library/alpine/blobs/sha256:abc123", fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(
-          200,
-          Jason.encode!(%{
-            "config" => %{
-              "ExposedPorts" => %{"80/tcp" => %{}},
-              "Volumes" => %{"/data" => %{}},
-              "Env" => ["APP_PORT=8080", "NODE_ENV=production"],
-              "Labels" => %{"maintainer" => "test"}
-            }
-          })
-        )
-      end)
+      serve(bypass, %{
+        "/token" => %{"token" => "test-token"},
+        "/v2/library/alpine/manifests/latest" => %{"config" => %{"digest" => "sha256:abc123"}},
+        "/v2/library/alpine/blobs/sha256:abc123" => %{
+          "config" => %{
+            "ExposedPorts" => %{"80/tcp" => %{}, "53/udp" => %{}},
+            "Volumes" => %{"/data" => %{}},
+            "Env" => ["APP_PORT=8080", "NODE_ENV=production", "PATH=/usr/bin"],
+            "Labels" => %{"maintainer" => "test"}
+          }
+        }
+      })
 
       capture_log(fn ->
-        result = ImageInspector.inspect("localhost:#{bypass.port}/library/alpine:latest")
-        assert match?({:ok, _}, result) or match?({:error, _}, result)
+        assert {:ok, result} =
+                 ImageInspector.inspect("localhost:#{bypass.port}/library/alpine:latest")
+
+        assert [%{"internal" => "53", "protocol" => "udp"}, %{"internal" => "80"}] =
+                 Enum.sort_by(result.ports, & &1["internal"])
+
+        assert [%{"path" => "/data"}] = result.volumes
+
+        # PATH is a system variable and is dropped on the way out.
+        assert [
+                 %{"key" => "APP_PORT", "value" => "8080"},
+                 %{"key" => "NODE_ENV", "value" => "production"}
+               ] = result.env
+
+        assert result.labels == %{"maintainer" => "test"}
       end)
+
+      assert_received {:asked, "/token", %{"scope" => "repository:library/alpine:pull"}, _}
+
+      assert_received {:asked, "/v2/library/alpine/manifests/latest", _, "Bearer test-token"}
     end
+
+    test "resolves a manifest list to the linux/amd64 image" do
+      bypass = Bypass.open()
+
+      serve(bypass, %{
+        "/token" => %{"token" => "t"},
+        "/v2/team/app/manifests/v1" => %{
+          "manifests" => [
+            %{
+              "digest" => "sha256:arm",
+              "platform" => %{"architecture" => "arm64", "os" => "linux"}
+            },
+            %{
+              "digest" => "sha256:amd",
+              "platform" => %{"architecture" => "amd64", "os" => "linux"}
+            }
+          ]
+        },
+        "/v2/team/app/manifests/sha256:amd" => %{"config" => %{"digest" => "sha256:cfg"}},
+        "/v2/team/app/blobs/sha256:cfg" => %{
+          "config" => %{"ExposedPorts" => %{"9000/tcp" => %{}}}
+        }
+      })
+
+      capture_log(fn ->
+        assert {:ok, %{ports: [%{"internal" => "9000"}]}} =
+                 ImageInspector.inspect("localhost:#{bypass.port}/team/app:v1")
+      end)
+
+      # The arm64 entry is listed first, so reaching the amd64 digest is a choice.
+      assert_received {:asked, "/v2/team/app/manifests/sha256:amd", _, _}
+      refute_received {:asked, "/v2/team/app/manifests/sha256:arm", _, _}
+    end
+
+    test "inspects a Docker Hub image through the configured endpoints" do
+      bypass = Bypass.open()
+      base = "http://localhost:#{bypass.port}"
+
+      Application.put_env(:homelab, ImageInspector,
+        docker_hub_url: base,
+        docker_hub_auth_url: base
+      )
+
+      on_exit(fn -> Application.delete_env(:homelab, ImageInspector) end)
+
+      serve(bypass, %{
+        "/token" => %{"token" => "hub-token"},
+        "/v2/library/nginx/manifests/1.25" => %{"config" => %{"digest" => "sha256:hub"}},
+        "/v2/library/nginx/blobs/sha256:hub" => %{
+          "config" => %{"Labels" => %{"org.opencontainers.image.title" => "nginx"}}
+        }
+      })
+
+      capture_log(fn ->
+        assert {:ok, result} = ImageInspector.inspect("nginx:1.25")
+        assert result.labels["org.opencontainers.image.title"] == "nginx"
+      end)
+
+      assert_received {:asked, "/token", %{"service" => "registry.docker.io"}, _}
+    end
+  end
+
+  # Bypass compiles a registered path through Plug's router matcher, where any segment
+  # containing a ":" becomes a wildcard — and every registry blob path carries a
+  # `sha256:` digest, so registered routes silently swallow each other's requests.
+  # Route the whole port by hand instead, and report each request to the test so it
+  # can assert on what was actually asked for.
+  defp serve(bypass, routes) do
+    test_pid = self()
+
+    Bypass.expect(bypass, fn conn ->
+      conn = Plug.Conn.fetch_query_params(conn)
+      auth = List.first(Plug.Conn.get_req_header(conn, "authorization"))
+      send(test_pid, {:asked, conn.request_path, conn.query_params, auth})
+
+      case Map.fetch(routes, conn.request_path) do
+        {:ok, body} ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(body))
+
+        :error ->
+          Plug.Conn.resp(conn, 404, "unrouted: #{conn.request_path}")
+      end
+    end)
   end
 end

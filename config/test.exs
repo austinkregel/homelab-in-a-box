@@ -88,12 +88,22 @@ config :homelab,
   # Nor a real HTTPS request: `verify_public_url` is planned on every routed release, and
   # the factory's domains are made-up names.
   url_probe: Homelab.Networking.UrlProbeStub,
+  # Nor a real registry or GitHub request: catalog metadata enrichment fans out to
+  # registry-1.docker.io, ghcr.io and raw.githubusercontent.com from a Task started on
+  # mount, for whatever image the entry names. The seam is at the caller
+  # (`MetadataEnricher`), so each enricher is still tested directly against Bypass.
+  image_inspector: Homelab.Catalog.Enrichers.ImageInspectorStub,
+  repo_scanner: Homelab.Catalog.Enrichers.RepoScannerStub,
   # The URL check polls. Tests that stage an unreachable URL are asserting the timeout
   # path, and must not spend the production 90s doing it.
   verify_url_timeout_ms: 50,
   verify_url_interval_ms: 10,
   start_services: false,
-  registries: [Homelab.Registries.DockerHub],
+  # No registry driver by default, for the same reason: catalog search and the
+  # deployment settings tag list both call out to hub.docker.com the moment a driver
+  # is configured. Tests that exercise a driver install their own — either a stub
+  # module, or the real `Homelab.Registries.DockerHub` pointed at Bypass.
+  registries: [],
   # In-process copy (no helper container) so migration steps run against temp dirs.
   migrate_copy_engine: Homelab.Deployments.Migrate.LocalCopyEngine
 
