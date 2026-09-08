@@ -94,6 +94,65 @@ defmodule Homelab.Deployments do
   end
 
   @doc """
+  The deployments a set of releases actually acts on, keyed by id — each release's anchor
+  plus every deployment its steps name through `resource_handle["deployment_id"]`.
+
+  This is what lets a release timeline say WHICH container came up healthy. A step's
+  subject is otherwise invisible in the UI: the anchor is the only deployment a release
+  row carries, and a stack release runs twenty-odd steps against rows it names only in
+  step handles. Rendered without them, a 27-step Media deploy is a column of identical
+  "Container healthy" lines.
+
+  Preloads `network_parent`, so a `:netns_child_container` step can name the donor whose
+  namespace the child joins — "which network they're in" is the question that step exists
+  to answer, and the donor is the answer.
+
+  One query for the whole page. Resolving per step would be twenty-seven.
+  """
+  def step_subjects(releases) do
+    ids =
+      releases
+      |> List.wrap()
+      |> Enum.flat_map(fn release ->
+        steps = if is_list(release.steps), do: release.steps, else: []
+        [release.deployment_id | Enum.flat_map(steps, &handle_deployment_id/1)]
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    by_ids(ids)
+  end
+
+  @doc """
+  Deployments keyed by id, with the associations a label needs — the template that names
+  them and the donor whose namespace they may sit in. Ids that no longer exist are simply
+  absent, so a caller rendering history survives a deletion.
+  """
+  def by_ids(ids) do
+    Deployment
+    |> where([d], d.id in ^ids)
+    |> preload([:app_template, network_parent: :app_template])
+    |> Repo.all()
+    |> Map.new(&{&1.id, &1})
+  end
+
+  # Handles are written by planners (`&1.id`, an integer) and by handlers re-reading their
+  # own target, so the value is normally an integer — but `active_release_driving/1`
+  # compares the same field as text, and nothing constrains what a handler stores. Both
+  # shapes are accepted rather than assumed.
+  defp handle_deployment_id(%{resource_handle: %{"deployment_id" => id}}) when is_integer(id),
+    do: [id]
+
+  defp handle_deployment_id(%{resource_handle: %{"deployment_id" => id}}) when is_binary(id) do
+    case Integer.parse(id) do
+      {parsed, ""} -> [parsed]
+      _ -> []
+    end
+  end
+
+  defp handle_deployment_id(_step), do: []
+
+  @doc """
   Re-reads which deployments live in this one's network namespace, with their templates.
 
   A fresh read rather than a cached association: the set changes when a SIBLING is

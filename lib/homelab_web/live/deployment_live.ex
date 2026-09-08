@@ -67,6 +67,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:siblings, [])
       |> assign(:releases, [])
       |> assign(:driving_release, nil)
+      |> assign(:step_subjects, %{})
       |> assign(:tls, :idle)
 
     {:ok, socket}
@@ -164,10 +165,16 @@ defmodule HomelabWeb.DeploymentLive do
   # this deployment is only a companion in it).
   defp assign_releases(socket) do
     id = socket.assigns.deployment.id
+    releases = Homelab.Deployments.Releases.list_releases_for_deployment(id)
+    driving = Homelab.Deployments.Releases.driving_release(id)
 
     socket
-    |> assign(:releases, Homelab.Deployments.Releases.list_releases_for_deployment(id))
-    |> assign(:driving_release, Homelab.Deployments.Releases.driving_release(id))
+    |> assign(:releases, releases)
+    |> assign(:driving_release, driving)
+    |> assign(
+      :step_subjects,
+      Homelab.Deployments.step_subjects(Enum.reject([driving | releases], &is_nil/1))
+    )
   end
 
   @impl true
@@ -879,7 +886,11 @@ defmodule HomelabWeb.DeploymentLive do
               >
                 Restart
               </button>
-              <.redeploy_button release={@driving_release} size="px-4 py-2 text-sm" />
+              <.redeploy_button
+                release={@driving_release}
+                size="px-4 py-2 text-sm"
+                subjects={@step_subjects}
+              />
               <button
                 type="button"
                 phx-click="delete"
@@ -912,7 +923,11 @@ defmodule HomelabWeb.DeploymentLive do
             <.icon name="hero-exclamation-triangle" class="size-5 text-error flex-shrink-0 mt-0.5" />
             <div class="min-w-0">
               <p class="text-sm font-semibold text-error">
-                Deploy stopped at "{humanize_step(failed_step(@driving_release).type)}"
+                Deploy stopped at "{step_headline(
+                  failed_step(@driving_release),
+                  @driving_release,
+                  @step_subjects
+                )}"
               </p>
               <p
                 :if={failed_step(@driving_release).reason_message}
@@ -1644,11 +1659,15 @@ defmodule HomelabWeb.DeploymentLive do
             <p class="text-xs text-base-content/40">
               Each release runs an ordered set of steps. A failed step stops the deploy — fix the cause and re-run.
             </p>
-            <.redeploy_button release={@driving_release} size="px-3 py-1.5 text-xs" />
+            <.redeploy_button
+              release={@driving_release}
+              size="px-3 py-1.5 text-xs"
+              subjects={@step_subjects}
+            />
           </div>
 
           <%!-- App deployments have their own release history. --%>
-          <.release_card :for={release <- @releases} release={release} />
+          <.release_card :for={release <- @releases} release={release} subjects={@step_subjects} />
 
           <%!-- Companion deployments (db/redis) have no release of their own —
                 surface the app's release that provisions them, so their state and
@@ -1657,7 +1676,7 @@ defmodule HomelabWeb.DeploymentLive do
             <p class="text-xs text-base-content/50 mb-2">
               This deployment is provisioned as part of another release:
             </p>
-            <.release_card release={@driving_release} />
+            <.release_card release={@driving_release} subjects={@step_subjects} />
           </div>
 
           <p
@@ -2319,6 +2338,7 @@ defmodule HomelabWeb.DeploymentLive do
 
   attr :release, :any, required: true
   attr :size, :string, required: true
+  attr :subjects, :map, default: %{}
 
   # Rendered in both states rather than hidden while a release runs. The button used to
   # carry `:if={can_redeploy?(...)}`, so pressing it made it disappear — which is a
@@ -2341,26 +2361,28 @@ defmodule HomelabWeb.DeploymentLive do
         <.icon name="hero-arrow-path" class="size-4" /> Re-run deploy
       <% else %>
         <.icon name="hero-arrow-path" class="size-4 animate-spin" />
-        {release_progress(@release)}
+        {release_progress(@release, @subjects)}
       <% end %>
     </button>
     """
   end
 
-  # "Deploying 3/7 · await health" beats a spinner: the steps are already in the release
-  # and the operator's next question is always which one is taking this long. Falls back
-  # to the release's own status once every step is done but the saga has not settled.
-  defp release_progress(%Homelab.Deployments.Release{} = release) do
+  # "Deploying 3/7 · Container healthy — gluetun" beats a spinner: the steps are already
+  # in the release and the operator's next question is always which one is taking this
+  # long — which on a stack release means which MEMBER, since six of the seven steps
+  # share a label. Falls back to the release's own status once every step is done but the
+  # saga has not settled.
+  defp release_progress(%Homelab.Deployments.Release{} = release, subjects) do
     steps = Enum.sort_by(release.steps, & &1.position)
     done = Enum.count(steps, &(&1.status in [:completed, :skipped]))
 
     case next_pending_or_running(steps) do
       nil -> format_status(release.status)
-      step -> "#{done}/#{length(steps)} · #{humanize_step(step.type)}"
+      step -> "#{done}/#{length(steps)} · #{step_headline(step, release, subjects)}"
     end
   end
 
-  defp release_progress(_release), do: "Working…"
+  defp release_progress(_release, _subjects), do: "Working…"
 
   defp next_pending_or_running(steps) do
     Enum.find(steps, &(&1.status == :running)) || Enum.find(steps, &(&1.status == :pending))
@@ -2393,6 +2415,91 @@ defmodule HomelabWeb.DeploymentLive do
   defp humanize_step(:adopt_container), do: "Container adopted"
   defp humanize_step(:verify_integrity), do: "Copied data verified"
   defp humanize_step(type), do: type |> to_string() |> String.replace("_", " ")
+
+  # WHICH thing the step acted on. The label says what happened; without this it does not
+  # say what it happened TO, and on a stack release that is most of the information.
+  #
+  # A netns stack deploy plans a step per member: twenty-seven rows reading "Container
+  # created", "Container healthy", "Domain claimed", "DNS records published" over and
+  # over, with nothing to tell one Media app from the next. Every one of those steps
+  # already knows its subject — the planner writes `deployment_id` into the handle, and
+  # the handlers write back the `fqdn` and `url` they actually used — so the timeline was
+  # dropping information it was holding.
+  #
+  # Prefers what the step RECORDED over what the row says now: the handle is the fact
+  # ("this is the name that was claimed"), the deployment is the intent ("this is the name
+  # it would claim today"). They differ exactly when someone has since moved a domain, and
+  # in that case the history must keep showing what actually happened. Pending steps have
+  # no handle yet and fall back to the row, which is the right guess for work not yet done.
+  defp step_subject(step, release, subjects) do
+    handle = step.resource_handle || %{}
+    target = Map.get(subjects, subject_id(handle, release))
+
+    subject_of(step.type, handle, target)
+  end
+
+  defp subject_id(%{"deployment_id" => id}, _release) when is_integer(id), do: id
+
+  defp subject_id(%{"deployment_id" => id}, release) when is_binary(id) do
+    case Integer.parse(id) do
+      {parsed, ""} -> parsed
+      _ -> release.deployment_id
+    end
+  end
+
+  defp subject_id(_handle, release), do: release.deployment_id
+
+  # Traefik is the subject, and there is only one of it — naming it on every release would
+  # be noise on the one step that is never ambiguous.
+  defp subject_of(:ensure_ingress_proxy, _handle, _target), do: nil
+
+  # The whole point of the step is which namespace the child joined, so name both ends.
+  defp subject_of(:netns_child_container, _handle, %{network_parent: donor} = target)
+       when not is_nil(donor),
+       do: "#{app_name(target)} via #{app_name(donor)}"
+
+  defp subject_of(:sync_domain, handle, target),
+    do: handle["fqdn"] || domain_of(target)
+
+  # The count answers the question the plural in "DNS records published" raises, and a
+  # deployment with aliases really does publish several.
+  defp subject_of(:publish_dns, handle, target) do
+    case {handle["fqdn"] || domain_of(target), handle["record_count"]} do
+      {nil, _} ->
+        nil
+
+      {fqdn, count} when is_integer(count) and count > 0 ->
+        "#{fqdn} (#{count} #{pluralize(count, "record")})"
+
+      {fqdn, _} ->
+        fqdn
+    end
+  end
+
+  defp subject_of(:verify_public_url, handle, target),
+    do: handle["url"] || domain_of(target)
+
+  defp subject_of(_type, _handle, target), do: app_name(target)
+
+  defp pluralize(1, word), do: word
+  defp pluralize(_count, word), do: word <> "s"
+
+  defp app_name(%{app_template: %{name: name}}) when is_binary(name) and name != "", do: name
+  defp app_name(%{app_template: %{slug: slug}}) when is_binary(slug) and slug != "", do: slug
+  defp app_name(_target), do: nil
+
+  defp domain_of(%{domain: domain}) when is_binary(domain) and domain != "", do: domain
+  defp domain_of(_target), do: nil
+
+  # The label an operator reads when a step is called out on its own, away from the
+  # timeline — the failure banner and the progress button. Both used to name the step
+  # type alone, which on a stack release identifies one of six rows that share it.
+  defp step_headline(step, release, subjects) do
+    case step_subject(step, release, subjects) do
+      nil -> humanize_step(step.type)
+      subject -> "#{humanize_step(step.type)} — #{subject}"
+    end
+  end
 
   # The steps in lifecycle order, grouped by stage. Releases planned before stages
   # existed carry none, and render as one flat list.
@@ -2449,6 +2556,7 @@ defmodule HomelabWeb.DeploymentLive do
   # One release: header (status + kind + time + lease), any release-level error, then the
   # ordered steps with per-step status and error.
   attr :release, :map, required: true
+  attr :subjects, :map, default: %{}
 
   defp release_card(assigns) do
     ~H"""
@@ -2496,6 +2604,10 @@ defmodule HomelabWeb.DeploymentLive do
             <div class="min-w-0">
               <p class="text-sm text-base-content">
                 {humanize_step(step.type)}
+                <% subject = step_subject(step, @release, @subjects) %>
+                <span :if={subject} class="font-medium text-base-content/70 break-all">
+                  — {subject}
+                </span>
                 <span class="text-xs text-base-content/40">· {format_status(step.status)}</span>
               </p>
               <p

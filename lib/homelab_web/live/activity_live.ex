@@ -3,6 +3,7 @@ defmodule HomelabWeb.ActivityLive do
 
   alias Homelab.Tenants
   alias Homelab.Audit
+  alias Homelab.Deployments
 
   @impl true
   def mount(_params, _session, socket) do
@@ -14,15 +15,106 @@ defmodule HomelabWeb.ActivityLive do
       |> assign(:page_title, "Activity")
       |> assign(:tenants, tenants)
       |> assign(:activities, activities)
+      |> assign(:subjects, subjects_for(activities))
 
     {:ok, socket}
   end
 
-  defp action_icon("deployment.created"), do: "hero-rocket-launch"
-  defp action_icon("deployment.stopped"), do: "hero-stop"
-  defp action_icon("deployment.started"), do: "hero-play"
-  defp action_icon("backup.created"), do: "hero-archive-box"
-  defp action_icon(_), do: "hero-bolt"
+  # The deployments these entries are ABOUT, resolved once for the page.
+  #
+  # Every writer already passes `deployment_id` in the metadata, and the row it produced
+  # rendered as "deploy #98" — an internal id, on the one page whose whole job is to say
+  # what happened to what. One query for a hundred rows.
+  defp subjects_for(activities) do
+    activities
+    |> Enum.flat_map(&List.wrap(subject_id(&1)))
+    |> Enum.uniq()
+    |> Deployments.by_ids()
+  end
+
+  defp subject_id(%{metadata: %{"deployment_id" => id}}) when is_integer(id), do: id
+
+  defp subject_id(%{metadata: %{"deployment_id" => id}}) when is_binary(id) do
+    case Integer.parse(id) do
+      {parsed, ""} -> parsed
+      _ -> nil
+    end
+  end
+
+  defp subject_id(_activity), do: nil
+
+  # What actually happened, in the words the writer used. `ActivityLog.push/4` has always
+  # carried a written message — "Sonarr deployed", "gluetun: the container whose network
+  # it shares was replaced" — and `persist_to_audit/4` files it under `metadata.message`,
+  # where this page was not looking. It rendered the ACTION instead, so a hundred distinct
+  # events collapsed into a wall of "Deploy Info" over "deploy #98".
+  #
+  # Rows written straight through `Audit.log/4` carry no message; those still fall back to
+  # the humanized action, which for them is the whole of what is known.
+  defp message(%{metadata: %{"message" => message}}) when is_binary(message) and message != "",
+    do: message
+
+  defp message(activity), do: format_action(activity.action)
+
+  # `ActivityLog` writes `"<source>.<level>"`. The level decides the colour, because an
+  # error and a routine info line were previously the same purple bolt — the page showed
+  # that something failed only if you read the sentence it was not printing.
+  defp level(%{action: action}) when is_binary(action) do
+    case action |> String.split(".") |> List.last() do
+      "error" -> :error
+      "warn" -> :warn
+      _ -> :info
+    end
+  end
+
+  defp level(_activity), do: :info
+
+  defp level_classes(:error), do: {"bg-error/10", "text-error"}
+  defp level_classes(:warn), do: {"bg-warning/10", "text-warning"}
+  defp level_classes(:info), do: {"bg-primary/10", "text-primary"}
+
+  defp action_icon(%{action: action} = activity) when is_binary(action) do
+    case level(activity) do
+      :error -> "hero-exclamation-triangle"
+      :warn -> "hero-exclamation-circle"
+      :info -> source_icon(action |> String.split(".") |> List.first())
+    end
+  end
+
+  defp action_icon(_activity), do: "hero-bolt"
+
+  defp source_icon("deploy"), do: "hero-rocket-launch"
+  defp source_icon("deployment"), do: "hero-rocket-launch"
+  defp source_icon("backup"), do: "hero-archive-box"
+  defp source_icon("dns"), do: "hero-globe-alt"
+  defp source_icon("domain"), do: "hero-globe-alt"
+  defp source_icon("reconciler"), do: "hero-arrow-path"
+  defp source_icon(_source), do: "hero-bolt"
+
+  # The trail under the message: where it came from, and which deployment it is about by
+  # NAME. Falls back to the raw resource only when the id resolves to nothing — a row
+  # about a deployment that has since been deleted still says what it can.
+  defp context_line(activity, subjects) do
+    [source_label(activity), subject_label(activity, subjects)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  defp source_label(%{action: action}) when is_binary(action),
+    do: action |> String.split(".") |> List.first() |> format_action()
+
+  defp source_label(%{resource_type: type}), do: type
+
+  defp subject_label(activity, subjects) do
+    case Map.get(subjects, subject_id(activity)) do
+      %{app_template: %{name: name}} when is_binary(name) and name != "" -> name
+      %{app_template: %{slug: slug}} when is_binary(slug) and slug != "" -> slug
+      _ -> fallback_subject(activity)
+    end
+  end
+
+  defp fallback_subject(%{resource_id: id}) when is_integer(id), do: "##{id}"
+  defp fallback_subject(_activity), do: nil
 
   defp format_relative_time(datetime) do
     diff_sec = DateTime.diff(DateTime.utc_now(), datetime, :second)
@@ -81,16 +173,19 @@ defmodule HomelabWeb.ActivityLive do
               :for={activity <- @activities}
               class="flex items-start gap-4 px-4 py-3 hover:bg-base-content/[0.02] transition-colors"
             >
-              <div class="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <.icon name={action_icon(activity.action)} class="size-4 text-primary" />
+              <% {icon_bg, icon_fg} = level_classes(level(activity)) %>
+              <div class={[
+                "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5",
+                icon_bg
+              ]}>
+                <.icon name={action_icon(activity)} class={["size-4", icon_fg]} />
               </div>
               <div class="min-w-0 flex-1">
-                <p class="text-sm font-medium text-base-content">
-                  {format_action(activity.action)}
+                <p class="text-sm font-medium text-base-content break-words">
+                  {message(activity)}
                 </p>
                 <p class="text-xs text-base-content/50 mt-0.5">
-                  {activity.resource_type}
-                  <span :if={activity.resource_id}> #{activity.resource_id}</span>
+                  {context_line(activity, @subjects)}
                   <span :if={activity.user}>
                     &middot; {activity.user.email}
                   </span>

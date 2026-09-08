@@ -74,6 +74,76 @@ defmodule HomelabWeb.ActivityLiveTest do
     end
   end
 
+  # The complaint: every row read "Deploy Info" over "deploy #98". The writers have always
+  # passed a written sentence and a deployment id; the page rendered neither.
+  describe "what actually happened" do
+    setup do
+      deployment =
+        insert(:deployment,
+          app_template: insert(:app_template, name: "Sonarr", slug: "sonarr"),
+          external_id: "sonarr1"
+        )
+
+      {:ok, deployment: deployment}
+    end
+
+    test "renders the message the writer recorded, not the action name", %{
+      conn: conn,
+      deployment: deployment
+    } do
+      Homelab.Services.ActivityLog.info("deploy", "Sonarr deployed", %{
+        deployment_id: deployment.id
+      })
+
+      {:ok, _view, html} = live(conn, ~p"/activity")
+
+      assert html =~ "Sonarr deployed"
+    end
+
+    test "names the deployment instead of printing its id", %{
+      conn: conn,
+      deployment: deployment
+    } do
+      Homelab.Services.ActivityLog.warn("reconciler", "Container not found", %{
+        deployment_id: deployment.id
+      })
+
+      {:ok, _view, html} = live(conn, ~p"/activity")
+
+      assert html =~ "Container not found"
+
+      # The trail names the source and the deployment, in place of the "reconciler #98"
+      # that was there before.
+      assert html =~ "Reconciler &middot; Sonarr" or html =~ "Reconciler · Sonarr"
+    end
+
+    # An error and a routine info line rendered as the same purple bolt, so the one row
+    # worth finding looked like the ninety-nine around it.
+    test "an error is coloured as one", %{conn: conn, deployment: deployment} do
+      Homelab.Services.ActivityLog.error("deploy", "Image pull failed", %{
+        deployment_id: deployment.id
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/activity")
+
+      assert has_element?(view, "[class*='text-error']")
+      assert render(view) =~ "Image pull failed"
+    end
+
+    # A deployment can be deleted after the entry is written; the row must still render.
+    test "survives a subject that no longer exists", %{conn: conn, deployment: deployment} do
+      Homelab.Services.ActivityLog.info("deploy", "Sonarr removed", %{
+        deployment_id: deployment.id
+      })
+
+      Homelab.Repo.delete!(deployment)
+
+      {:ok, _view, html} = live(conn, ~p"/activity")
+
+      assert html =~ "Sonarr removed"
+    end
+  end
+
   describe "page header" do
     test "shows clock icon in header", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/activity")

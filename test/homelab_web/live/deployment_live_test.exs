@@ -222,6 +222,143 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert html =~ "Dependency container started"
     end
 
+    # The complaint this answers: a stack release plans the same handful of step types
+    # against every member, so the timeline was a column of identical "Container healthy"
+    # lines with no way to tell which app each one was about.
+    test "names the deployment each step acted on, so repeated labels stay distinguishable",
+         %{conn: conn, tenant: tenant} do
+      alias Homelab.Deployments.Releases
+
+      donor =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, name: "Gluetun", slug: "gluetun"),
+          domain: nil
+        )
+
+      sonarr =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, name: "Sonarr", slug: "sonarr"),
+          domain: "sonarr.media.test",
+          network_parent_id: donor.id
+        )
+
+      radarr =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, name: "Radarr", slug: "radarr"),
+          domain: "radarr.media.test",
+          network_parent_id: donor.id
+        )
+
+      {:ok, _release} =
+        Releases.plan_release(donor, [
+          %{stage: :workload, type: :app_container, resource_handle: %{}},
+          %{stage: :workload, type: :await_health, resource_handle: %{}},
+          %{
+            stage: :workload,
+            type: :netns_child_container,
+            resource_handle: %{"deployment_id" => sonarr.id}
+          },
+          %{
+            stage: :workload,
+            type: :await_health,
+            resource_handle: %{"deployment_id" => sonarr.id}
+          },
+          %{
+            stage: :workload,
+            type: :netns_child_container,
+            resource_handle: %{"deployment_id" => radarr.id}
+          },
+          %{stage: :naming, type: :sync_domain, resource_handle: %{"deployment_id" => sonarr.id}},
+          %{stage: :naming, type: :sync_domain, resource_handle: %{"deployment_id" => radarr.id}}
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{donor.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      # An empty handle means the anchor — the donor's own container.
+      assert html =~ "Gluetun"
+
+      # Which network they are in is the whole point of the step, so both ends are named.
+      assert html =~ "Sonarr via Gluetun"
+      assert html =~ "Radarr via Gluetun"
+
+      # Two identical "Container healthy" rows, now told apart by their subject.
+      assert html =~ "Container healthy"
+      assert html =~ "Sonarr"
+
+      # Domain steps name the domain, not the app: it is the thing being claimed.
+      assert html =~ "sonarr.media.test"
+      assert html =~ "radarr.media.test"
+    end
+
+    # The handle is what the step actually did; the row is only what it would do today.
+    # A domain moved after the fact must not rewrite the history of the deploy that
+    # published the old one.
+    test "domain steps show the name that was published, not the one the row holds now",
+         %{conn: conn, tenant: tenant, template: template} do
+      alias Homelab.Deployments.Releases
+
+      dep =
+        insert(:deployment, tenant: tenant, app_template: template, domain: "new.example.test")
+
+      {:ok, release} =
+        Releases.plan_release(dep, [%{stage: :naming, type: :publish_dns, resource_handle: %{}}])
+
+      [step] = release.steps
+
+      _ =
+        Releases.record_step_handle(step, %{
+          "deployment_id" => dep.id,
+          "fqdn" => "old.example.test",
+          "record_count" => 2
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "releases"})
+
+      assert html =~ "old.example.test"
+      assert html =~ "2 records"
+      refute html =~ "new.example.test"
+    end
+
+    # The banner calls one step out on its own, where "Container healthy" identifies
+    # nothing at all.
+    test "the failure banner names the step's subject", %{
+      conn: conn,
+      tenant: tenant,
+      template: template
+    } do
+      alias Homelab.Deployments.Releases
+
+      app = insert(:deployment, tenant: tenant, app_template: template, status: :failed)
+
+      companion =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, name: "Postgres", slug: "postgres"),
+          status: :failed
+        )
+
+      {:ok, release} =
+        Releases.plan_release(app, [
+          %{
+            stage: :workload,
+            type: :dependency_container,
+            resource_handle: %{"deployment_id" => companion.id}
+          }
+        ])
+
+      [step] = release.steps
+      {:ok, _} = Releases.transition_step(step, :failed, [:pending], reason: {"error", "boom"})
+
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{app.id}")
+
+      assert html =~ "Deploy stopped at &quot;Dependency container started — Postgres&quot;"
+    end
+
     test "redeploy re-plans a release and flashes", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
       html = render_click(view, "redeploy")
