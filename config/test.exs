@@ -54,6 +54,11 @@ config :homelab, Homelab.ObanRepo,
 
 config :homelab, Oban, testing: :manual
 
+# `Oban.Repo.transaction/3` treats `Postgrex.Error` as retryable: 5 attempts with a
+# 500ms-scaling backoff, ~5s of sleeping, before it reraises. A test that breaks the
+# Oban backend on purpose is asserting the raise, not the backoff.
+config :oban, Oban.Repo, retry_opts: [retry: 1]
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :homelab, HomelabWeb.Endpoint,
