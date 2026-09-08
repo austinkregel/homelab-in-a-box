@@ -10,6 +10,23 @@ defmodule HomelabWeb.CatalogLiveTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  # Deploying from the catalog ensures the ingress proxy. With no daemon and no
+  # TRAEFIK_DNS_API_TOKEN that is a real failure these tests are not about, so state the
+  # answer through the seam the saga's ingress step and `GatewayProvisioner` read.
+  setup do
+    prev = Application.get_env(:homelab, :ingress_proxy_ensurer)
+    Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:ok, :already_running} end)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:homelab, :ingress_proxy_ensurer)
+        fun -> Application.put_env(:homelab, :ingress_proxy_ensurer, fun)
+      end
+    end)
+
+    :ok
+  end
+
   setup do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
 

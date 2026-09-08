@@ -21,6 +21,7 @@ defmodule HomelabWeb.Api.V1.ApiPipelineTest do
   """
   use HomelabWeb.ConnCase, async: false
 
+  import ExUnit.CaptureLog
   import Homelab.Factory
 
   @breakglass_token String.duplicate("p", 32)
@@ -61,11 +62,15 @@ defmodule HomelabWeb.Api.V1.ApiPipelineTest do
       arm_breakglass()
       insert(:tenant, name: "Friends", slug: "friends")
 
-      logged_in =
-        Phoenix.ConnTest.build_conn()
-        |> Plug.Conn.put_private(:plug_skip_csrf_protection, true)
-        |> post("/auth/break-glass", %{"token" => @breakglass_token})
+      {logged_in, log} =
+        with_log(fn ->
+          Phoenix.ConnTest.build_conn()
+          |> Plug.Conn.put_private(:plug_skip_csrf_protection, true)
+          |> post("/auth/break-glass", %{"token" => @breakglass_token})
+        end)
 
+      assert log =~ "BREAK-GLASS login SUCCEEDED"
+      assert log =~ "BREAK-GLASS: token consumed"
       assert redirected_to(logged_in) == "/"
       assert [_ | _] = Map.keys(logged_in.resp_cookies)
 

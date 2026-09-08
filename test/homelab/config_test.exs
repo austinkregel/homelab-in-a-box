@@ -148,7 +148,14 @@ defmodule Homelab.ConfigTest do
   end
 
   describe "registries/0" do
-    test "returns configured test registries" do
+    # The suite configures no registry driver, so this states its own: a driver is what
+    # sends catalog search and the tag list out to hub.docker.com, and a test that merely
+    # reads the ambient config would assert the absence rather than the lookup.
+    test "returns the configured registry modules" do
+      prev = Application.get_env(:homelab, :registries)
+      Application.put_env(:homelab, :registries, [Homelab.Registries.DockerHub])
+      on_exit(fn -> Application.put_env(:homelab, :registries, prev) end)
+
       registries = Config.registries()
       assert is_list(registries)
       assert Homelab.Registries.DockerHub in registries
