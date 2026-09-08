@@ -33,7 +33,10 @@ defmodule Homelab.Backups do
         deployment: deployment,
         jobs: jobs,
         last_completed_at:
-          completed |> Enum.map(& &1.completed_at) |> Enum.reject(&is_nil/1) |> Enum.max(fn -> nil end),
+          completed
+          |> Enum.map(& &1.completed_at)
+          |> Enum.reject(&is_nil/1)
+          |> Enum.max(fn -> nil end),
         state:
           cond do
             completed != [] -> :protected
@@ -81,7 +84,11 @@ defmodule Homelab.Backups do
     known = BackupJob |> Repo.all() |> MapSet.new(& &1.snapshot_id)
 
     Enum.map(snapshots, fn snapshot ->
-      Map.put(snapshot, :state, if(MapSet.member?(known, snapshot.id), do: :tracked, else: :orphaned))
+      Map.put(
+        snapshot,
+        :state,
+        if(MapSet.member?(known, snapshot.id), do: :tracked, else: :orphaned)
+      )
     end)
   end
 

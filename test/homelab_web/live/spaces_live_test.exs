@@ -51,7 +51,11 @@ defmodule HomelabWeb.SpacesLiveTest do
     {:ok, view, _html} = live(conn, ~p"/spaces")
 
     render_click(view, "open_create", %{})
-    html = render_submit(view, "save_space", %{"tenant" => %{"name" => "Identity", "slug" => "identity"}})
+
+    html =
+      render_submit(view, "save_space", %{
+        "tenant" => %{"name" => "Identity", "slug" => "identity"}
+      })
 
     assert html =~ "Identity"
     assert Enum.any?(Homelab.Tenants.list_tenants(), &(&1.slug == "identity"))
@@ -61,7 +65,9 @@ defmodule HomelabWeb.SpacesLiveTest do
     {:ok, view, _html} = live(conn, ~p"/spaces")
 
     render_click(view, "open_create", %{})
-    html = render_submit(view, "save_space", %{"tenant" => %{"name" => "Bad", "slug" => "-nope-"}})
+
+    html =
+      render_submit(view, "save_space", %{"tenant" => %{"name" => "Bad", "slug" => "-nope-"}})
 
     assert html =~ "must be lowercase alphanumeric"
     assert Homelab.Tenants.list_tenants() == []

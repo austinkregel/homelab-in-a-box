@@ -56,8 +56,11 @@ defmodule HomelabWeb.AppsLive do
     {:noreply, push_patch(socket, to: path_for(socket.assigns.query, space_id))}
   end
 
-  def handle_event("start", %{"id" => id}, socket), do: act(socket, id, &Deployments.start_deployment/1, "starting")
-  def handle_event("stop", %{"id" => id}, socket), do: act(socket, id, &Deployments.stop_deployment/1, "stopped")
+  def handle_event("start", %{"id" => id}, socket),
+    do: act(socket, id, &Deployments.start_deployment/1, "starting")
+
+  def handle_event("stop", %{"id" => id}, socket),
+    do: act(socket, id, &Deployments.stop_deployment/1, "stopped")
 
   def handle_event("restart", %{"id" => id}, socket),
     do: act(socket, id, &Deployments.restart_deployment/1, "restarting")
@@ -67,8 +70,11 @@ defmodule HomelabWeb.AppsLive do
 
     socket =
       case fun.(deployment) do
-        {:ok, _} -> put_flash(socket, :info, "#{deployment.app_template.name} #{verb}.")
-        {:error, _} -> put_flash(socket, :error, "Could not #{verb} #{deployment.app_template.name}.")
+        {:ok, _} ->
+          put_flash(socket, :info, "#{deployment.app_template.name} #{verb}.")
+
+        {:error, _} ->
+          put_flash(socket, :error, "Could not #{verb} #{deployment.app_template.name}.")
       end
 
     {:noreply, load_deployments(socket)}
@@ -112,7 +118,8 @@ defmodule HomelabWeb.AppsLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, :visible, visible(assigns.deployments, assigns.query, assigns.space_id))
+    assigns =
+      assign(assigns, :visible, visible(assigns.deployments, assigns.query, assigns.space_id))
 
     ~H"""
     <Layouts.app
@@ -179,7 +186,10 @@ defmodule HomelabWeb.AppsLive do
           </button>
         </div>
 
-        <div :if={@visible == []} class="rounded-lg border border-base-content/[0.06] bg-base-100 px-6 py-16 text-center">
+        <div
+          :if={@visible == []}
+          class="rounded-lg border border-base-content/[0.06] bg-base-100 px-6 py-16 text-center"
+        >
           <div class="mx-auto w-14 h-14 rounded-lg bg-base-200/80 flex items-center justify-center mb-4">
             <.icon name="hero-cube" class="size-6 text-base-content/20" />
           </div>
@@ -297,7 +307,8 @@ defmodule HomelabWeb.AppsLive do
       "px-3 py-1.5 rounded-full text-xs font-medium transition-colors cursor-pointer",
       if(active?,
         do: "bg-primary/15 text-primary",
-        else: "bg-base-100 text-base-content/50 hover:text-base-content border border-base-content/[0.08]"
+        else:
+          "bg-base-100 text-base-content/50 hover:text-base-content border border-base-content/[0.08]"
       )
     ]
   end

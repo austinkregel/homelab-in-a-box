@@ -182,11 +182,17 @@ defmodule HomelabWeb.BackupsLive do
             </span>
           </div>
 
-          <div :if={@coverage == []} class="rounded-2xl border border-base-content/[0.06] bg-base-100 px-6 py-10 text-center">
+          <div
+            :if={@coverage == []}
+            class="rounded-2xl border border-base-content/[0.06] bg-base-100 px-6 py-10 text-center"
+          >
             <p class="text-sm text-base-content/50">Nothing is deployed yet.</p>
           </div>
 
-          <div :if={@coverage != []} class="rounded-2xl border border-base-content/[0.06] bg-base-100 divide-y divide-base-content/[0.04] overflow-hidden">
+          <div
+            :if={@coverage != []}
+            class="rounded-2xl border border-base-content/[0.06] bg-base-100 divide-y divide-base-content/[0.04] overflow-hidden"
+          >
             <div :for={row <- @coverage} class="flex items-center gap-4 px-4 py-3">
               <.link
                 navigate={~p"/deployments/#{row.deployment.id}?tab=backups"}
@@ -214,13 +220,19 @@ defmodule HomelabWeb.BackupsLive do
         <div>
           <div class="flex items-baseline justify-between mb-3">
             <h2 class="text-sm font-semibold text-base-content">In the repository</h2>
-            <span :if={is_tuple(@snapshots) and elem(@snapshots, 0) == :ok} class="text-xs text-base-content/40">
+            <span
+              :if={is_tuple(@snapshots) and elem(@snapshots, 0) == :ok}
+              class="text-xs text-base-content/40"
+            >
               {Enum.count(elem(@snapshots, 1), &(&1.state == :orphaned))} with no deployment
             </span>
           </div>
 
           <div class="rounded-2xl border border-base-content/[0.06] bg-base-100 overflow-hidden">
-            <p :if={@snapshots == :loading} class="px-6 py-10 text-center text-sm text-base-content/40">
+            <p
+              :if={@snapshots == :loading}
+              class="px-6 py-10 text-center text-sm text-base-content/40"
+            >
               Reading the backup repository…
             </p>
 
@@ -230,7 +242,10 @@ defmodule HomelabWeb.BackupsLive do
             </div>
 
             <%= if match?({:ok, _}, @snapshots) do %>
-              <p :if={elem(@snapshots, 1) == []} class="px-6 py-10 text-center text-sm text-base-content/40">
+              <p
+                :if={elem(@snapshots, 1) == []}
+                class="px-6 py-10 text-center text-sm text-base-content/40"
+              >
                 The repository holds no snapshots.
               </p>
               <div :if={elem(@snapshots, 1) != []} class="divide-y divide-base-content/[0.04]">
@@ -395,5 +410,4 @@ defmodule HomelabWeb.BackupsLive do
   defp last_backup_label(%{last_completed_at: nil, jobs: []}), do: "never run"
   defp last_backup_label(%{last_completed_at: nil}), do: "no successful run"
   defp last_backup_label(%{last_completed_at: at}), do: Calendar.strftime(at, "%Y-%m-%d %H:%M")
-
 end

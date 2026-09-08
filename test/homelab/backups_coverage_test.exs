@@ -49,8 +49,20 @@ defmodule Homelab.BackupsCoverageTest do
       |> expect(:list_snapshots, fn "/backups/repo" ->
         {:ok,
          [
-           %{id: "keep01", time: "2026-03-02T10:00:00Z", hostname: "box", tags: [], paths: ["/data"]},
-           %{id: "gone42", time: "2026-02-01T10:00:00Z", hostname: "box", tags: [], paths: ["/data"]}
+           %{
+             id: "keep01",
+             time: "2026-03-02T10:00:00Z",
+             hostname: "box",
+             tags: [],
+             paths: ["/data"]
+           },
+           %{
+             id: "gone42",
+             time: "2026-02-01T10:00:00Z",
+             hostname: "box",
+             tags: [],
+             paths: ["/data"]
+           }
          ]}
       end)
 

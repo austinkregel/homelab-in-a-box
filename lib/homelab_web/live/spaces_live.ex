@@ -31,7 +31,8 @@ defmodule HomelabWeb.SpacesLive do
      |> assign(:space_form, to_form(Tenants.change_tenant(%Tenant{})))}
   end
 
-  def handle_event("close_create", _params, socket), do: {:noreply, assign(socket, :show_create, false)}
+  def handle_event("close_create", _params, socket),
+    do: {:noreply, assign(socket, :show_create, false)}
 
   def handle_event("validate_space", %{"tenant" => params}, socket) do
     form =
@@ -103,7 +104,10 @@ defmodule HomelabWeb.SpacesLive do
           </button>
         </div>
 
-        <div :if={@spaces == []} class="rounded-lg border border-base-content/[0.06] bg-base-100 px-6 py-16 text-center">
+        <div
+          :if={@spaces == []}
+          class="rounded-lg border border-base-content/[0.06] bg-base-100 px-6 py-16 text-center"
+        >
           <div class="mx-auto w-14 h-14 rounded-lg bg-base-200/80 flex items-center justify-center mb-4">
             <.icon name="hero-folder" class="size-6 text-base-content/20" />
           </div>
@@ -159,7 +163,12 @@ defmodule HomelabWeb.SpacesLive do
       >
         <div class="w-full max-w-md rounded-lg bg-base-100 p-6" phx-click-away="close_create">
           <h2 class="text-lg font-semibold text-base-content mb-4">New space</h2>
-          <.form for={@space_form} phx-change="validate_space" phx-submit="save_space" class="space-y-4">
+          <.form
+            for={@space_form}
+            phx-change="validate_space"
+            phx-submit="save_space"
+            class="space-y-4"
+          >
             <div>
               <label class="block text-xs font-medium text-base-content/60 mb-1.5">Name</label>
               <.input field={@space_form[:name]} type="text" placeholder="Media" />
