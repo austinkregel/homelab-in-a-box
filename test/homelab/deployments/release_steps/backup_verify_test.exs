@@ -1,6 +1,8 @@
 defmodule Homelab.Deployments.ReleaseSteps.BackupVerifyTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Homelab.Deployments.ReleaseSteps.BackupVerify
 
   setup do
@@ -47,8 +49,13 @@ defmodule Homelab.Deployments.ReleaseSteps.BackupVerifyTest do
   test "is fail-closed: a missing preserve source errors the gate" do
     s = step([%{"name" => "gitlab", "path" => "/no/such/source", "tier" => "preserve"}])
 
-    assert {:error, {:backup_verify_failed, "gitlab", {:source_missing, _}}} =
-             BackupVerify.run(s, ctx())
+    log =
+      capture_log(fn ->
+        assert {:error, {:backup_verify_failed, "gitlab", {:source_missing, _}}} =
+                 BackupVerify.run(s, ctx())
+      end)
+
+    assert log =~ "[backup_verify] FAILED"
   end
 
   test "compensate removes the backup root", %{src: src} do

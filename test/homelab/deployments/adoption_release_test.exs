@@ -7,6 +7,11 @@ defmodule Homelab.Deployments.AdoptionReleaseTest do
   """
   use Homelab.DataCase, async: false
 
+  # Two of the three tests fail a step on purpose, and the runner logs
+  # `[release] N failed (...); rolling back` on the way into compensation. The
+  # assertions read the release row and the messages the stubs send back.
+  @moduletag :capture_log
+
   import Mox
   import Homelab.Factory
 
