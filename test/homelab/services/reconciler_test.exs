@@ -297,6 +297,54 @@ defmodule Homelab.Services.ReconcilerTest do
 
       assert_enqueued(worker: ReleaseRunner, args: %{"release_id" => release.id})
     end
+
+    # `resume_stuck_releases/0` is the FIRST thing `reconcile/1` does, and `reconcile/1`
+    # runs inside a `handle_info`. Oban lives on its own Postgres, so a backend failure
+    # raises out of `Oban.insert/1` — and a raise here does not merely skip the resume, it
+    # takes the GenServer down and cancels the rest of the pass: convergence, the timeout
+    # and netns sweeps, and the ingress invariant, none of which involve the job queue.
+    #
+    # Broken at the backend rather than by stubbing the enqueue, for the reason
+    # `enqueue_or_log/1`'s own test gives: the failure mode is that `Oban.insert/1` RAISES
+    # rather than returning `{:error, _}`, so a double that returns an error tuple would
+    # pass over code that only handles the shape that cannot happen. The DDL runs inside
+    # the sandbox transaction and is rolled back with the rest of the test.
+    test "an unreachable job queue does not abort the rest of the pass" do
+      record_orchestrator_io(self())
+      tenant = insert(:tenant, slug: "acme")
+
+      # Something for the resume to trip over: an unleased, non-terminal release.
+      stuck = insert(:deployment, tenant: tenant, status: :pending)
+      {:ok, _release} = Releases.plan_release(stuck, [%{type: :app_container}])
+
+      # And something LATER in the same pass to prove it still ran.
+      routed =
+        insert(:deployment,
+          tenant: tenant,
+          app_template: insert(:app_template, slug: "live", health_check: %{"path" => "/health"}),
+          status: :running,
+          external_id: "c1",
+          domain: "live.acme.test"
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:list_services, fn -> {:ok, [svc("c1", %{state: :running, health: :healthy})]} end)
+
+      Homelab.ObanRepo.query!("ALTER TABLE oban_jobs RENAME TO oban_jobs_unreachable")
+
+      pid = start_supervised!({Reconciler, interval: :manual})
+
+      # NOT `start_and_sync!/0`, and not `sync_now/0`'s own 5s default: `Oban.Repo`
+      # retries a `Postgrex.Error` five times on a 500ms-scaling backoff before it
+      # reraises, so an unreachable queue costs the pass several seconds PER resumable
+      # release. That cost is the subject of its own discussion; what is being asserted
+      # here is only that the pass completes at all.
+      :ok = Reconciler.sync_now(60_000)
+
+      assert Process.alive?(pid)
+      assert_receive {:published, "c1"}, 5_000
+      assert Deployments.get_deployment!(routed.id).status == :running
+    end
   end
 
   describe "ingress invariant" do

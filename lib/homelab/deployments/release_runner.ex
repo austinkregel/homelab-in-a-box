@@ -72,6 +72,8 @@ defmodule Homelab.Deployments.ReleaseRunner do
   # A third of the TTL, so two beats can be lost to a slow database before the
   # lease is even at risk. Overridable for tests, which cannot wait 40 seconds.
   @lease_heartbeat_ms 40_000
+  # How long a step boundary waits for the heartbeat to stand down before killing it.
+  @heartbeat_stop_ms 5_000
 
   # --- Oban entry point -----------------------------------------------------
 
@@ -376,20 +378,62 @@ defmodule Homelab.Deployments.ReleaseRunner do
   # A lost lease is NOT escalated here. The step is already running and cannot be
   # un-run, and the transitions that follow it are compare-and-set, so the loser
   # no-ops rather than corrupting state. Logging it keeps the cause visible.
+  #
+  # The beat runs in its own process, so it carries the caller chain across explicitly.
+  # `$callers` is what `Ecto.Adapters.SQL.Sandbox` resolves connection ownership through,
+  # and `spawn_monitor` propagates nothing: without this the beat's `renew_lease/3` has no
+  # owner to borrow in a test, raises `DBConnection.OwnershipError` on its FIRST beat, and
+  # dies where nothing is watching — so the lease lapses and the test proves the
+  # un-heartbeated path while reporting green. In production it is inert.
   defp with_lease_heartbeat(release_id, owner, fun) do
-    {pid, ref} = spawn_monitor(fn -> heartbeat_loop(release_id, owner) end)
+    callers = [self() | Process.get(:"$callers", [])]
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        Process.put(:"$callers", callers)
+        heartbeat_loop(release_id, owner)
+      end)
 
     try do
       fun.()
     after
-      Process.demonitor(ref, [:flush])
-      Process.exit(pid, :kill)
+      stop_heartbeat(pid, ref)
     end
   end
 
-  defp heartbeat_loop(release_id, owner) do
-    Process.sleep(heartbeat_ms())
+  # Asks the beat to finish and waits for it, rather than killing it outright.
+  #
+  # This fires at every step boundary and at the end of every compensation walk, on a
+  # process that may be inside its `renew_lease/3` UPDATE. `Process.exit(pid, :kill)` is
+  # untrappable, so it lands mid-query — abandoning a checked-out pooled connection to be
+  # reclaimed by the pool's own monitor rather than returned. The loop parks in `receive`
+  # between beats, so `:stop` is answered as soon as the beat in flight (if any) finishes.
+  #
+  # The kill stays as the backstop for a beat wedged on a database that is not answering:
+  # a lost lease is not worth stalling the runner over, and by this point the step it was
+  # protecting is done.
+  defp stop_heartbeat(pid, ref) do
+    send(pid, :stop)
 
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      @heartbeat_stop_ms ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+    end
+  end
+
+  # `receive`, not `Process.sleep/1`, so the wait between beats is interruptible.
+  defp heartbeat_loop(release_id, owner) do
+    receive do
+      :stop -> :ok
+    after
+      heartbeat_ms() -> beat(release_id, owner)
+    end
+  end
+
+  defp beat(release_id, owner) do
     case Releases.renew_lease(release_id, owner, lease_ttl_seconds()) do
       :ok ->
         heartbeat_loop(release_id, owner)

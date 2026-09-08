@@ -220,9 +220,16 @@ defmodule Homelab.Services.Reconciler do
   # release with no live owner is re-enqueued; the runner reclaims it or, if it
   # had already failed mid-rollback, drives it to a terminal state. This is what
   # gives stuck `:pending`/in-flight deployments a convergence path.
+  #
+  # `enqueue_or_log/1`, not `enqueue/1`: Oban has its own physically separate Postgres,
+  # and a backend failure there RAISES out of `Oban.insert/1`. This runs first in
+  # `reconcile/1`, which runs inside a `handle_info` — so a raise takes the GenServer
+  # down and the whole rest of the pass (stranded adoption, convergence, the timeout and
+  # netns sweeps, the ingress invariant) never happens. None of those depend on the job
+  # queue, and the releases this skips are re-listed on the next tick anyway.
   defp resume_stuck_releases do
     Releases.list_resumable_releases()
-    |> Enum.each(&ReleaseRunner.enqueue/1)
+    |> Enum.each(&ReleaseRunner.enqueue_or_log/1)
   end
 
   # 1b. Deployments no release ever covered.

@@ -5,6 +5,11 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
 
   import Homelab.Factory
 
+  # Most of this file drives deliberate failures — rollbacks, interrupted rollbacks, a
+  # queue with its jobs table renamed out from under it — and each one logs at :warning
+  # or :error on the way to the state being asserted. The assertions are the record.
+  @moduletag :capture_log
+
   alias Homelab.Deployments.{Releases, ReleaseRunner}
 
   # A controllable handler that reports each run/compensate to the test process
@@ -528,6 +533,28 @@ defmodule Homelab.Deployments.ReleaseRunnerTest do
       # normally; the compare-and-set transitions are what keep the loser honest.
       send(handler, :proceed)
       assert :ok = Task.await(task, 5_000)
+    end
+
+    # The beat is what holds the lease open past its TTL, so a beat that outlives the
+    # step it was protecting holds the release open forever — nothing else ever writes
+    # `lease_expires_at` back down, and the reconciler's resumable query is keyed on it.
+    # The stop is a message the loop answers between beats, not a kill, so the proof is
+    # that the renewals stop rather than that a process is gone.
+    test "the heartbeat stops when the step it protects does" do
+      release = plan(insert(:deployment), [:backup_verify])
+      task = Task.async(fn -> ReleaseRunner.run(release.id, owner: "hb-owner") end)
+
+      assert_receive {:blocking_started, handler}, 1_000
+      send(handler, :proceed)
+      assert :ok = Task.await(task, 5_000)
+
+      settled = Releases.get_release(release.id).lease_expires_at
+
+      # Several beat intervals, and past the 1s TTL: a leaked beat would have pushed
+      # the expiry forward at least four times by now.
+      Process.sleep(1_200)
+
+      assert Releases.get_release(release.id).lease_expires_at == settled
     end
   end
 
