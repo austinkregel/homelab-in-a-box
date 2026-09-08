@@ -13,8 +13,8 @@ defmodule HomelabWeb.WorkbenchLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Catalog
-  alias Homelab.IndexedParams
   alias Homelab.Catalog.ImageBuilder
+  alias Homelab.IndexedParams
   alias Homelab.Workbench
   alias Homelab.Tenants
 
