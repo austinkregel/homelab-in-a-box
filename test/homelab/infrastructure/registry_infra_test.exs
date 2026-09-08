@@ -7,6 +7,7 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
   # and touches Settings (DB) via ensure_traefik/ensure_registry.
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Mox
 
   alias Homelab.Infrastructure
@@ -20,11 +21,22 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
     :ok
   end
 
+  # `ensure_traefik/0` attaches the plane's own route on both sides of the recreate, and
+  # both attaches need a URL back to this container. State it rather than let it probe
+  # $HOSTNAME and inspect a container these tests never mock — the subject here is the
+  # Traefik `Cmd`, and the attach is collateral.
+  defp stub_self_service_url do
+    prev = Application.get_env(:homelab, :self_service_url)
+    Application.put_env(:homelab, :self_service_url, "http://homelab-iab:4000")
+    on_exit(fn -> restore_app_env(:self_service_url, prev) end)
+  end
+
   describe "ensure_traefik/0 routing providers" do
     setup do
       prev = System.get_env("TRAEFIK_DNS_API_TOKEN")
       System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
       on_exit(fn -> restore_env("TRAEFIK_DNS_API_TOKEN", prev) end)
+      stub_self_service_url()
       :ok
     end
 
@@ -90,13 +102,23 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
     setup do
       prev = System.get_env("TRAEFIK_DNS_API_TOKEN")
       on_exit(fn -> restore_env("TRAEFIK_DNS_API_TOKEN", prev) end)
+      stub_self_service_url()
       :ok
     end
 
     test "fails closed with no Docker calls when the token env var is missing" do
       System.delete_env("TRAEFIK_DNS_API_TOKEN")
-      # No mock expectations set → any Docker call would fail verify_on_exit!.
-      assert {:error, :dns_token_missing} = Infrastructure.ensure_traefik()
+
+      # The missing token is what this test stages, and `ensure_traefik/0` reports it at
+      # error severity — captured so the expected complaint does not read as a real one
+      # in the suite's output.
+      log =
+        capture_log(fn ->
+          # No mock expectations set → any Docker call would fail verify_on_exit!.
+          assert {:error, :dns_token_missing} = Infrastructure.ensure_traefik()
+        end)
+
+      assert log =~ "TRAEFIK_DNS_API_TOKEN is not set"
     end
 
     test "injects DNS-01 provider flags and the CF token env when creating Traefik" do

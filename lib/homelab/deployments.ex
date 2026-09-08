@@ -1329,19 +1329,36 @@ defmodule Homelab.Deployments do
   end
 
   defp ensure_traefik_if_needed(%{domain: domain}) when is_binary(domain) and domain != "" do
-    case Homelab.Infrastructure.ensure_traefik() do
+    case ensure_proxy() do
       {:ok, :already_running} ->
         :ok
 
       {:ok, :started} ->
         ActivityLog.info("infrastructure", "Traefik started")
 
-      {:error, reason} ->
-        ActivityLog.error("infrastructure", "Traefik failed: #{inspect(reason)}")
+      # A catch-all, NOT just `{:error, reason}`. `ensure_traefik/0` is a `with` with no
+      # `else`, so it returns whatever any clause returned — including
+      # `Docker.Network.ensure/1`'s shapes. Matching only the three expected returns
+      # raises `CaseClauseError`, and this call sits outside the saga runner's rescue:
+      # it would propagate out of `do_deploy/1` to the controller or LiveView, failing
+      # the whole deploy over a best-effort ingress step. `ensure_ingress_proxy.ex`
+      # makes the same argument for the saga path.
+      other ->
+        ActivityLog.error("infrastructure", "Traefik failed: #{inspect(other)}")
     end
   end
 
   defp ensure_traefik_if_needed(_deployment), do: :ok
+
+  # The same seam, under the same key, as the saga's `EnsureIngressProxy` step: both
+  # call sites are the same question asked of the same function, and a test that drives
+  # one has to be able to drive the other.
+  defp ensure_proxy do
+    case Application.get_env(:homelab, :ingress_proxy_ensurer) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> Homelab.Infrastructure.ensure_traefik()
+    end
+  end
 
   defp post_deploy_hooks(%{domain: domain} = deployment)
        when is_binary(domain) and domain != "" do

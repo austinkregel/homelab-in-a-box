@@ -246,7 +246,9 @@ defmodule Homelab.Infrastructure do
 
       is_nil(url) ->
         Logger.warning(
-          "Infrastructure: could not determine own container name; skipping self-ingress"
+          "Infrastructure: no own service URL — $HOSTNAME is unset or does not name a " <>
+            "container this daemon knows, and :self_service_url is not configured; " <>
+            "skipping self-ingress"
         )
 
         :ok
@@ -383,7 +385,9 @@ defmodule Homelab.Infrastructure do
 
       is_nil(url) ->
         Logger.warning(
-          "Infrastructure: could not determine own container name; skipping hold-page ingress"
+          "Infrastructure: no own service URL — $HOSTNAME is unset or does not name a " <>
+            "container this daemon knows, and :self_service_url is not configured; " <>
+            "skipping hold-page ingress"
         )
 
         :ok
@@ -476,10 +480,21 @@ defmodule Homelab.Infrastructure do
     "^.+" <> String.replace("." <> base_domain, ".", "\\.") <> "$"
   end
 
-  # The URL Traefik uses to reach THIS container, over the internal network. The
-  # container's own name (resolved by Docker DNS on `homelab-iab-internal`) is
-  # discovered by inspecting self via $HOSTNAME (the short container id).
+  # The URL Traefik uses to reach THIS container, over the internal network.
+  #
+  # Overridable with `config :homelab, :self_service_url` for the same reason
+  # `containerized?/0` is overridable: the inference below is a probe, and a test (or
+  # an install where $HOSTNAME is not the container id) can state the answer instead.
   defp self_service_url do
+    case Application.get_env(:homelab, :self_service_url) do
+      url when is_binary(url) and url != "" -> url
+      _ -> discover_self_service_url()
+    end
+  end
+
+  # The container's own name (resolved by Docker DNS on `homelab-iab-internal`),
+  # discovered by inspecting self via $HOSTNAME (the short container id).
+  defp discover_self_service_url do
     with host when is_binary(host) and host != "" <- System.get_env("HOSTNAME"),
          {:ok, %{"Name" => name}} when is_binary(name) <- Client.get("/containers/#{host}/json") do
       "http://#{String.trim_leading(name, "/")}:4000"
