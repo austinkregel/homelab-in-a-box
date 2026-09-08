@@ -8,6 +8,83 @@ defmodule Homelab.Backups do
   alias Homelab.Backups.BackupJob
   alias Homelab.Deployments.PermanentHome
 
+  @doc """
+  Every deployment paired with the state of its protection.
+
+  The Backups page listed backup *jobs*, and a job is deleted with its deployment,
+  so the page went empty exactly when something had been lost. Coverage asks the
+  opposite question — which apps are protected — and so always has rows to show.
+
+  `:unprotected` means no job has ever been created, `:unverified` means jobs exist
+  but none has completed, `:protected` means at least one has.
+  """
+  def coverage do
+    jobs_by_deployment =
+      BackupJob
+      |> Repo.all()
+      |> Enum.group_by(& &1.deployment_id)
+
+    Homelab.Deployments.list_deployments()
+    |> Enum.map(fn deployment ->
+      jobs = Map.get(jobs_by_deployment, deployment.id, [])
+      completed = Enum.filter(jobs, &(&1.status == :completed))
+
+      %{
+        deployment: deployment,
+        jobs: jobs,
+        last_completed_at:
+          completed |> Enum.map(& &1.completed_at) |> Enum.reject(&is_nil/1) |> Enum.max(fn -> nil end),
+        state:
+          cond do
+            completed != [] -> :protected
+            jobs != [] -> :unverified
+            true -> :unprotected
+          end
+      }
+    end)
+  end
+
+  @doc """
+  What is actually in the backup repository, each snapshot marked with whether a
+  backup job still points at it.
+
+  A snapshot outlives the deployment that wrote it: `destroy_deployment/1` deletes
+  the `backup_jobs` rows by cascade and never touches the repository, and deleting
+  a single job says so in its own flash. `:orphaned` snapshots are what that leaves
+  behind — real data, still costing real space, that nothing else in the app can see.
+  """
+  def repo_snapshots do
+    provider = Homelab.Config.backup_provider()
+
+    if function_exported?(provider, :repo, 0) do
+      # Reading the repository runs the provider's binary against storage that may be
+      # absent, locked, or on a filesystem that is not mounted. Whatever it does, this
+      # is a read for a page that already renders an error state — it must not take
+      # the page down with it.
+      try do
+        case provider.list_snapshots(provider.repo()) do
+          {:ok, snapshots} -> {:ok, mark_orphans(snapshots)}
+          {:error, reason} -> {:error, reason}
+          other -> {:error, other}
+        end
+      rescue
+        error -> {:error, Exception.message(error)}
+      catch
+        :exit, reason -> {:error, reason}
+      end
+    else
+      {:error, :no_repo}
+    end
+  end
+
+  defp mark_orphans(snapshots) do
+    known = BackupJob |> Repo.all() |> MapSet.new(& &1.snapshot_id)
+
+    Enum.map(snapshots, fn snapshot ->
+      Map.put(snapshot, :state, if(MapSet.member?(known, snapshot.id), do: :tracked, else: :orphaned))
+    end)
+  end
+
   def list_backup_jobs do
     BackupJob
     |> preload(deployment: [:tenant, :app_template])

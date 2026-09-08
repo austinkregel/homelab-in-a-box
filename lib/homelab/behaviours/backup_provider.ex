@@ -16,4 +16,16 @@ defmodule Homelab.Behaviours.BackupProvider do
               :ok | {:error, term()}
   @callback list_snapshots(repo :: String.t()) :: {:ok, [map()]} | {:error, term()}
   @callback prune(repo :: String.t(), policy :: map()) :: {:ok, map()} | {:error, term()}
+
+  @doc """
+  The repository this provider reads and writes.
+
+  Optional: `list_snapshots/1` and `prune/2` both take a repo, and a caller that
+  only holds the provider module has no other way to name the one it uses. A
+  provider that cannot answer simply does not export this, and listing the
+  repository reports that rather than guessing a path.
+  """
+  @callback repo() :: String.t()
+
+  @optional_callbacks repo: 0
 end

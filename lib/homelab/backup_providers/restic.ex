@@ -163,6 +163,14 @@ defmodule Homelab.BackupProviders.Restic do
     Keyword.get(config, :extra_args, [])
   end
 
+  @doc """
+  The repository every snapshot is written to. Public because listing what is in the
+  repository needs it: `list_snapshots/1` takes a repo, and callers outside this
+  module have no other way to name the one this provider actually uses.
+  """
+  @impl true
+  def repo, do: default_repo()
+
   defp default_repo do
     config = config()
     Keyword.get(config, :repo, "/backups/restic-repo")

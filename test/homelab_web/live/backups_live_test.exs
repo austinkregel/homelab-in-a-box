@@ -246,7 +246,7 @@ defmodule HomelabWeb.BackupsLiveTest do
   describe "page header" do
     test "shows page description", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/backups")
-      assert html =~ "View backup history"
+      assert html =~ "Which apps are protected"
     end
   end
 

@@ -11,15 +11,26 @@ defmodule HomelabWeb.BackupsLive do
     backups = Backups.list_backup_jobs()
     deployments = Deployments.list_deployments()
 
+    # Listing the repository shells out to the backup provider, so it must not block
+    # the first render.
+    if connected?(socket), do: send(self(), :load_snapshots)
+
     socket =
       socket
       |> assign(:page_title, "Backups")
       |> assign(:tenants, tenants)
       |> assign(:backups, backups)
       |> assign(:deployments, deployments)
+      |> assign(:coverage, Backups.coverage())
+      |> assign(:snapshots, :loading)
       |> assign(:show_backup_dropdown, false)
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_info(:load_snapshots, socket) do
+    {:noreply, assign(socket, :snapshots, Backups.repo_snapshots())}
   end
 
   @impl true
@@ -131,7 +142,7 @@ defmodule HomelabWeb.BackupsLive do
                 <h1 class="text-2xl font-bold text-base-content tracking-tight">Backups</h1>
               </div>
               <p class="text-sm text-base-content/50 max-w-lg leading-relaxed mt-1">
-                View backup history and restore previous snapshots. Trigger manual backups for any deployment.
+                Which apps are protected, what the repository actually holds, and every backup run.
               </p>
             </div>
             <div class="relative">
@@ -159,6 +170,90 @@ defmodule HomelabWeb.BackupsLive do
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+
+        <%!-- Coverage: every app and whether anything protects it --%>
+        <div>
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-base-content">Coverage</h2>
+            <span class="text-xs text-base-content/40">
+              {Enum.count(@coverage, &(&1.state == :protected))} of {length(@coverage)} protected
+            </span>
+          </div>
+
+          <div :if={@coverage == []} class="rounded-2xl border border-base-content/[0.06] bg-base-100 px-6 py-10 text-center">
+            <p class="text-sm text-base-content/50">Nothing is deployed yet.</p>
+          </div>
+
+          <div :if={@coverage != []} class="rounded-2xl border border-base-content/[0.06] bg-base-100 divide-y divide-base-content/[0.04] overflow-hidden">
+            <div :for={row <- @coverage} class="flex items-center gap-4 px-4 py-3">
+              <.link
+                navigate={~p"/deployments/#{row.deployment.id}?tab=backups"}
+                class="flex-1 min-w-0"
+              >
+                <p class="text-sm font-medium text-base-content truncate">
+                  {row.deployment.app_template.name}
+                </p>
+                <p class="text-xs text-base-content/35 truncate">{row.deployment.tenant.name}</p>
+              </.link>
+              <span class="text-xs text-base-content/40 hidden sm:block">
+                {last_backup_label(row)}
+              </span>
+              <span class={[
+                "text-[11px] font-medium px-2.5 py-1 rounded-full flex-shrink-0",
+                coverage_classes(row.state)
+              ]}>
+                {coverage_label(row.state)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <%!-- What is actually in the repository, including snapshots nothing points at --%>
+        <div>
+          <div class="flex items-baseline justify-between mb-3">
+            <h2 class="text-sm font-semibold text-base-content">In the repository</h2>
+            <span :if={is_tuple(@snapshots) and elem(@snapshots, 0) == :ok} class="text-xs text-base-content/40">
+              {Enum.count(elem(@snapshots, 1), &(&1.state == :orphaned))} with no deployment
+            </span>
+          </div>
+
+          <div class="rounded-2xl border border-base-content/[0.06] bg-base-100 overflow-hidden">
+            <p :if={@snapshots == :loading} class="px-6 py-10 text-center text-sm text-base-content/40">
+              Reading the backup repository…
+            </p>
+
+            <div :if={match?({:error, _}, @snapshots)} class="px-6 py-10 text-center">
+              <p class="text-sm text-base-content/50 mb-1">Could not read the repository.</p>
+              <p class="text-xs text-base-content/35 font-mono">{inspect(elem(@snapshots, 1))}</p>
+            </div>
+
+            <%= if match?({:ok, _}, @snapshots) do %>
+              <p :if={elem(@snapshots, 1) == []} class="px-6 py-10 text-center text-sm text-base-content/40">
+                The repository holds no snapshots.
+              </p>
+              <div :if={elem(@snapshots, 1) != []} class="divide-y divide-base-content/[0.04]">
+                <div :for={snapshot <- elem(@snapshots, 1)} class="flex items-center gap-4 px-4 py-3">
+                  <span class="text-xs font-mono text-base-content/70 w-20 flex-shrink-0">
+                    {snapshot.id}
+                  </span>
+                  <span class="text-xs text-base-content/40 flex-1 min-w-0 truncate font-mono">
+                    {Enum.join(snapshot.paths, ", ")}
+                  </span>
+                  <span class="text-xs text-base-content/40 hidden sm:block">{snapshot.time}</span>
+                  <span class={[
+                    "text-[11px] font-medium px-2.5 py-1 rounded-full flex-shrink-0",
+                    if(snapshot.state == :orphaned,
+                      do: "bg-warning/10 text-warning",
+                      else: "bg-base-200 text-base-content/50"
+                    )
+                  ]}>
+                    {if snapshot.state == :orphaned, do: "no deployment", else: "tracked"}
+                  </span>
+                </div>
+              </div>
+            <% end %>
           </div>
         </div>
 
@@ -288,4 +383,17 @@ defmodule HomelabWeb.BackupsLive do
   defp format_status(:failed), do: "Failed"
   defp format_status(:pending), do: "Pending"
   defp format_status(status), do: to_string(status)
+
+  defp coverage_label(:protected), do: "protected"
+  defp coverage_label(:unverified), do: "never succeeded"
+  defp coverage_label(:unprotected), do: "unprotected"
+
+  defp coverage_classes(:protected), do: "bg-success/10 text-success"
+  defp coverage_classes(:unverified), do: "bg-warning/10 text-warning"
+  defp coverage_classes(:unprotected), do: "bg-error/10 text-error"
+
+  defp last_backup_label(%{last_completed_at: nil, jobs: []}), do: "never run"
+  defp last_backup_label(%{last_completed_at: nil}), do: "no successful run"
+  defp last_backup_label(%{last_completed_at: at}), do: Calendar.strftime(at, "%Y-%m-%d %H:%M")
+
 end
