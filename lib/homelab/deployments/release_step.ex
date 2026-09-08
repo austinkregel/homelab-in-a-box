@@ -31,6 +31,11 @@ defmodule Homelab.Deployments.ReleaseStep do
     # MARIADB_USER/PASSWORD entirely (init runs once, on an empty data dir), so the app
     # booted against credentials the database never took and failed from inside itself.
     :ensure_datastore_grants,
+    # Makes the databases a datastore DECLARES exist, on every release. The images'
+    # own POSTGRES_DB/MARIADB_DATABASE env and /docker-entrypoint-initdb.d are
+    # first-init-only, so a database added after the volume exists could previously
+    # only be created by hand from an SQL client — which is where deployments stall.
+    :ensure_databases,
     :app_container,
     # A container that joins another deployment's network namespace, and so must be
     # (re)created AFTER the container that owns it — the donor's id is part of the

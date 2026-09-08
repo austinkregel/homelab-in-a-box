@@ -2472,6 +2472,7 @@ defmodule HomelabWeb.DeploymentLive do
   defp humanize_step(:provision_credentials), do: "Credentials generated"
   defp humanize_step(:dependency_container), do: "Dependency container started"
   defp humanize_step(:ensure_datastore_grants), do: "Database access granted"
+  defp humanize_step(:ensure_databases), do: "Databases created"
   defp humanize_step(:app_container), do: "Container created"
   defp humanize_step(:netns_child_container), do: "Container created in shared network"
   defp humanize_step(:await_health), do: "Container healthy"

@@ -551,6 +551,7 @@ defmodule Homelab.Deployments.NetnsTest do
                {:prepare, :provision_credentials},
                {:workload, :app_container},
                {:workload, :await_health},
+               {:workload, :ensure_databases},
                {:namespace, :netns_child_container},
                {:namespace, :await_health},
                {:naming, :sync_domain},

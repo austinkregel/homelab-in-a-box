@@ -58,6 +58,9 @@ config :homelab, :release_step_handlers, %{
   # volume already has data ignores MARIADB_USER/PASSWORD entirely (init runs once,
   # on an empty data dir), so the app would be handed a password the DB never took.
   ensure_datastore_grants: Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants,
+  # Creates the databases HOMELAB_DATABASES declares. Runs every release because the
+  # engines only honour their own database env on first init, on an empty data dir.
+  ensure_databases: Homelab.Deployments.ReleaseSteps.EnsureDatabases,
   app_container: Homelab.Deployments.ReleaseSteps.DeployContainer,
   # Same handler as the containers above — a netns child is deployed exactly like any
   # other, it just has to happen after the donor whose namespace it names.
