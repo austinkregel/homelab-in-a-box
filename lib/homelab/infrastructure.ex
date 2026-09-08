@@ -600,7 +600,11 @@ defmodule Homelab.Infrastructure do
         {:ok, template}
 
       _ ->
-        Logger.error(
+        # WARN, not error. A LAN-only install with no DNS token is a supported
+        # configuration, not a fault: it is the expected-normal return on a correctly
+        # configured token-less host, and every routed deploy asks this question. At
+        # error severity a steady state reads as a failure worth investigating.
+        Logger.warning(
           "Infrastructure: #{@dns_token_env} is not set — cannot provision Traefik with wildcard DNS-01 TLS"
         )
 
@@ -759,7 +763,17 @@ defmodule Homelab.Infrastructure do
       Logger.info("Infrastructure: #{template.name} started")
       {:ok, :started}
     else
-      {:error, reason} -> {:error, {:create_failed, reason}}
+      {:error, reason} ->
+        {:error, {:create_failed, reason}}
+
+      # The `{:error, reason}` above is not exhaustive: the first clause also needs an
+      # `Id` in the body, so a 2xx create whose payload lacks one reaches this `else` as
+      # `{:ok, %{}}`. With only the clause above that raises `WithClauseError`, and
+      # `ensure_traefik/0` passes an exception straight through to `do_deploy/1`, which
+      # has no rescue — so a malformed daemon reply would leave the caller instead of
+      # failing this one call.
+      other ->
+        {:error, {:create_failed, other}}
     end
   end
 

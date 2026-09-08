@@ -158,6 +158,25 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       assert "CF_DNS_API_TOKEN=cf-token-xyz" in body["Env"]
     end
 
+    # `create_system_container/2` gates its success clause on an `Id` in the create
+    # response, so a 2xx reply without one lands in an `else` that matched only
+    # `{:error, reason}`. The `WithClauseError` that raised passes through
+    # `ensure_traefik/0` unchanged and reaches `do_deploy/1`, which has no rescue.
+    test "a create response carrying no Id fails the ensure instead of raising" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+
+      # Nothing exists yet, so the ensure takes the create path.
+      stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, {:not_found, %{}}} end)
+      stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+      stub(Homelab.Mocks.DockerClient, :upload_archive, fn _name, _path, _tar -> :ok end)
+
+      # A 2xx with an empty body: accepted by the network create above, and the shape
+      # the container create must not choke on.
+      stub(Homelab.Mocks.DockerClient, :post, fn _path, _body, _opts -> {:ok, %{}} end)
+
+      assert {:error, {:create_failed, {:ok, %{}}}} = Infrastructure.ensure_traefik()
+    end
+
     test "force-recreates a running Traefik whose command lacks the DNS-01 flags" do
       System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
       test_pid = self()
