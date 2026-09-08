@@ -3,7 +3,9 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
   Inspects Docker images via the Registry V2 API to extract metadata
   (ExposedPorts, Volumes, Env, Labels) without pulling the full image.
 
-  Supports Docker Hub, GHCR, lscr.io (proxied Docker Hub), and ECR Public.
+  Supports Docker Hub, GHCR, lscr.io (proxied Docker Hub), ECR Public, and any
+  other Registry V2 host named in the reference — including the self-hosted
+  registry at `Homelab.Config.registry_ref_prefix/0`.
   """
 
   require Logger
@@ -12,6 +14,10 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
   @docker_hub_auth "https://auth.docker.io"
   @ghcr_registry "https://ghcr.io"
   @ecr_registry "https://public.ecr.aws"
+
+  # Hosts that are all names for Docker Hub's Registry V2 endpoint, plus lscr.io,
+  # which proxies it.
+  @docker_hub_hosts ~w(docker.io index.docker.io registry-1.docker.io lscr.io)
 
   @manifest_v2 "application/vnd.docker.distribution.manifest.v2+json"
   @manifest_list "application/vnd.docker.distribution.manifest.list.v2+json"
@@ -58,45 +64,86 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
   def parse_image_ref(ref) do
     ref = String.trim(ref)
 
-    {registry_url, auth_url, rest} =
-      cond do
-        String.starts_with?(ref, "ghcr.io/") ->
-          {@ghcr_registry, @ghcr_registry, String.trim_leading(ref, "ghcr.io/")}
+    {host, path} = split_registry_host(ref)
+    {registry_url, auth_url} = registry_for(host)
+    {repo, tag} = split_repo_tag(path)
 
-        String.starts_with?(ref, "lscr.io/") ->
-          {@docker_hub_registry, @docker_hub_auth, String.trim_leading(ref, "lscr.io/")}
-
-        String.starts_with?(ref, "public.ecr.aws/") ->
-          {@ecr_registry, nil, String.trim_leading(ref, "public.ecr.aws/")}
-
-        String.starts_with?(ref, "docker.io/") ->
-          {@docker_hub_registry, @docker_hub_auth, String.trim_leading(ref, "docker.io/")}
-
-        String.contains?(ref, "/") ->
-          {@docker_hub_registry, @docker_hub_auth, ref}
-
-        true ->
-          {@docker_hub_registry, @docker_hub_auth, "library/#{ref}"}
-      end
-
-    {repo, tag} =
-      case String.split(rest, ":", parts: 2) do
-        [r, t] -> {r, t}
-        [r] -> {r, "latest"}
-      end
+    repo = if host == nil and not String.contains?(repo, "/"), do: "library/#{repo}", else: repo
 
     {registry_url, auth_url, repo, tag}
   end
+
+  # The first segment is a registry host, not a Docker Hub namespace, only when it
+  # looks like one: it carries a dot (`registry.example.com`), carries a port
+  # (`host:5000`), or is literally `localhost`. `linuxserver/nextcloud` has none of
+  # those, so it stays a Hub namespace.
+  defp split_registry_host(ref) do
+    case String.split(ref, "/", parts: 2) do
+      [first, path] ->
+        if registry_host?(first), do: {first, path}, else: {nil, ref}
+
+      [_] ->
+        {nil, ref}
+    end
+  end
+
+  defp registry_host?(segment) do
+    segment == "localhost" or String.contains?(segment, ".") or String.contains?(segment, ":")
+  end
+
+  defp registry_for(nil), do: {docker_hub_registry(), docker_hub_auth()}
+  defp registry_for("ghcr.io"), do: {ghcr_registry(), ghcr_registry()}
+  defp registry_for("public.ecr.aws"), do: {ecr_registry(), nil}
+
+  defp registry_for(host) when host in @docker_hub_hosts,
+    do: {docker_hub_registry(), docker_hub_auth()}
+
+  # Any other host is its own Registry V2 endpoint, and issues its own tokens. This
+  # is the path the self-hosted registry (`Homelab.Config.registry_ref_prefix/0`)
+  # takes.
+  defp registry_for(host) do
+    url = registry_scheme(host) <> host
+    {url, url}
+  end
+
+  # Loopback registries are served over plain HTTP, the same default Docker applies
+  # to them.
+  defp registry_scheme("localhost"), do: "http://"
+  defp registry_scheme("localhost:" <> _), do: "http://"
+  defp registry_scheme("127.0.0.1" <> _), do: "http://"
+  defp registry_scheme(_), do: "https://"
+
+  # A tag can only follow the LAST "/". Splitting the whole path on its first colon
+  # instead would read the port out of `host:5000/library/alpine:latest` as the tag.
+  defp split_repo_tag(path) do
+    {prefix, name} =
+      case String.split(path, "/") do
+        [name] -> {"", name}
+        segments -> {Enum.join(Enum.drop(segments, -1), "/") <> "/", List.last(segments)}
+      end
+
+    case String.split(name, ":") do
+      [name] -> {prefix <> name, "latest"}
+      parts -> {prefix <> Enum.join(Enum.drop(parts, -1), ":"), List.last(parts)}
+    end
+  end
+
+  defp endpoints, do: Application.get_env(:homelab, __MODULE__, [])
+
+  defp docker_hub_registry, do: endpoints()[:docker_hub_url] || @docker_hub_registry
+  defp docker_hub_auth, do: endpoints()[:docker_hub_auth_url] || @docker_hub_auth
+  defp ghcr_registry, do: endpoints()[:ghcr_url] || @ghcr_registry
+  defp ecr_registry, do: endpoints()[:ecr_url] || @ecr_registry
 
   defp fetch_auth_token(nil, _repo, _full_ref), do: {:ok, nil}
 
   defp fetch_auth_token(auth_url, repo, full_ref) do
     token_url =
       cond do
-        auth_url == @docker_hub_auth ->
+        auth_url == docker_hub_auth() ->
           "#{auth_url}/token?service=registry.docker.io&scope=repository:#{repo}:pull"
 
-        auth_url == @ghcr_registry ->
+        auth_url == ghcr_registry() ->
           "#{auth_url}/token?service=ghcr.io&scope=repository:#{repo}:pull"
 
         true ->
@@ -110,10 +157,23 @@ defmodule Homelab.Catalog.Enrichers.ImageInspector do
         {:ok, token}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:auth_failed, status, body}}
+        token_service_declined(auth_url, status, body)
 
       {:error, reason} ->
         {:error, {:auth_request_failed, reason}}
+    end
+  end
+
+  # Docker Hub and GHCR always run a token service, so anything but a token from
+  # them is the real failure and stops the walk here. A self-hosted or third-party
+  # registry need not run one at all — a plain Registry V2 serves manifests
+  # anonymously — so there we carry on unauthenticated and let the manifest
+  # request be the one that reports a 401.
+  defp token_service_declined(auth_url, status, body) do
+    if auth_url in [docker_hub_auth(), ghcr_registry()] do
+      {:error, {:auth_failed, status, body}}
+    else
+      {:ok, nil}
     end
   end
 
