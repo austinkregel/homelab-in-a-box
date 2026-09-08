@@ -1,6 +1,7 @@
 defmodule Homelab.NetworkingTest do
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Mox
   import Homelab.Factory
 
@@ -835,18 +836,24 @@ defmodule Homelab.NetworkingTest do
       deployment = insert(:deployment)
       zone = insert(:dns_zone, provider_zone_id: "zone_abc")
 
-      insert(:dns_record,
-        dns_zone: zone,
-        deployment: deployment,
-        managed: true,
-        scope: :public,
-        provider_record_id: "prov_rec_1"
-      )
+      record =
+        insert(:dns_record,
+          dns_zone: zone,
+          deployment: deployment,
+          managed: true,
+          scope: :public,
+          provider_record_id: "prov_rec_1"
+        )
 
-      assert {:error, {:dns_deletion_failed, failures}} =
-               Networking.cleanup_deployment_dns_records(deployment.id)
+      log =
+        capture_log(fn ->
+          assert {:error, {:dns_deletion_failed, failures}} =
+                   Networking.cleanup_deployment_dns_records(deployment.id)
 
-      assert [{_id, _reason}] = failures
+          assert [{_id, _reason}] = failures
+        end)
+
+      assert log =~ "DNS provider refused deletion of #{record.name}/#{record.type}"
 
       assert [kept] = Networking.list_dns_records_for_deployment(deployment.id)
       assert kept.provider_record_id == "prov_rec_1"
@@ -920,7 +927,8 @@ defmodule Homelab.NetworkingTest do
       zone = insert(:dns_zone, name: "example.com")
       record = insert(:dns_record, dns_zone: zone, name: "www", type: "A", scope: :public)
 
-      Networking.push_record_to_provider(record)
+      log = capture_log(fn -> Networking.push_record_to_provider(record) end)
+      assert log =~ "DNS read-back failed for www/A; creating without dedup check"
 
       assert {:ok, updated} = Networking.get_dns_record(record.id)
       assert updated.provider_record_id == "created_after_fallback"

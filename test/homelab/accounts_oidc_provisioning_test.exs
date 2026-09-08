@@ -16,6 +16,7 @@ defmodule Homelab.AccountsOidcProvisioningTest do
   alias Homelab.Accounts
   alias Homelab.Settings
 
+  import ExUnit.CaptureLog
   import Homelab.Factory
 
   setup do
@@ -35,8 +36,13 @@ defmodule Homelab.AccountsOidcProvisioningTest do
     test "is only the first — the second unknown sub is refused" do
       assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("first", "owner@example.com"))
 
-      assert {:error, :not_allowed} =
-               Accounts.get_or_create_from_oidc(oidc("second", "stranger@example.com"))
+      log =
+        capture_log(fn ->
+          assert {:error, :not_allowed} =
+                   Accounts.get_or_create_from_oidc(oidc("second", "stranger@example.com"))
+        end)
+
+      assert log =~ ~s(OIDC provisioning refused for sub="second")
 
       assert length(Accounts.list_users()) == 1
     end
@@ -101,8 +107,13 @@ defmodule Homelab.AccountsOidcProvisioningTest do
 
       assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("bob", "bob@example.com"))
 
-      assert {:error, :not_allowed} =
-               Accounts.get_or_create_from_oidc(oidc("eve", "eve@evil.com"))
+      log =
+        capture_log(fn ->
+          assert {:error, :not_allowed} =
+                   Accounts.get_or_create_from_oidc(oidc("eve", "eve@evil.com"))
+        end)
+
+      assert log =~ ~s(OIDC provisioning refused for sub="eve")
     end
 
     test "admits a whole domain written with a leading @" do
@@ -110,8 +121,15 @@ defmodule Homelab.AccountsOidcProvisioningTest do
 
       assert {:ok, _} = Accounts.get_or_create_from_oidc(oidc("carol", "carol@example.com"))
 
-      assert {:error, :not_allowed} =
-               Accounts.get_or_create_from_oidc(oidc("mallory", "mallory@example.com.evil.com"))
+      log =
+        capture_log(fn ->
+          assert {:error, :not_allowed} =
+                   Accounts.get_or_create_from_oidc(
+                     oidc("mallory", "mallory@example.com.evil.com")
+                   )
+        end)
+
+      assert log =~ ~s(OIDC provisioning refused for sub="mallory")
     end
 
     test "is case-insensitive and tolerates newline-separated entries" do
@@ -124,8 +142,13 @@ defmodule Homelab.AccountsOidcProvisioningTest do
     test "refuses a claim with no usable email rather than guessing" do
       Settings.set("oidc_allowed_emails", "@example.com")
 
-      assert {:error, :not_allowed} =
-               Accounts.get_or_create_from_oidc(%{"sub" => "no-email", "name" => "Nobody"})
+      log =
+        capture_log(fn ->
+          assert {:error, :not_allowed} =
+                   Accounts.get_or_create_from_oidc(%{"sub" => "no-email", "name" => "Nobody"})
+        end)
+
+      assert log =~ ~s(OIDC provisioning refused for sub="no-email")
     end
   end
 
@@ -142,8 +165,13 @@ defmodule Homelab.AccountsOidcProvisioningTest do
       insert(:user, role: :admin)
       Settings.set("oidc_auto_provision", "false")
 
-      assert {:error, :not_allowed} =
-               Accounts.get_or_create_from_oidc(oidc("anyone", "anyone@example.com"))
+      log =
+        capture_log(fn ->
+          assert {:error, :not_allowed} =
+                   Accounts.get_or_create_from_oidc(oidc("anyone", "anyone@example.com"))
+        end)
+
+      assert log =~ ~s(OIDC provisioning refused for sub="anyone")
     end
   end
 end

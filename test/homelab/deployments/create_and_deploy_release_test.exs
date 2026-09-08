@@ -152,6 +152,30 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
       assert Deployments.get_deployment!(deployment.id).external_id == nil
       assert Deployments.get_deployment!(deployment.id).status == :pending
     end
+
+    # The rest of this file has a single tenant, so `list_deployments/0` and
+    # `list_deployments_for_tenant/1` are indistinguishable there — the sandbox, not the
+    # `where`, is what makes those assertions pass. A second tenant is what makes the
+    # scoping assertion mean anything: dropping the `where` fails only this test.
+    test "the created deployment is visible to its own tenant and no other", %{tenant: tenant} do
+      other_tenant = insert(:tenant)
+
+      other_deployment =
+        insert(:deployment, tenant: other_tenant, app_template: clean_template())
+
+      assert {:ok, %{deployment: deployment}} =
+               Deployments.create_and_deploy_release(%{
+                 tenant_id: tenant.id,
+                 app_template_id: clean_template().id,
+                 domain: "scoped.acme.test"
+               })
+
+      assert Enum.map(Deployments.list_deployments_for_tenant(tenant.id), & &1.id) ==
+               [deployment.id]
+
+      assert Enum.map(Deployments.list_deployments_for_tenant(other_tenant.id), & &1.id) ==
+               [other_deployment.id]
+    end
   end
 
   # Every case above uses a plain deployment, and that is exactly why both of the
@@ -159,7 +183,7 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
   # both resolves an implicit companion AND depends on the release to establish a
   # precondition the pre-flight would otherwise assert.
   describe "create_and_deploy_release/2 in a network namespace" do
-    setup %{tenant: tenant} do
+    setup %{tenant: _tenant} do
       donor_template =
         insert(:app_template,
           name: "Gluetun",

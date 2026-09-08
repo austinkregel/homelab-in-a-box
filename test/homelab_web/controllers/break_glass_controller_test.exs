@@ -1,6 +1,8 @@
 defmodule HomelabWeb.BreakGlassControllerTest do
   use HomelabWeb.ConnCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Homelab.Accounts
   alias Homelab.Audit
 
@@ -78,7 +80,13 @@ defmodule HomelabWeb.BreakGlassControllerTest do
     end
 
     test "correct token signs in, creates an admin, audits, and consumes the file", %{path: path} do
-      conn = post(anon_conn(), "/auth/break-glass", %{"token" => @token})
+      {conn, log} =
+        with_log(fn -> post(anon_conn(), "/auth/break-glass", %{"token" => @token}) end)
+
+      # A break-glass grant is the loudest thing this app can do; the log line is
+      # part of the feature, not noise, so it is asserted rather than silenced.
+      assert log =~ "BREAK-GLASS login SUCCEEDED"
+      assert log =~ "BREAK-GLASS: token consumed"
 
       assert redirected_to(conn) == "/"
       user_id = get_session(conn, :user_id)
@@ -94,8 +102,11 @@ defmodule HomelabWeb.BreakGlassControllerTest do
     end
 
     test "the token cannot be reused — a second attempt 404s" do
-      c1 = post(anon_conn(), "/auth/break-glass", %{"token" => @token})
+      {c1, log} =
+        with_log(fn -> post(anon_conn(), "/auth/break-glass", %{"token" => @token}) end)
+
       assert redirected_to(c1) == "/"
+      assert log =~ "BREAK-GLASS: token consumed"
 
       c2 = post(anon_conn(), "/auth/break-glass", %{"token" => @token})
       assert c2.status == 404
@@ -103,9 +114,12 @@ defmodule HomelabWeb.BreakGlassControllerTest do
     end
 
     test "wrong token is rejected, leaves the file intact, and audits the denial", %{path: path} do
-      conn =
-        post(anon_conn(), "/auth/break-glass", %{"token" => "wrong-but-long-enough-token-xxx"})
+      {conn, log} =
+        with_log(fn ->
+          post(anon_conn(), "/auth/break-glass", %{"token" => "wrong-but-long-enough-token-xxx"})
+        end)
 
+      assert log =~ "BREAK-GLASS login DENIED"
       assert conn.status == 401
       assert conn.resp_body =~ "Invalid break-glass token"
       assert get_session(conn, :user_id) == nil
@@ -115,7 +129,9 @@ defmodule HomelabWeb.BreakGlassControllerTest do
     end
 
     test "missing token is rejected and leaves the file intact", %{path: path} do
-      conn = post(anon_conn(), "/auth/break-glass", %{})
+      {conn, log} = with_log(fn -> post(anon_conn(), "/auth/break-glass", %{}) end)
+
+      assert log =~ "BREAK-GLASS login DENIED"
       assert conn.status == 401
       assert get_session(conn, :user_id) == nil
       assert File.exists?(path)
