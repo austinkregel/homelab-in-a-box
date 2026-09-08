@@ -123,6 +123,8 @@ defmodule HomelabWeb.Router do
       live "/storage", StorageLive, :index
       live "/containers", ContainersLive, :index
       live "/deploy/new", DeployWizardLive, :new
+      live "/apps", AppsLive, :index
+      live "/spaces", SpacesLive, :index
       live "/spaces/:id", SpaceLive, :show
     end
 

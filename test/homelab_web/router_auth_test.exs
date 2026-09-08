@@ -141,6 +141,10 @@ defmodule HomelabWeb.RouterAuthTest do
     {:get, "/deploy/new"},
     # Where a space and its deployments are edited and destroyed.
     {:get, "/spaces/:id"},
+    # Starts, stops and restarts containers across every space.
+    {:get, "/apps"},
+    # Creates spaces.
+    {:get, "/spaces"},
     # Creates and deletes named volumes and rewrites a live deployment's mounts — a
     # wrong path there is data loss, not a bad render.
     {:get, "/storage"},

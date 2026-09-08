@@ -22,11 +22,34 @@ defmodule Homelab.Deployments do
   """
   defdelegate apply_adoption_plan(plan, opts), to: Homelab.Deployments.Adoption, as: :apply_plan
 
+  @doc """
+  Every deployment, ordered the way an operator scans one: what needs attention
+  first, then alphabetically.
+
+  This had no `order_by` at all, so callers rendered rows in whatever order the
+  database returned them. That is invisible on a full page and wrong on a
+  truncated one — the Dashboard shows the first ten, which were an arbitrary ten
+  rather than the ten worth looking at.
+  """
   def list_deployments do
     Deployment
     |> preload([:tenant, :app_template])
     |> Repo.all()
+    |> Enum.sort_by(&{attention_rank(&1.status), template_name(&1)})
   end
+
+  defp attention_rank(:failed), do: 0
+  defp attention_rank(:removing), do: 1
+  defp attention_rank(:pending), do: 2
+  defp attention_rank(:deploying), do: 3
+  defp attention_rank(:stopped), do: 4
+  defp attention_rank(:running), do: 5
+  defp attention_rank(_), do: 6
+
+  defp template_name(%Deployment{app_template: %{name: name}}) when is_binary(name),
+    do: String.downcase(name)
+
+  defp template_name(_), do: ""
 
   def list_deployments_for_tenant(tenant_id) do
     Deployment

@@ -55,6 +55,12 @@ defmodule HomelabWeb.Layouts do
               active={@page_title == "Dashboard"}
             />
             <.sidebar_link
+              path={~p"/apps"}
+              icon="hero-squares-plus"
+              label="Apps"
+              active={@page_title == "Apps"}
+            />
+            <.sidebar_link
               path={~p"/catalog"}
               icon="hero-rectangle-stack"
               label="Catalog"
@@ -97,12 +103,6 @@ defmodule HomelabWeb.Layouts do
               active={@page_title == "Backups"}
             />
             <.sidebar_link
-              path={~p"/activity"}
-              icon="hero-clock"
-              label="Activity"
-              active={@page_title == "Activity"}
-            />
-            <.sidebar_link
               path={~p"/telemetry"}
               icon="hero-chart-bar"
               label="Telemetry"
@@ -111,9 +111,21 @@ defmodule HomelabWeb.Layouts do
           </div>
 
           <div class="mt-5">
-            <p class="px-3 mb-2 text-[10px] font-semibold uppercase tracking-widest text-base-content/25">
-              Spaces
-            </p>
+            <div class="flex items-center justify-between px-3 mb-2">
+              <.link
+                navigate={~p"/spaces"}
+                class="text-[10px] font-semibold uppercase tracking-widest text-base-content/25 hover:text-base-content/50 transition-colors"
+              >
+                Spaces
+              </.link>
+              <.link
+                navigate={~p"/spaces"}
+                aria-label="All spaces"
+                class="text-base-content/25 hover:text-base-content/60 transition-colors"
+              >
+                <.icon name="hero-plus-mini" class="size-3.5" />
+              </.link>
+            </div>
             <div :if={@tenants == []} class="px-3 py-2">
               <p class="text-xs text-base-content/30 italic">No spaces yet</p>
             </div>
@@ -143,6 +155,12 @@ defmodule HomelabWeb.Layouts do
         </nav>
 
         <div class="px-3 py-3 border-t border-base-content/5 space-y-1">
+          <.sidebar_link
+            path={~p"/activity"}
+            icon="hero-clock"
+            label="Activity"
+            active={@page_title == "Activity"}
+          />
           <.sidebar_link
             path={~p"/settings"}
             icon="hero-cog-6-tooth"
