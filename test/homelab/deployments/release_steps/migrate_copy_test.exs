@@ -1,6 +1,8 @@
 defmodule Homelab.Deployments.ReleaseSteps.MigrateCopyTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Homelab.Deployments.ReleaseSteps.MigrateCopy
   alias Homelab.Deployments.PermanentHome
 
@@ -100,7 +102,13 @@ defmodule Homelab.Deployments.ReleaseSteps.MigrateCopyTest do
         }
       ])
 
-    assert {:error, {:migrate_failed, "gitlab", {:source_missing, _}}} = MigrateCopy.run(s, %{})
+    log =
+      capture_log(fn ->
+        assert {:error, {:migrate_failed, "gitlab", {:source_missing, _}}} =
+                 MigrateCopy.run(s, %{})
+      end)
+
+    assert log =~ "[migrate_copy] FAILED"
   end
 
   test "compensate removes created volumes and the copies, never the source", %{src: src} do

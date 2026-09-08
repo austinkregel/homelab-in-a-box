@@ -10,6 +10,7 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
   """
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Mox
   import Homelab.Factory
 
@@ -59,7 +60,22 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     stub(Homelab.Mocks.DnsProvider, :delete_record, fn _zone, _id -> :ok end)
   end
 
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
+
   describe "EnsureIngressProxy" do
+    # The unstubbed tests below drive the REAL `ensure_traefik/0` and read the reason
+    # it fails with, which is `:dns_token_missing` only while no DNS-01 token is in the
+    # environment. That is the normal state of a test run, but direnv, a checked-out
+    # `.env` or a CI secret all export one — and then `ensure_traefik/0` goes on to talk
+    # to a daemon instead. Stated here rather than assumed.
+    setup do
+      prev = System.get_env("TRAEFIK_DNS_API_TOKEN")
+      System.delete_env("TRAEFIK_DNS_API_TOKEN")
+      on_exit(fn -> restore_env("TRAEFIK_DNS_API_TOKEN", prev) end)
+      :ok
+    end
+
     # Best-effort ON PURPOSE, matching `ensure_traefik_if_needed/1`. `ensure_traefik/0`
     # returns `{:error, :dns_token_missing}` on any install without a DNS-01 token —
     # which is the normal state for a LAN-only homelab and for anyone running Traefik
@@ -71,16 +87,22 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
     test "records an unavailable proxy in the handle instead of failing the release" do
       app = routed_deployment("proxy.example.test")
 
-      assert {:ok, handle} = EnsureIngressProxy.run(step(%{}), ctx(app))
-      assert handle["ingress_proxy"] == "unavailable"
-      assert handle["error"] =~ "dns_token_missing"
+      log =
+        capture_log(fn ->
+          assert {:ok, handle} = EnsureIngressProxy.run(step(%{}), ctx(app))
+          assert handle["ingress_proxy"] == "unavailable"
+          assert handle["error"] =~ "dns_token_missing"
+        end)
+
+      # The third place the reason lands, alongside the handle and the step's note.
+      assert log =~ "[ensure_ingress_proxy] could not ensure Traefik"
     end
 
     test "the note is typed, so a green step's message is not read as a failure" do
       app = routed_deployment("noted.example.test")
       {_release, step} = persisted_step(app, :ensure_ingress_proxy)
 
-      assert {:ok, _handle} = EnsureIngressProxy.run(step, ctx(app))
+      capture_log(fn -> assert {:ok, _handle} = EnsureIngressProxy.run(step, ctx(app)) end)
 
       noted = reread(step)
       assert noted.reason_type == "note"
@@ -112,8 +134,10 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
       Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:error, :enoent, :extra} end)
       on_exit(fn -> Application.delete_env(:homelab, :ingress_proxy_ensurer) end)
 
-      assert {:ok, handle} = EnsureIngressProxy.run(step(%{}), ctx(app))
-      assert handle["ingress_proxy"] == "unavailable"
+      capture_log(fn ->
+        assert {:ok, handle} = EnsureIngressProxy.run(step(%{}), ctx(app))
+        assert handle["ingress_proxy"] == "unavailable"
+      end)
     end
   end
 
@@ -544,7 +568,14 @@ defmodule Homelab.Deployments.ReleaseSteps.RoutingStepsTest do
         {:error, {:api_error, 500, "nope"}}
       end)
 
-      assert {:error, _reason} = PublishDns.compensate(step(handle), ctx(app))
+      # Once per scope row the deployment publishes (internal and public), which is why
+      # the same line appears twice for one hostname.
+      log =
+        capture_log(fn ->
+          assert {:error, _reason} = PublishDns.compensate(step(handle), ctx(app))
+        end)
+
+      assert log =~ "DNS provider refused deletion of stuck/A"
 
       # And the local rows are kept, so a retry still knows what to delete.
       assert Networking.list_dns_records_for_deployment(app.id) != []

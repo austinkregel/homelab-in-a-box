@@ -1,6 +1,8 @@
 defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Homelab.Deployments.ReleaseSteps.AdoptVolume
   alias Homelab.Deployments.PermanentHome
   alias Homelab.Deployments.{Release, ReleaseStep}
@@ -122,10 +124,15 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
   test "fails closed when no verified copy wrote this permanent home" do
     File.mkdir_p!(pg_backing_dir())
 
-    assert {:error, {:copy_unverified, "homelab-postgres", dir}} =
-             AdoptVolume.run(step([target()]), ctx_without_migrate())
+    log =
+      capture_log(fn ->
+        assert {:error, {:copy_unverified, "homelab-postgres", dir}} =
+                 AdoptVolume.run(step([target()]), ctx_without_migrate())
 
-    assert dir == pg_backing_dir()
+        assert dir == pg_backing_dir()
+      end)
+
+    assert log =~ "[adopt_volume] no verified copy recorded"
     refute_received {:ensure, _}
   end
 
@@ -133,9 +140,13 @@ defmodule Homelab.Deployments.ReleaseSteps.AdoptVolumeTest do
   # edited between phase 1 and phase 2. Registering the volume anyway would point it
   # at a directory the copy never touched.
   test "fails closed when the copy went to a different home than this step would register" do
-    assert {:error, {:copy_unverified, "homelab-postgres", _dir}} =
-             AdoptVolume.run(step([target()]), ctx_with_migrated(["/somewhere/else"]))
+    log =
+      capture_log(fn ->
+        assert {:error, {:copy_unverified, "homelab-postgres", _dir}} =
+                 AdoptVolume.run(step([target()]), ctx_with_migrated(["/somewhere/else"]))
+      end)
 
+    assert log =~ "[adopt_volume] no verified copy recorded"
     refute_received {:ensure, _}
   end
 

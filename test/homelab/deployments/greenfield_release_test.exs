@@ -7,6 +7,12 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
   """
   use Homelab.DataCase, async: false
 
+  # A third of the tests here drive a deliberate failure through the runner, and the
+  # runner says so — `[release] N failed (...); rolling back`, plus the proxy's own
+  # best-effort warning. What those tests assert on is the Activity log and the step
+  # rows, not `Logger`, so the output is noise either way.
+  @moduletag :capture_log
+
   import Mox
   import Homelab.Factory
 
@@ -35,6 +41,18 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
         attrs
       )
     )
+  end
+
+  # `ensure_ingress_proxy` is position 0 of every routed plan, and the real
+  # `Infrastructure.ensure_traefik/0` returns `{:error, :dns_token_missing}` here —
+  # there is no DNS-01 token in the test env and no daemon behind it. Unstubbed, every
+  # release below takes the step's best-effort failure branch, so the success branch
+  # that gates each routed deploy is exercised end to end by nothing. The tests that are
+  # ABOUT the proxy override this with the return each one needs.
+  setup do
+    Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:ok, :started} end)
+    on_exit(fn -> Application.delete_env(:homelab, :ingress_proxy_ensurer) end)
+    :ok
   end
 
   setup do
@@ -521,7 +539,9 @@ defmodule Homelab.Deployments.GreenfieldReleaseTest do
     step = proxy_step(release.id)
     assert step.status == :completed
     refute step.resource_handle["noop"]
-    assert step.resource_handle["ingress_proxy"] in ~w(already_running started unavailable)
+    # The exact branch, not "one of the three it might write": the ensurer is stubbed
+    # to start the proxy, so anything else means the success path did not run.
+    assert step.resource_handle["ingress_proxy"] == "started"
   end
 
   # `EnsureIngressProxy` deliberately never fails the release: `ensure_traefik/0` returns

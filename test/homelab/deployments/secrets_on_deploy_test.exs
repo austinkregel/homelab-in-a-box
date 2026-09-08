@@ -18,6 +18,7 @@ defmodule Homelab.Deployments.SecretsOnDeployTest do
   """
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Homelab.Factory
 
   alias Homelab.Deployments
@@ -67,9 +68,17 @@ defmodule Homelab.Deployments.SecretsOnDeployTest do
       set: [value: "not-decryptable-ciphertext"]
     )
 
-    assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.deployment.id))
+    log =
+      capture_log(fn ->
+        assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.deployment.id))
 
-    refute Map.has_key?(spec.env, "MYSQL_PASSWORD")
+        refute Map.has_key?(spec.env, "MYSQL_PASSWORD")
+      end)
+
+    # Dropping a credential silently would be its own defect: the operator has to be
+    # told the value is unrecoverable and must be re-entered.
+    assert log =~ "[releases] secret MYSQL_PASSWORD"
+    assert log =~ "omitted from the container env"
   end
 
   test "a preloaded empty secret set is honoured without a query", ctx do
