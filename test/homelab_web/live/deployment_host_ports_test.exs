@@ -25,6 +25,14 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
   setup :verify_on_exit!
 
   setup do
+    # Opening Settings asks the image's registry which tags exist. Nothing here reads
+    # that list, and the real Docker Hub driver answers by opening a TLS connection to
+    # hub.docker.com, so offer no registry at all: `Tags.supported?/1` is then false and
+    # the version field stays the free-text control it degrades to anyway.
+    previous_registries = Application.get_env(:homelab, :registries)
+    Application.put_env(:homelab, :registries, [])
+    on_exit(fn -> restore(:registries, previous_registries) end)
+
     Homelab.Mocks.Orchestrator
     |> stub(:deploy, fn _spec -> {:ok, "svc_1"} end)
     |> stub(:undeploy, fn _id -> :ok end)
@@ -63,15 +71,27 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
     %{git: git}
   end
 
+  defp restore(key, nil), do: Application.delete_env(:homelab, key)
+  defp restore(key, value), do: Application.put_env(:homelab, key, value)
+
   defp save(conn, app, settings) do
     {:ok, view, _html} = live(conn, ~p"/deployments/#{app.id}")
     render_click(view, "switch_tab", %{"tab" => "settings"})
     render_click(view, "start_settings_edit", %{})
 
     defaults = %{"namespace" => "own", "auth" => "public"}
-    html = render_submit(view, "save_settings", %{"settings" => Map.merge(defaults, settings)})
+    html = save_settings(view, Map.merge(defaults, settings))
 
     {Repo.get!(Deployments.Deployment, app.id) |> Repo.preload([:tenant, :app_template]), html}
+  end
+
+  # A save plans a release, and the deployment/release broadcasts that follow are handled
+  # AFTER the submit's reply — each one reloading the deployment from the Repo. `render/1`
+  # is a synchronous round-trip queued behind those messages, so the assertions read a
+  # page that has finished reloading rather than one still mid-flight.
+  defp save_settings(view, settings) do
+    render_submit(view, "save_settings", %{"settings" => settings})
+    render(view)
   end
 
   # Exposure is a property of the PORT, chosen per row: the web UI goes behind Traefik
@@ -198,7 +218,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
 
       # Nothing is posted at all: every field round-trips from the form the editor was
       # seeded with, which is what makes an untouched save a no-op.
-      html = render_submit(view, "save_settings", %{"settings" => %{}})
+      html = save_settings(view, %{})
       refute html =~ "was not published"
 
       updated = Repo.get!(Deployments.Deployment, git.id)

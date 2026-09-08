@@ -38,7 +38,27 @@ defmodule HomelabWeb.DeploymentLiveTest do
     |> stub(:driver_id, fn -> "traefik" end)
     |> stub(:display_name, fn -> "Traefik" end)
 
+    # Opening Settings asks the image's registry which tags exist. Nothing here reads
+    # that list, and the real Docker Hub driver answers by opening a TLS connection to
+    # hub.docker.com, so offer no registry at all: `Tags.supported?/1` is then false and
+    # the version field stays the free-text control it degrades to anyway.
+    previous_registries = Application.get_env(:homelab, :registries)
+    Application.put_env(:homelab, :registries, [])
+    on_exit(fn -> restore(:registries, previous_registries) end)
+
     {:ok, conn: conn, tenant: tenant, template: template, deployment: deployment}
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:homelab, key)
+  defp restore(key, value), do: Application.put_env(:homelab, key, value)
+
+  # A settings save plans a release, and the deployment/release broadcasts that follow are
+  # handled AFTER the submit's reply — each one reloading the deployment from the Repo.
+  # `render/1` is a synchronous round-trip queued behind those messages, so the assertions
+  # read a page that has finished reloading rather than one still mid-flight.
+  defp save_settings(view, settings) do
+    render_submit(view, "save_settings", %{"settings" => settings})
+    render(view)
   end
 
   describe "tab in the URL" do
@@ -2086,11 +2106,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "auth" => "public",
-          "routes" => %{"0" => %{"host" => "dashy.example.com", "port" => "8080"}}
-        }
+      save_settings(view, %{
+        "auth" => "public",
+        "routes" => %{"0" => %{"host" => "dashy.example.com", "port" => "8080"}}
       })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
@@ -2126,12 +2144,10 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "start_settings_edit")
       render_click(view, "settings_add_route")
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "routes" => %{
-            "0" => %{"host" => "aut.hair", "port" => "8000"},
-            "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"}
-          }
+      save_settings(view, %{
+        "routes" => %{
+          "0" => %{"host" => "aut.hair", "port" => "8000"},
+          "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"}
         }
       })
 
@@ -2149,13 +2165,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "settings_add_route")
       render_click(view, "settings_add_route")
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "routes" => %{
-            "0" => %{"host" => "aut.hair", "port" => "8000"},
-            "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"},
-            "2" => %{"host" => "aut.hair", "path_prefix" => "/half", "port" => ""}
-          }
+      save_settings(view, %{
+        "routes" => %{
+          "0" => %{"host" => "aut.hair", "port" => "8000"},
+          "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"},
+          "2" => %{"host" => "aut.hair", "path_prefix" => "/half", "port" => ""}
         }
       })
 
@@ -2177,11 +2191,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
       # host-mode: nothing is derived from a mode the operator picked separately.
       render_click(view, "settings_remove_route", %{"index" => "0"})
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "ports" => %{
-            "0" => %{"internal" => "8080", "external" => "9090", "exposure" => "host"}
-          }
+      save_settings(view, %{
+        "ports" => %{
+          "0" => %{"internal" => "8080", "external" => "9090", "exposure" => "host"}
         }
       })
 
@@ -2205,15 +2217,13 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       render_click(view, "settings_remove_route", %{"index" => "0"})
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "ports" => %{
-            "0" => %{
-              "internal" => "27900",
-              "external" => "27900",
-              "protocol" => "udp",
-              "exposure" => "host"
-            }
+      save_settings(view, %{
+        "ports" => %{
+          "0" => %{
+            "internal" => "27900",
+            "external" => "27900",
+            "protocol" => "udp",
+            "exposure" => "host"
           }
         }
       })
@@ -2229,7 +2239,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      html = render_submit(view, "save_settings", %{"settings" => %{"memory_mb" => "1024"}})
+      html = save_settings(view, %{"memory_mb" => "1024"})
 
       reloaded = Homelab.Deployments.get_deployment!(dep.id)
 
@@ -2261,13 +2271,11 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{
-          "auth" => "sso_protected",
-          "memory_mb" => "1024",
-          "cpu_shares" => "2048",
-          "health" => %{"mode" => "path", "path" => "/healthz"}
-        }
+      save_settings(view, %{
+        "auth" => "sso_protected",
+        "memory_mb" => "1024",
+        "cpu_shares" => "2048",
+        "health" => %{"mode" => "path", "path" => "/healthz"}
       })
 
       updated = Homelab.Deployments.get_deployment!(dep.id)
@@ -2295,7 +2303,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       # Removing the last route is what makes it internal: nothing is derived from a
       # mode picked separately from the routes it describes.
       render_click(view, "settings_remove_route", %{"index" => "0"})
-      render_submit(view, "save_settings", %{"settings" => %{}})
+      save_settings(view, %{})
 
       assert Homelab.Deployments.get_deployment!(dep.id).exposure_mode_override == "service"
       # Sibling untouched — its overrides remain nil and it inherits the template.
@@ -2324,8 +2332,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "switch_tab", %{"tab" => "settings"})
       render_click(view, "start_settings_edit")
 
-      render_submit(view, "save_settings", %{
-        "settings" => %{"routes" => %{"0" => %{"host" => "app.example.com", "port" => "8080"}}}
+      save_settings(view, %{
+        "routes" => %{"0" => %{"host" => "app.example.com", "port" => "8080"}}
       })
 
       html = render_click(view, "switch_tab", %{"tab" => "releases"})
@@ -2347,7 +2355,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
       render_click(view, "start_settings_edit")
 
       render_click(view, "settings_remove_route", %{"index" => "0"})
-      render_submit(view, "save_settings", %{"settings" => %{}})
+      save_settings(view, %{})
 
       html = render_click(view, "switch_tab", %{"tab" => "overview"})
 
