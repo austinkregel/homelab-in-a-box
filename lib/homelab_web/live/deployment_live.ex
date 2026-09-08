@@ -16,6 +16,8 @@ defmodule HomelabWeb.DeploymentLive do
   alias HomelabWeb.DeploymentSettings
   alias HomelabWeb.SecretReveal
 
+  @tabs ~w(overview settings topology traffic logs environment volumes backups releases)
+
   @log_poll_interval 3_000
 
   # Both re-run refusals mean the same thing to the operator: something else is driving
@@ -31,6 +33,7 @@ defmodule HomelabWeb.DeploymentLive do
       |> assign(:deployment, nil)
       |> assign(:readiness, [])
       |> assign(:active_tab, "overview")
+      |> assign(:tabs, @tabs)
       |> assign(:logs, "")
       |> assign(:logs_loading, false)
       |> assign(:follow_logs, false)
@@ -70,8 +73,23 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   @impl true
-  def handle_params(%{"id" => id}, _uri, socket) do
-    deployment = Deployments.get_deployment!(String.to_integer(id))
+  def handle_params(%{"id" => id} = params, _uri, socket) do
+    id = String.to_integer(id)
+
+    socket =
+      if socket.assigns.deployment && socket.assigns.deployment.id == id do
+        socket
+      else
+        load_deployment(socket, id)
+      end
+
+    {:noreply, apply_tab(socket, params["tab"])}
+  end
+
+  # Everything a tab switch must NOT redo: the queries, the TLS probe, and the
+  # PubSub subscriptions, which would otherwise stack up one duplicate per click.
+  defp load_deployment(socket, id) do
+    deployment = Deployments.get_deployment!(id)
     tenants = Homelab.Tenants.list_active_tenants()
 
     siblings = Deployments.list_deployments_for_tenant(deployment.tenant_id)
@@ -117,8 +135,29 @@ defmodule HomelabWeb.DeploymentLive do
         socket
       end
 
-    {:noreply, socket}
+    socket
   end
+
+  # The tab is a URL parameter, so a deep link, a refresh and the back button all
+  # land where they say they do. An unknown or missing tab falls back to overview
+  # rather than rendering a page with no visible panel.
+  defp apply_tab(socket, tab) when tab in @tabs do
+    socket =
+      if tab == "logs" do
+        send(self(), :load_logs)
+        assign(socket, :logs_loading, true)
+      else
+        if socket.assigns.log_timer, do: Process.cancel_timer(socket.assigns.log_timer)
+
+        socket
+        |> assign(:follow_logs, false)
+        |> assign(:log_timer, nil)
+      end
+
+    assign(socket, :active_tab, tab)
+  end
+
+  defp apply_tab(socket, _tab), do: apply_tab(socket, "overview")
 
   # Loads the release history where this deployment is the app, plus the single
   # "driving" release that governs its lifecycle (the app's release even when
@@ -250,23 +289,8 @@ defmodule HomelabWeb.DeploymentLive do
   end
 
   def handle_event("switch_tab", %{"tab" => tab}, socket) do
-    socket =
-      case tab do
-        "logs" ->
-          send(self(), :load_logs)
-          assign(socket, :logs_loading, true)
-
-        _ ->
-          if socket.assigns.log_timer, do: Process.cancel_timer(socket.assigns.log_timer)
-
-          socket
-          |> assign(:follow_logs, false)
-          |> assign(:log_timer, nil)
-      end
-
     {:noreply,
-     socket
-     |> assign(:active_tab, tab)}
+     push_patch(socket, to: ~p"/deployments/#{socket.assigns.deployment.id}?tab=#{tab}")}
   end
 
   def handle_event("toggle_follow_logs", _params, socket) do
@@ -783,19 +807,7 @@ defmodule HomelabWeb.DeploymentLive do
         <%!-- Tabs --%>
         <div class="flex gap-6 border-b border-base-content/10 mb-5">
           <button
-            :for={
-              tab <- [
-                "overview",
-                "settings",
-                "topology",
-                "traffic",
-                "logs",
-                "environment",
-                "volumes",
-                "backups",
-                "releases"
-              ]
-            }
+            :for={tab <- @tabs}
             type="button"
             phx-click="switch_tab"
             phx-value-tab={tab}

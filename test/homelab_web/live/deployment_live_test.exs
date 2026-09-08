@@ -41,6 +41,29 @@ defmodule HomelabWeb.DeploymentLiveTest do
     {:ok, conn: conn, tenant: tenant, template: template, deployment: deployment}
   end
 
+  describe "tab in the URL" do
+    test "opens the tab named by the query parameter", %{conn: conn, deployment: dep} do
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}?tab=volumes")
+
+      assert html =~ "Volumes"
+    end
+
+    test "switching a tab patches the URL", %{conn: conn, deployment: dep} do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
+
+      render_click(view, "switch_tab", %{"tab" => "volumes"})
+
+      assert_patched(view, ~p"/deployments/#{dep.id}?tab=volumes")
+    end
+
+    test "an unknown tab falls back to overview", %{conn: conn, deployment: dep} do
+      {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}?tab=nonsense")
+
+      # Overview is the only panel that renders without a tab having been chosen.
+      assert html =~ "overview"
+    end
+  end
+
   describe "mount" do
     test "renders deployment detail page", %{conn: conn, deployment: dep, template: template} do
       {:ok, _view, html} = live(conn, ~p"/deployments/#{dep.id}")
