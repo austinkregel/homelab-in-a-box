@@ -4,7 +4,7 @@ defmodule Homelab.IdentityBrokers.GenericOidc do
 
   Works with any standards-compliant OIDC provider by using the provider's
   API to manage client registrations and user assignments. Supports
-  Authentik, Keycloak, aut.hair, and other OIDC-compliant servers.
+  Authentik, Keycloak, and other OIDC-compliant servers.
 
   Configuration:
     config :homelab, Homelab.IdentityBrokers.GenericOidc,
@@ -22,7 +22,7 @@ defmodule Homelab.IdentityBrokers.GenericOidc do
   def display_name, do: "Generic OIDC"
 
   @impl true
-  def description, do: "Standards-compliant OIDC provider (Authentik, Keycloak, aut.hair, etc.)"
+  def description, do: "Standards-compliant OIDC provider (Authentik, Keycloak, etc.)"
 
   @impl true
   def create_client(app_name, redirect_uris) do

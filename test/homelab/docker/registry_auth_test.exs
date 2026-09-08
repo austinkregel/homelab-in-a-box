@@ -97,7 +97,7 @@ defmodule Homelab.Docker.RegistryAuthTest do
     test "authenticates a private GHCR image with the configured token" do
       Settings.set("ghcr_token", "ghp_secret", encrypt: true)
 
-      auth = RegistryAuth.for_ref("ghcr.io/austinkregel/aut.hair:latest")
+      auth = RegistryAuth.for_ref("ghcr.io/acme/webapp:latest")
       refute is_nil(auth), "a private GHCR image must be pulled WITH credentials"
 
       assert %{
@@ -112,7 +112,7 @@ defmodule Homelab.Docker.RegistryAuthTest do
       Settings.set("ghcr_username", "austinkregel")
 
       assert %{"username" => "austinkregel", "password" => "ghp_secret"} =
-               "ghcr.io/austinkregel/aut.hair:latest" |> RegistryAuth.for_ref() |> decode()
+               "ghcr.io/acme/webapp:latest" |> RegistryAuth.for_ref() |> decode()
     end
 
     test "does not leak the GHCR token onto refs that are not GHCR's" do

@@ -9,7 +9,7 @@ defmodule Homelab.Repo.Migrations.AddVolumesOverrideToDeployments do
   # did not declare had no way to get it -- you had to edit the catalog entry, which is
   # shared by every deployment of that app.
   #
-  # aut.hair needs a storage volume its template never declared.
+  # example.org needs a storage volume its template never declared.
   #
   # NULL rather than [] so "inherit" stays distinguishable from "deliberately none" --
   # the same distinction ports_override draws, and getting it wrong there is what

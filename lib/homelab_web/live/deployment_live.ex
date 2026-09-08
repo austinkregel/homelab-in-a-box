@@ -1814,7 +1814,7 @@ defmodule HomelabWeb.DeploymentLive do
 
   # The env editor edits KEYS as well as values. It used to render one input per
   # existing key, so a variable the template never declared could not be added at all
-  # -- and an app whose requirements changed after packaging (aut.hair gaining REVERB_*)
+  # -- and an app whose requirements changed after packaging (a Laravel app gaining REVERB_*)
   # had no way in short of rebuilding the catalog entry.
   defp env_rows(env) do
     env

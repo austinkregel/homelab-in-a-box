@@ -1038,7 +1038,7 @@ defmodule HomelabWeb.SettingsLive do
             type="url"
             name="oidc[issuer]"
             value={@oidc_issuer}
-            placeholder="https://aut.hair"
+            placeholder="https://auth.example.com"
             class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3"
           />
           <p class="text-[10px] text-base-content/40 mt-1">

@@ -15,15 +15,15 @@ defmodule Homelab.InfrastructureTest do
 
   describe "self_ingress_yaml/2" do
     test "builds a websecure router requesting the wildcard cert, and a service" do
-      yaml = Infrastructure.self_ingress_yaml("homelab.kregel.dev", "http://homelab-iab:4000")
+      yaml = Infrastructure.self_ingress_yaml("homelab.example.com", "http://homelab-iab:4000")
 
-      assert yaml =~ "rule: \"Host(`homelab.kregel.dev`)\""
+      assert yaml =~ "rule: \"Host(`homelab.example.com`)\""
       assert yaml =~ "entryPoints:"
       assert yaml =~ "- websecure"
       assert yaml =~ "certResolver: letsencrypt"
-      assert yaml =~ "- main: \"homelab.kregel.dev\""
+      assert yaml =~ "- main: \"homelab.example.com\""
       # The wildcard MUST be quoted — a bare leading `*` is a YAML alias.
-      assert yaml =~ "- \"*.homelab.kregel.dev\""
+      assert yaml =~ "- \"*.homelab.example.com\""
       assert yaml =~ "- url: \"http://homelab-iab:4000\""
     end
   end

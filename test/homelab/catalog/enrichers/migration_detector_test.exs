@@ -33,7 +33,7 @@ defmodule Homelab.Catalog.Enrichers.MigrationDetectorTest do
   test "detects Laravel from /var/www/html/artisan" do
     stub_probe(["/var/www/html/artisan"])
 
-    assert {:ok, detection} = MigrationDetector.detect("ghcr.io/austinkregel/aut.hair:latest")
+    assert {:ok, detection} = MigrationDetector.detect("ghcr.io/acme/webapp:latest")
     assert detection.framework == :laravel
     assert detection.path == "/var/www/html/artisan"
     assert detection.working_dir == "/var/www/html"

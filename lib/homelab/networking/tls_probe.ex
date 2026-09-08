@@ -8,7 +8,7 @@ defmodule Homelab.Networking.TlsProbe do
   invented date — and `provision_tls/1` reports `:active` merely because a router
   exists, which is true even while Traefik is serving its built-in self-signed
   `TRAEFIK DEFAULT CERT` because ACME failed. A wildcard covers `*.<base_domain>`,
-  but an app on its own apex domain (aut.hair) needs its own certificate, and that
+  but an app on its own apex domain (example.org) needs its own certificate, and that
   is exactly the case where a silent fallback to the default cert looks fine and
   serves browser warnings.
 
@@ -79,15 +79,23 @@ defmodule Homelab.Networking.TlsProbe do
   end
 
   defp describe(der, domain) do
-    cert = :public_key.pkix_decode_cert(der, :otp)
-    tbs = elem(cert, 1)
+    # Destructured rather than read by position. `OTPTBSCertificate` carries two optional
+    # fields — `issuerUniqueID` and `subjectUniqueID` — between the public key and the
+    # extensions, and both are `:asn1_NOVALUE` on essentially every certificate in
+    # existence. So an index that lands on one of them does not raise and does not read
+    # an empty list: it reads an atom, which a `case` on "is this a list" then discards
+    # as "no extensions". Naming the fields is what makes that class of miss impossible.
+    {:OTPTBSCertificate, _version, _serial, _signature, issuer_rdn, validity, subject_rdn,
+     _public_key, _issuer_uid, _subject_uid, extensions} =
+      elem(:public_key.pkix_decode_cert(der, :otp), 1)
 
-    issuer = rdn_common_name(elem(tbs, 4))
-    subject = rdn_common_name(elem(tbs, 6))
-    validity = elem(tbs, 5)
-    not_after = parse_time(elem(validity, 2))
+    {:Validity, _not_before, not_after_asn1} = validity
 
-    sans = subject_alt_names(der)
+    issuer = rdn_common_name(issuer_rdn)
+    subject = rdn_common_name(subject_rdn)
+    not_after = parse_time(not_after_asn1)
+
+    sans = subject_alt_names(extensions)
     names = Enum.uniq([subject | sans]) |> Enum.reject(&(&1 == ""))
 
     self_signed? = issuer == subject or String.contains?(issuer, @traefik_default)
@@ -116,10 +124,13 @@ defmodule Homelab.Networking.TlsProbe do
   defp status(_self, _covers?, days) when days <= @expiring_within_days, do: :expiring
   defp status(_self, _covers?, _days), do: :valid
 
-  # A wildcard cert (*.homelab.kregel.dev) covers one label, and only one.
+  # A wildcard cert (*.homelab.example.com) covers one label, and only one. Compared
+  # case-insensitively like the exact match below: DNS names are case-insensitive, and
+  # the two halves of a name come from different places — the parent from the issued
+  # certificate, the label from a Host rule an operator typed.
   defp name_matches?("*." <> wildcard_base, domain) do
     case String.split(domain, ".", parts: 2) do
-      [_label, rest] -> rest == wildcard_base
+      [_label, rest] -> String.downcase(rest) == String.downcase(wildcard_base)
       _ -> false
     end
   end
@@ -155,29 +166,28 @@ defmodule Homelab.Networking.TlsProbe do
   defp decode_string(value) when is_list(value), do: List.to_string(value)
   defp decode_string(_), do: ""
 
-  defp subject_alt_names(der) do
-    cert = :public_key.pkix_decode_cert(der, :otp)
-    tbs = elem(cert, 1)
-    extensions = elem(tbs, 8)
-
-    case extensions do
-      list when is_list(list) ->
-        list
-        |> Enum.find_value([], fn
-          {:Extension, {2, 5, 29, 17}, _critical, values} -> values
-          _ -> nil
-        end)
-        |> Enum.flat_map(fn
-          {:dNSName, name} -> [List.to_string(name)]
-          _ -> []
-        end)
-
-      _ ->
-        []
-    end
+  # The SANs are where a certificate's real coverage lives. A Let's Encrypt leaf names
+  # its first domain in the common name and EVERY name it authenticates in this
+  # extension — so a host served off a wildcard (`lidarr.homelab.example.com` on a cert
+  # whose CN is `homelab.example.com`) is covered here and nowhere else. Reading the
+  # common name alone would call every such host a name mismatch.
+  #
+  # `:asn1_NOVALUE` when the certificate carries no extensions at all.
+  defp subject_alt_names(extensions) when is_list(extensions) do
+    extensions
+    |> Enum.find_value([], fn
+      {:Extension, {2, 5, 29, 17}, _critical, values} -> values
+      _ -> nil
+    end)
+    |> Enum.flat_map(fn
+      {:dNSName, name} -> [List.to_string(name)]
+      _ -> []
+    end)
   rescue
     _ -> []
   end
+
+  defp subject_alt_names(_extensions), do: []
 
   defp parse_time({:utcTime, time}), do: parse_utc(List.to_string(time))
   defp parse_time({:generalTime, time}), do: parse_general(List.to_string(time))

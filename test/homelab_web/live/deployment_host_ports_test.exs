@@ -62,7 +62,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
             ],
             exposure_mode: :public
           ),
-        domain: "git.kregel.dev",
+        domain: "git.example.com",
         routed_port: 3000,
         status: :running,
         external_id: "forgejo-1"
@@ -99,7 +99,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
   # about SSH.
   defp ssh_on_2222 do
     %{
-      "routes" => %{"0" => %{"host" => "git.kregel.dev", "port" => "3000"}},
+      "routes" => %{"0" => %{"host" => "git.example.com", "port" => "3000"}},
       "ports" => %{
         "0" => %{
           "internal" => "3000",
@@ -136,7 +136,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
     assert [%{internal: "22", external: "2222"}] = spec.ports
     assert spec.labels["traefik.enable"] == "true"
 
-    assert spec.labels["traefik.http.services.git-kregel-dev.loadbalancer.server.port"] ==
+    assert spec.labels["traefik.http.services.git-example-com.loadbalancer.server.port"] ==
              "3000"
   end
 
@@ -148,7 +148,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
 
     {updated, _html} =
       save(conn, git, %{
-        "routes" => %{"0" => %{"host" => "git.kregel.dev", "port" => "3000"}},
+        "routes" => %{"0" => %{"host" => "git.example.com", "port" => "3000"}},
         "ports" => ports
       })
 
@@ -247,7 +247,7 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
       {updated, html} =
         save(conn, git, %{
           "auth" => "sso_protected",
-          "routes" => %{"0" => %{"host" => "git.kregel.dev", "port" => "3000"}},
+          "routes" => %{"0" => %{"host" => "git.example.com", "port" => "3000"}},
           "ports" => %{
             "0" => %{
               "internal" => "3000",
@@ -279,8 +279,8 @@ defmodule HomelabWeb.DeploymentHostPortsTest do
             }
           },
           "routes" => %{
-            "0" => %{"host" => "git.kregel.dev", "port" => "3000"},
-            "1" => %{"host" => "git.kregel.dev", "path_prefix" => "/app", "port" => "6001"}
+            "0" => %{"host" => "git.example.com", "port" => "3000"},
+            "1" => %{"host" => "git.example.com", "path_prefix" => "/app", "port" => "6001"}
           }
         })
 

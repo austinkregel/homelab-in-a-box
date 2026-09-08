@@ -58,7 +58,7 @@ defmodule Homelab.Deployments.Deployment do
     # inferred -- see SpecBuilder.routed_port/1. nil = fall back to the heuristic.
     field :routed_port, :integer
     # Additional path -> port routes, for an app serving a second protocol from a
-    # second port (aut.hair: Laravel on 8000, Reverb websockets on 6001 at /app).
+    # second port (example.org: Laravel on 8000, Reverb websockets on 6001 at /app).
     # Each: %{"path_prefix" => "/app", "port" => 6001}.
     field :extra_routes, {:array, :map}, default: []
     # Additional HOST routes -- a second hostname (optionally path-scoped) reaching this

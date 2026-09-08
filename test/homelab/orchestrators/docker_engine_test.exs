@@ -485,7 +485,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
                DockerEngine.deploy(spec)
     end
 
-    # THE ordering invariant, and the reason aut.hair served gateway timeouts off a
+    # THE ordering invariant, and the reason example.org served gateway timeouts off a
     # perfectly healthy container.
     #
     # Traefik's docker provider builds its config from the container START event. If the

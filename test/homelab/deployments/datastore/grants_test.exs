@@ -77,7 +77,7 @@ defmodule Homelab.Deployments.Datastore.GrantsTest do
   end
 
   describe "credentials_from_env/3" do
-    # THE bug that kept aut.hair down after its database had supposedly been repaired.
+    # THE bug that kept example.org down after its database had supposedly been repaired.
     # ProvisionCredentials shares a secret by KEY NAME, and the app and the datastore
     # use different names for the same concept -- so DB_PASSWORD and MARIADB_PASSWORD
     # are two independent secrets holding two DIFFERENT values. Granting the

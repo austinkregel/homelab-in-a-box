@@ -461,7 +461,7 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
 
     # The editor used to render one input per EXISTING key, so a variable the template
-    # never declared could not be added at all. aut.hair needed REVERB_* on an already
+    # never declared could not be added at all. example.org needed REVERB_* on an already
     # deployed stack and there was no way to put them there.
     test "a variable the template never declared can be added", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
@@ -2250,8 +2250,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
       assert_reconfigure_release(dep.id)
     end
 
-    # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
-    # wss://aut.hair/app on 443, so /app must reach 6001 -- the model could only express
+    # example.org: Laravel on 8000, Reverb websockets on 6001. The browser opens
+    # wss://example.org/app on 443, so /app must reach 6001 -- the model could only express
     # one backend port, and every websocket handshake landed on the HTTP server.
     test "an extra path route persists and reaches a different container port",
          %{conn: conn, deployment: dep} do
@@ -2262,8 +2262,8 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       save_settings(view, %{
         "routes" => %{
-          "0" => %{"host" => "aut.hair", "port" => "8000"},
-          "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"}
+          "0" => %{"host" => "example.org", "port" => "8000"},
+          "1" => %{"host" => "example.org", "path_prefix" => "/app", "port" => "6001"}
         }
       })
 
@@ -2283,9 +2283,9 @@ defmodule HomelabWeb.DeploymentLiveTest do
 
       save_settings(view, %{
         "routes" => %{
-          "0" => %{"host" => "aut.hair", "port" => "8000"},
-          "1" => %{"host" => "aut.hair", "path_prefix" => "/app", "port" => "6001"},
-          "2" => %{"host" => "aut.hair", "path_prefix" => "/half", "port" => ""}
+          "0" => %{"host" => "example.org", "port" => "8000"},
+          "1" => %{"host" => "example.org", "path_prefix" => "/app", "port" => "6001"},
+          "2" => %{"host" => "example.org", "path_prefix" => "/half", "port" => ""}
         }
       })
 

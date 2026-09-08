@@ -55,7 +55,7 @@ defmodule HomelabWeb.DeploymentBackendSchemeTest do
             ports: [%{"internal" => 8443, "role" => "web"}],
             exposure_mode: :public
           ),
-        domain: "code.kregel.dev",
+        domain: "code.example.com",
         routed_port: 8443,
         status: :running,
         external_id: "code-1"
@@ -90,13 +90,13 @@ defmodule HomelabWeb.DeploymentBackendSchemeTest do
     # which is the half that fixes the 400.
     assert {:ok, spec} = SpecBuilder.build(updated)
 
-    assert spec.labels["traefik.http.services.code-kregel-dev.loadbalancer.server.scheme"] ==
+    assert spec.labels["traefik.http.services.code-example-com.loadbalancer.server.scheme"] ==
              "https"
 
     # And the second half: without a transport that skips verification, the 400 becomes a
     # 500 — the backend's certificate is self-signed and names something other than the
     # container Traefik dialled.
-    assert spec.labels["traefik.http.services.code-kregel-dev.loadbalancer.serverstransport"] ==
+    assert spec.labels["traefik.http.services.code-example-com.loadbalancer.serverstransport"] ==
              Infrastructure.internal_tls_transport()
   end
 
@@ -106,11 +106,12 @@ defmodule HomelabWeb.DeploymentBackendSchemeTest do
     assert SpecBuilder.backend_scheme(updated) == "http"
     assert {:ok, spec} = SpecBuilder.build(updated)
 
-    assert spec.labels["traefik.http.services.code-kregel-dev.loadbalancer.server.port"] == "8443"
+    assert spec.labels["traefik.http.services.code-example-com.loadbalancer.server.port"] ==
+             "8443"
 
     refute Map.has_key?(
              spec.labels,
-             "traefik.http.services.code-kregel-dev.loadbalancer.server.scheme"
+             "traefik.http.services.code-example-com.loadbalancer.server.scheme"
            )
   end
 
@@ -124,11 +125,11 @@ defmodule HomelabWeb.DeploymentBackendSchemeTest do
     render_click(view, "start_settings_edit", %{})
 
     render_change(view, "settings_changed", %{
-      "settings" => %{"backend_scheme" => "https", "domain" => "code.kregel.dev"}
+      "settings" => %{"backend_scheme" => "https", "domain" => "code.example.com"}
     })
 
     render_change(view, "settings_changed", %{
-      "settings" => %{"domain" => "code.kregel.dev"}
+      "settings" => %{"domain" => "code.example.com"}
     })
 
     assert view |> element(~s(#settings-backend-scheme option[value="https"])) |> render() =~

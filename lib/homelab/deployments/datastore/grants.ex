@@ -4,7 +4,7 @@ defmodule Homelab.Deployments.Datastore.Grants do
 
   ## Why this exists
 
-  aut.hair served a Laravel 500 — healthy app, healthy database, `Access denied for
+  example.org served a Laravel 500 — healthy app, healthy database, `Access denied for
   user 'authair'` — because of two independent faults that look identical from the
   outside:
 
@@ -23,7 +23,7 @@ defmodule Homelab.Deployments.Datastore.Grants do
   Either way the credential is *believed* rather than *true*. This module makes it
   true, by granting exactly what the APP is configured to send (see
   `credentials_from_env/3` — reconciling against the datastore's own env instead is
-  fault 2, and it is the trap that kept aut.hair down after its database had
+  fault 2, and it is the trap that kept example.org down after its database had
   supposedly been repaired).
 
   This module closes that loop by making the database true rather than assumed. It
@@ -111,7 +111,7 @@ defmodule Homelab.Deployments.Datastore.Grants do
   # reads `MARIADB_PASSWORD`. Same concept, different key -- so they are two
   # independent secrets holding two different values. Reconciling the database
   # against its own `MARIADB_PASSWORD` therefore grants a password the app never
-  # sends, and the app still gets `Access denied`. aut.hair failed exactly this way,
+  # sends, and the app still gets `Access denied`. example.org failed exactly this way,
   # twice.
   #
   # Env var names vary per app (`DB_*` for Laravel, `MYSQL_*` for Nextcloud), so the

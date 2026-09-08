@@ -18,7 +18,7 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants do
 
   Grants what the APP sends, not what the datastore's own env says — those are
   different secrets under different key names, and confusing them is what left
-  aut.hair with `Access denied` even after its database had been "repaired".
+  example.org with `Access denied` even after its database had been "repaired".
 
   No `compensate/2`: the step only creates a user/database and resets a password to
   the value homelab already holds. There is nothing to undo that would not be

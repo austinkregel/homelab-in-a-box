@@ -44,7 +44,7 @@ if backup_root = System.get_env("HOMELAB_BACKUP_ROOT") do
   config :homelab, :backup_root, backup_root
 end
 
-# The public base domain (e.g. homelab.kregel.dev). Config.base_domain/0 reads
+# The public base domain (e.g. homelab.example.com). Config.base_domain/0 reads
 # this app-env; without it the value was permanently the "homelab.local" default,
 # regardless of HOMELAB_BASE_DOMAIN — which then flowed into deployment domains,
 # the registry hostnames, and the Traefik self-ingress route + wildcard cert.
