@@ -2,7 +2,6 @@ defmodule HomelabWeb.SetupLiveTest do
   use HomelabWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
-  import Homelab.Factory
   import Mox
 
   setup :set_mox_global
@@ -328,15 +327,36 @@ defmodule HomelabWeb.SetupLiveTest do
   end
 
   describe "step 3 save without selections" do
-    test "save_step_3 without orchestrator shows error flash", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/setup?step=3")
-
+    # Clearing the setting lands a row whose value is NULL -- `to_string(nil)` is "", which
+    # `SystemSetting.changeset/2` drops as an empty value -- and `Settings.get/2` hands that
+    # nil back as a cache HIT, so the `"docker_engine"` default in `mount/3` never covers for
+    # it. Step 3 then renders with no orchestrator highlighted, and Next has to say so rather
+    # than record a driver the operator never chose.
+    test "save_step_3 with no orchestrator recorded shows the error flash", %{conn: conn} do
       Homelab.Settings.set("orchestrator", nil)
 
       {:ok, view, _html} = live(conn, ~p"/setup?step=3")
-      render_click(view, "select_orchestrator", %{"driver" => "docker"})
+
       html = render_click(view, "save_step_3", %{})
-      assert html =~ "Space" or html =~ "Create" or html =~ "Name"
+
+      assert html =~ "Please select an orchestrator."
+      refute has_element?(view, "#step4-form")
+
+      assert Homelab.Settings.get("orchestrator") == nil,
+             "save_step_3 recorded an orchestrator the operator never selected"
+    end
+
+    # The other half: `select_orchestrator` assigns whatever `driver` the client sends, so a
+    # blank one lands as "" -- truthy, and therefore the shape a truthiness check waves through
+    # and records as the operator's choice.
+    test "save_step_3 with a blank orchestrator selection shows the error flash", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/setup?step=3")
+
+      render_click(view, "select_orchestrator", %{"driver" => ""})
+      html = render_click(view, "save_step_3", %{})
+
+      assert html =~ "Please select an orchestrator."
+      refute has_element?(view, "#step4-form")
     end
 
     test "save_step_3 with orchestrator selected advances to step 4", %{conn: conn} do

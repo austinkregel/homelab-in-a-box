@@ -278,20 +278,29 @@ defmodule HomelabWeb.SetupLive do
     {:noreply, assign(socket, :selected_gateway, driver_id)}
   end
 
+  # Nothing-selected arrives as nil or as "", and neither may be recorded. nil is the one the
+  # `mount/3` default does not cover: `Settings.set(key, nil)` stores `to_string(nil)`, which
+  # `SystemSetting.changeset/2` drops as an empty value, so the row lands with a NULL `value`
+  # that `Settings.get("orchestrator", "docker_engine")` then serves as a cache HIT. "" is the
+  # one a truthiness check does not cover, and `select_orchestrator` assigns whatever `driver`
+  # the client sends. Storing either leaves `Config.orchestrator/0` matching no module and
+  # quietly inferring one from the daemon -- a recorded choice that is not the one in effect.
   def handle_event("save_step_3", _params, socket) do
     driver_id = socket.assigns.selected_orchestrator
 
-    if driver_id do
+    if blank?(driver_id) do
+      {:noreply, put_flash(socket, :error, "Please select an orchestrator.")}
+    else
       Homelab.Settings.set("orchestrator", driver_id)
 
-      if gw = socket.assigns.selected_gateway do
+      gw = socket.assigns.selected_gateway
+
+      if not blank?(gw) do
         Homelab.Settings.set("gateway", gw)
       end
 
       step = min(socket.assigns.step + 1, 5)
       {:noreply, push_patch(socket, to: ~p"/setup?step=#{step}")}
-    else
-      {:noreply, put_flash(socket, :error, "Please select an orchestrator.")}
     end
   end
 
@@ -304,6 +313,8 @@ defmodule HomelabWeb.SetupLive do
     step = max(socket.assigns.step - 1, 1)
     {:noreply, push_patch(socket, to: ~p"/setup?step=#{step}")}
   end
+
+  defp blank?(value), do: value in [nil, ""]
 
   defp get_oidc_issuer_from_form(socket) do
     form = socket.assigns.oidc_form
