@@ -74,11 +74,21 @@ defmodule Homelab.Services.MetricsCollector do
 
   # Persisting is best-effort: the live PubSub broadcast already went out, so a
   # transient DB error just means one missing sample, never a crashed collector.
+  #
+  # The exception type is logged alongside the message because the two failure
+  # kinds need different responses: a Postgrex or connection error clears on its
+  # own, while an ownership/configuration error (the collector running with no
+  # sandbox owner, or against an unstarted repo) drops every future sample until
+  # someone changes the wiring, and reads identically otherwise.
   defp persist_snapshot(combined) do
     try do
       Telemetry.record_snapshot(combined)
     rescue
-      e -> Logger.warning("MetricsCollector failed to persist snapshot: #{Exception.message(e)}")
+      e ->
+        Logger.warning(
+          "MetricsCollector failed to persist snapshot: " <>
+            "#{inspect(e.__struct__)}: #{Exception.message(e)}"
+        )
     end
   end
 
