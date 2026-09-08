@@ -2,6 +2,7 @@ defmodule HomelabWeb.DeploymentLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Deployments
+  alias Homelab.IndexedParams
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.Readiness
@@ -1854,10 +1855,14 @@ defmodule HomelabWeb.DeploymentLive do
   defp rows_from_params(nil), do: []
 
   defp rows_from_params(params) when is_map(params) do
+    # Markers first: their value is a string, so one left in an indexed map makes it
+    # look like the flat shape and the else branch emits a row called `_unused_0`.
+    params = IndexedParams.without_markers(params)
+
     if Enum.all?(params, fn {_k, value} -> is_map(value) end) do
       params
-      |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-      |> Enum.map(fn {_idx, row} ->
+      |> IndexedParams.ordered()
+      |> Enum.map(fn row ->
         %{"key" => row["key"] || "", "value" => row["value"] || ""}
       end)
     else
@@ -2467,6 +2472,7 @@ defmodule HomelabWeb.DeploymentLive do
   defp humanize_step(:provision_credentials), do: "Credentials generated"
   defp humanize_step(:dependency_container), do: "Dependency container started"
   defp humanize_step(:ensure_datastore_grants), do: "Database access granted"
+  defp humanize_step(:ensure_databases), do: "Databases created"
   defp humanize_step(:app_container), do: "Container created"
   defp humanize_step(:netns_child_container), do: "Container created in shared network"
   defp humanize_step(:await_health), do: "Container healthy"

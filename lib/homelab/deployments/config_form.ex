@@ -6,6 +6,7 @@ defmodule Homelab.Deployments.ConfigForm do
 
   alias Homelab.Catalog.Enrichers.PortRoles
   alias Homelab.Deployments.Access
+  alias Homelab.IndexedParams
 
   @doc """
   Normalizes indexed port form params (`%{"0" => %{...}, "1" => %{...}}`) into an
@@ -16,8 +17,8 @@ defmodule Homelab.Deployments.ConfigForm do
 
   def parse_ports(ports_map) when is_map(ports_map) do
     ports_map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, port} -> normalize_port(port) end)
+    |> IndexedParams.ordered()
+    |> Enum.map(&normalize_port/1)
     |> Enum.reject(fn p -> p["internal"] in [nil, ""] end)
   end
 

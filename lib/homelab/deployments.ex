@@ -916,15 +916,24 @@ defmodule Homelab.Deployments do
         stage: :dependencies,
         type: :await_health,
         resource_handle: %{"deployment_id" => companion.id}
+      },
+      # Before the app starts, so it never boots against a database that is not there.
+      %{
+        stage: :dependencies,
+        type: :ensure_databases,
+        resource_handle: %{"deployment_id" => companion.id}
       }
     ] ++ datastore_grant_steps(app, companion)
   end
 
-  # The release's own workload.
+  # The release's own workload. The database step covers a datastore deployed on its
+  # own — the companion case is handled in `dependency_steps/2` — and skips itself for
+  # every deployment that is not one.
   defp workload_steps do
     [
       %{stage: :workload, type: :app_container, resource_handle: %{}},
-      %{stage: :workload, type: :await_health, resource_handle: %{}}
+      %{stage: :workload, type: :await_health, resource_handle: %{}},
+      %{stage: :workload, type: :ensure_databases, resource_handle: %{}}
     ]
   end
 

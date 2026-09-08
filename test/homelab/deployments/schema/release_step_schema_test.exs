@@ -317,6 +317,7 @@ defmodule Homelab.Deployments.ReleaseStepSchemaTest do
                :dependency_container,
                :await_health,
                :ensure_datastore_grants,
+               :ensure_databases,
                :app_container,
                :netns_child_container,
                :sync_domain,

@@ -126,6 +126,7 @@ defmodule Homelab.DeploymentsTest do
                {:prepare, :provision_credentials},
                {:workload, :app_container},
                {:workload, :await_health},
+               {:workload, :ensure_databases},
                {:naming, :sync_domain},
                {:naming, :publish_dns},
                {:reachability, :publish_ingress},

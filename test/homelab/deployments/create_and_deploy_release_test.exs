@@ -74,6 +74,7 @@ defmodule Homelab.Deployments.CreateAndDeployReleaseTest do
                :provision_credentials,
                :app_container,
                :await_health,
+               :ensure_databases,
                :sync_domain,
                :publish_dns,
                :publish_ingress,
