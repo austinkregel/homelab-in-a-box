@@ -70,9 +70,19 @@ defmodule Homelab.Services.GatewayProvisioner do
   # Never let a daemon error crash the supervisor into a restart loop; the next
   # tick retries anyway.
   defp safe_ensure_traefik do
-    Infrastructure.ensure_traefik()
+    ensure_proxy()
   rescue
     e -> {:error, Exception.message(e)}
+  end
+
+  # The same seam, under the same key, as the saga's `EnsureIngressProxy` step and the
+  # legacy deploy path: all three ask the same function the same question, and a test
+  # that drives one has to be able to drive the others.
+  defp ensure_proxy do
+    case Application.get_env(:homelab, :ingress_proxy_ensurer) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> Infrastructure.ensure_traefik()
+    end
   end
 
   defp log_transition(prev, result) do
@@ -86,17 +96,24 @@ defmodule Homelab.Services.GatewayProvisioner do
       match?({:ok, :already_running}, result) and match?({:error, _}, prev) ->
         Logger.info("GatewayProvisioner: Traefik recovered")
 
+      # The remaining successes stay quiet: a first tick that finds Traefik already up
+      # is the steady state, not a transition worth a line.
+      match?({:ok, _}, result) ->
+        :ok
+
       match?({:error, :dns_token_missing}, result) ->
         Logger.warning(
           "GatewayProvisioner: TRAEFIK_DNS_API_TOKEN is not set — cannot provision Traefik TLS. Set it to enable ingress."
         )
 
-      match?({:error, _}, result) ->
-        {:error, reason} = result
-        Logger.warning("GatewayProvisioner: Traefik provisioning failed: #{inspect(reason)}")
-
+      # A catch-all, NOT `match?({:error, _}, result)`. `ensure_traefik/0` is a `with`
+      # with no `else`, so it returns whatever any clause returned — and a shape such as
+      # `{:error, :enoent, _}` matches no two-element `{:error, _}`. Falling through to a
+      # silent `:ok` would still store that value in `state.last`, and the `result ==
+      # prev` short-circuit at the top then keeps every later tick silent too: the one
+      # failure class this service cannot classify would be the one it never reports.
       true ->
-        :ok
+        Logger.warning("GatewayProvisioner: Traefik provisioning failed: #{inspect(result)}")
     end
   end
 end

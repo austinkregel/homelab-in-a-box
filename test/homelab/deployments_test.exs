@@ -16,6 +16,24 @@ defmodule Homelab.DeploymentsTest do
     :ok
   end
 
+  # Every domain-bearing deploy asks `do_deploy/1` to ensure the ingress proxy first.
+  # With no daemon and no TRAEFIK_DNS_API_TOKEN that is a real failure these tests are
+  # not about, so state the answer instead — the same seam the saga's ingress step and
+  # `GatewayProvisioner` read. Tests that ARE about the answer override it.
+  setup do
+    prev = Application.get_env(:homelab, :ingress_proxy_ensurer)
+    Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:ok, :already_running} end)
+
+    on_exit(fn ->
+      case prev do
+        nil -> Application.delete_env(:homelab, :ingress_proxy_ensurer)
+        fun -> Application.put_env(:homelab, :ingress_proxy_ensurer, fun)
+      end
+    end)
+
+    :ok
+  end
+
   describe "redeploy/1" do
     setup do
       tenant = insert(:tenant)
@@ -752,6 +770,39 @@ defmodule Homelab.DeploymentsTest do
 
     test "returns error when creation fails" do
       assert {:error, _changeset} = Deployments.deploy_now(%{})
+    end
+
+    # `Infrastructure.ensure_traefik/0` is a `with` with no `else`, so it returns
+    # whatever any clause returned — including `Docker.Network.ensure/1`'s own shapes.
+    # A `case` matching only the three expected returns raises `CaseClauseError`, and
+    # unlike the saga's ingress step this call sits inside no rescue at all: it would
+    # come out of `deploy_now/1` at the controller or LiveView, failing a deploy the
+    # orchestrator would otherwise have completed.
+    test "an unexpected return from ensure_traefik does not fail the deploy" do
+      tenant = insert(:tenant)
+      template = insert(:app_template)
+
+      Application.put_env(:homelab, :ingress_proxy_ensurer, fn -> {:error, :enoent, :extra} end)
+
+      Homelab.Mocks.Orchestrator
+      |> expect(:deploy, fn _spec -> {:ok, "container_weird"} end)
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_dns"}} end)
+
+      attrs = %{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        domain: "weird.tenant.homelab.local"
+      }
+
+      assert {:ok, deployment} = Deployments.deploy_now(attrs)
+      assert deployment.external_id == "container_weird"
+
+      assert Enum.any?(Homelab.Services.ActivityLog.recent(20), fn event ->
+               event.source == "infrastructure" and
+                 event.message =~ "Traefik failed: {:error, :enoent, :extra}"
+             end)
     end
 
     test "sets status to failed when orchestrator deploy fails" do
