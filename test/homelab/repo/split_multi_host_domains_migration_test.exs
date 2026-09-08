@@ -16,13 +16,13 @@ defmodule Homelab.Repo.SplitMultiHostDomainsMigrationTest do
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Repo
 
+  @path "priv/repo/migrations/20260828000000_split_multi_host_deployment_domains.exs"
   @migration Homelab.Repo.Migrations.SplitMultiHostDeploymentDomains
 
+  # `mix test` runs `ecto.migrate` first, which already defines the module; requiring the
+  # file again would redefine it.
   setup_all do
-    Code.require_file(
-      "priv/repo/migrations/20260828000000_split_multi_host_deployment_domains.exs"
-    )
-
+    unless Code.ensure_loaded?(@migration), do: Code.require_file(Path.expand(@path, File.cwd!()))
     :ok
   end
 

@@ -40,13 +40,17 @@ defmodule Homelab.CryptoTest do
         )
       end)
 
-      log = capture_log(fn -> assert Crypto.decrypt(encoded) == nil end)
-      assert log =~ "could not be decrypted"
+      log =
+        capture_log(fn ->
+          assert Crypto.decrypt(encoded) == nil
 
-      # :crypto hands back the bare atom :error on GCM failure. Every caller expects
-      # a binary, so leaking it would JSON-encode as the string "error" and get used
-      # as a registry *password* — a key mismatch surfacing as an inexplicable 401.
-      refute Crypto.decrypt(encoded) == :error
+          # :crypto hands back the bare atom :error on GCM failure. Every caller expects
+          # a binary, so leaking it would JSON-encode as the string "error" and get used
+          # as a registry *password* — a key mismatch surfacing as an inexplicable 401.
+          refute Crypto.decrypt(encoded) == :error
+        end)
+
+      assert log =~ "could not be decrypted"
     end
   end
 end

@@ -1,6 +1,7 @@
 defmodule Homelab.BootstrapTest do
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Mox
 
   alias Homelab.Bootstrap
@@ -71,7 +72,12 @@ defmodule Homelab.BootstrapTest do
           {:ok, %{"State" => %{"Running" => true, "Health" => %{"Status" => "healthy"}}}}
       end)
 
-      assert :ok = Bootstrap.ensure_infrastructure()
+      log = capture_log(fn -> assert :ok = Bootstrap.ensure_infrastructure() end)
+
+      # HOSTNAME is unset by the setup, so the self-join is skipped rather than
+      # attempted against a container id that does not exist.
+      assert log =~ "could not determine own container ID"
+
       assert Application.get_env(:homelab, Homelab.Repo)[:hostname] == "homelab-iab-postgres"
     end
 
@@ -99,7 +105,12 @@ defmodule Homelab.BootstrapTest do
 
       # Container GET keeps returning not_found, so wait_for_postgres times out;
       # we only care that the create requests were shaped correctly.
-      assert {:error, :postgres_timeout} = Bootstrap.ensure_infrastructure()
+      log =
+        capture_log(fn ->
+          assert {:error, :postgres_timeout} = Bootstrap.ensure_infrastructure()
+        end)
+
+      assert log =~ "Bootstrap failed: :postgres_timeout"
 
       assert_received {:post, "/networks/create", %{"Name" => "homelab-iab-internal"}}
       assert_received {:post, "/volumes/create", %{"Name" => "homelab-iab-postgres-data"}}
@@ -113,8 +124,13 @@ defmodule Homelab.BootstrapTest do
         "/networks/homelab-iab-internal", _ -> {:error, :econnrefused}
       end)
 
-      assert {:error, {:network_check_failed, :econnrefused}} =
-               Bootstrap.ensure_infrastructure()
+      log =
+        capture_log(fn ->
+          assert {:error, {:network_check_failed, :econnrefused}} =
+                   Bootstrap.ensure_infrastructure()
+        end)
+
+      assert log =~ "Bootstrap failed: {:network_check_failed, :econnrefused}"
     end
 
     test "times out when Postgres never reports healthy" do
@@ -127,7 +143,12 @@ defmodule Homelab.BootstrapTest do
         "/containers/" <> _, _ -> {:ok, %{"State" => %{"Running" => true}}}
       end)
 
-      assert {:error, :postgres_timeout} = Bootstrap.ensure_infrastructure()
+      log =
+        capture_log(fn ->
+          assert {:error, :postgres_timeout} = Bootstrap.ensure_infrastructure()
+        end)
+
+      assert log =~ "Bootstrap failed: :postgres_timeout"
     end
   end
 
@@ -172,7 +193,8 @@ defmodule Homelab.BootstrapTest do
         System.delete_env("HOMELAB_INSTANCE_NAME")
       end)
 
-      Bootstrap.maybe_seed_from_env()
+      log = capture_log(fn -> Bootstrap.maybe_seed_from_env() end)
+      assert log =~ "OIDC issuer/client_id not provided"
 
       # Settings still seed, but marking complete without OIDC would trap the UI in
       # the / -> /auth/oidc -> /setup -> / redirect loop, so it must stay incomplete.
