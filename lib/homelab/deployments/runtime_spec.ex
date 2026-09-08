@@ -38,6 +38,8 @@ defmodule Homelab.Deployments.RuntimeSpec do
 
   import Ecto.Changeset
 
+  alias Homelab.IndexedParams
+
   # Docker's own capability set (`man 7 capabilities`, minus the ones the daemon does
   # not recognise). Kept explicit so a typo is caught here rather than at deploy.
   @capabilities ~w(
@@ -177,8 +179,8 @@ defmodule Homelab.Deployments.RuntimeSpec do
 
   def parse_device_rows(devices) when is_map(devices) do
     devices
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} -> normalize_device(row) end)
+    |> IndexedParams.ordered()
+    |> Enum.map(&normalize_device/1)
   end
 
   def parse_device_rows(devices) when is_list(devices) do

@@ -183,6 +183,38 @@ defmodule Homelab.Deployments.SettingsFormTest do
     end
   end
 
+  describe "untouched inputs" do
+    test "a row's _unused_ marker is a marker, not a row" do
+      form = SettingsForm.from_deployment(deployment(%{}))
+
+      params = %{
+        "health" => %{
+          "mode" => "command",
+          "shell" => "false",
+          "args" => %{"_unused_0" => "", "0" => "pg_isready -U postgres -d sonarr-main"}
+        }
+      }
+
+      assert %{"args" => ["pg_isready -U postgres -d sonarr-main"]} =
+               SettingsForm.from_params(form, params).health
+    end
+
+    test "markers never displace the rows they shadow" do
+      form = SettingsForm.from_deployment(deployment(%{}))
+
+      params = %{
+        "ports" => %{
+          "_unused_0" => "",
+          "1" => %{"internal" => "5432", "exposure" => "internal"},
+          "0" => %{"internal" => "80", "exposure" => "proxy"}
+        }
+      }
+
+      assert [%{"internal" => "80"}, %{"internal" => "5432"}] =
+               SettingsForm.from_params(form, params).ports
+    end
+  end
+
   describe "derived exposure" do
     test "a route makes it a proxy mode, named by the auth" do
       form = %SettingsForm{

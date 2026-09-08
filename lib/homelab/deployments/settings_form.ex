@@ -32,6 +32,7 @@ defmodule Homelab.Deployments.SettingsForm do
   alias Homelab.Deployments.GpuSpec
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.SpecBuilder
+  alias Homelab.IndexedParams
   alias Homelab.Networking.Hostname
 
   @health_defaults %{"interval" => 30, "timeout" => 10, "retries" => 3, "start_period" => 10}
@@ -312,14 +313,7 @@ defmodule Homelab.Deployments.SettingsForm do
     |> Enum.map(&%{"key" => &1["key"] || "", "value" => &1["value"] || ""})
   end
 
-  defp indexed(params) when is_map(params) do
-    params
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} -> row end)
-  end
-
-  defp indexed(params) when is_list(params), do: params
-  defp indexed(_params), do: []
+  defp indexed(params), do: IndexedParams.ordered(params)
 
   defp carry_health(nil, current), do: current
 

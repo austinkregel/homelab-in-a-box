@@ -43,6 +43,8 @@ defmodule Homelab.Deployments.VolumeSpec do
 
   import Ecto.Changeset
 
+  alias Homelab.IndexedParams
+
   @doc """
   Normalizes indexed form params (`%{"0" => %{...}}`) or a plain list into an ordered
   list of canonical, string-keyed volume maps. Rows with no mount path are dropped —
@@ -74,11 +76,7 @@ defmodule Homelab.Deployments.VolumeSpec do
 
   defp ordered_rows(nil), do: []
 
-  defp ordered_rows(volumes) when is_map(volumes) do
-    volumes
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} -> row end)
-  end
+  defp ordered_rows(volumes) when is_map(volumes), do: IndexedParams.ordered(volumes)
 
   defp ordered_rows(volumes) when is_list(volumes), do: volumes
 

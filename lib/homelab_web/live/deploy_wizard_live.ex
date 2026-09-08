@@ -2,6 +2,7 @@ defmodule HomelabWeb.DeployWizardLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Catalog
+  alias Homelab.IndexedParams
   alias Homelab.Deployments.Access
   alias Homelab.Deployments.RuntimeSpec
   alias Homelab.Deployments.SpecBuilder
@@ -3874,9 +3875,8 @@ defmodule HomelabWeb.DeployWizardLive do
   # the override map; the compose path needs the distinction.
   defp parse_env_rows(params) do
     params["env"]
-    |> Kernel.||(%{})
-    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, row} ->
+    |> IndexedParams.ordered()
+    |> Enum.map(fn row ->
       %{"key" => row["key"] || "", "value" => row["value"] || ""}
     end)
   end
@@ -3888,9 +3888,9 @@ defmodule HomelabWeb.DeployWizardLive do
 
     indexed_env =
       env_from_indexed
-      |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-      |> Enum.reject(fn {_, e} -> (e["key"] || "") == "" end)
-      |> Map.new(fn {_, e} -> {e["key"], e["value"] || ""} end)
+      |> IndexedParams.ordered()
+      |> Enum.reject(fn e -> (e["key"] || "") == "" end)
+      |> Map.new(fn e -> {e["key"], e["value"] || ""} end)
 
     Map.merge(indexed_env, env_overrides)
     |> Enum.reject(fn {_k, v} -> v == "" end)

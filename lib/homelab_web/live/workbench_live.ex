@@ -13,6 +13,7 @@ defmodule HomelabWeb.WorkbenchLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Catalog
+  alias Homelab.IndexedParams
   alias Homelab.Catalog.ImageBuilder
   alias Homelab.Workbench
   alias Homelab.Tenants
@@ -769,8 +770,8 @@ defmodule HomelabWeb.WorkbenchLive do
 
   defp parse_run_volume_params(map) when is_map(map) do
     map
-    |> Enum.sort_by(fn {idx, _} -> String.to_integer(idx) end)
-    |> Enum.map(fn {_idx, vol} ->
+    |> IndexedParams.ordered()
+    |> Enum.map(fn vol ->
       %{source: vol["source"], target: vol["container_path"], type: "volume"}
     end)
     |> Enum.reject(fn v ->
