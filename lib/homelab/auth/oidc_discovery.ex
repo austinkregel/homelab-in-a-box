@@ -67,7 +67,7 @@ defmodule Homelab.Auth.OidcDiscovery do
   @doc """
   Whether the issuer can identify a `client_credentials` token.
 
-  `machine_info_endpoint` is not in the OIDC spec — it is aut.hair's, since `userinfo`
+  `machine_info_endpoint` is not in the OIDC spec — it is the broker's, since `userinfo`
   has no answer for a token with no user behind it.
   """
   def supports_machine_info?(%__MODULE__{} = discovery) do

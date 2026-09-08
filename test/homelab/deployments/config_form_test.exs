@@ -9,7 +9,7 @@ defmodule Homelab.Deployments.ConfigFormTest do
       assert [%{"role" => "database"}] = ConfigForm.parse_ports(%{"0" => %{"internal" => "5432"}})
     end
 
-    # The bug behind the aut.hair 502: "other" was treated as "unset", so a port the
+    # The bug behind the example.org 502: "other" was treated as "unset", so a port the
     # operator had deliberately demoted was re-promoted to "web" on the very next
     # save. With two conventional web ports (8000 AND 8080 are both on the list) the
     # proxy then silently re-pointed at whichever sorted first.

@@ -3,8 +3,7 @@ defmodule Homelab.Behaviours.IdentityBroker do
   Behaviour for OIDC identity brokers.
 
   Implementations manage OIDC client registrations and user/group
-  assignments for any compliant OIDC provider (Authentik, Keycloak,
-  aut.hair, etc.).
+  assignments for any compliant OIDC provider (Authentik, Keycloak, etc.).
   """
 
   @type client_config :: %{

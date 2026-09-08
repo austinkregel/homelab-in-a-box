@@ -3,7 +3,7 @@ defmodule Homelab.Catalog.Enrichers.MigrationDetector do
   Detects whether an image ships an app framework that owns database migrations,
   and what command runs them.
 
-  Why this exists: aut.hair came up healthy, served a Laravel 500, and the cause
+  Why this exists: a Laravel app came up healthy, served a Laravel 500, and the cause
   (`php artisan migrate` had never run) was only findable by shelling into the
   container. A deployment that needs migrations should say so BEFORE it takes
   traffic, not after.

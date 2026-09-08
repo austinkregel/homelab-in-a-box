@@ -567,7 +567,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   end
 
   describe "routed port (the port Traefik forwards to)" do
-    # The aut.hair outage: the app exposed 8080 and listened on 8000. Both are
+    # The example.org outage: the app exposed 8080 and listened on 8000. Both are
     # "conventional" web ports, so PortRoles.infer/1 called BOTH "web", the guess took
     # whichever came first, and Traefik was pointed at a port nothing listened on --
     # a 502 with a perfectly healthy container behind it.
@@ -577,7 +577,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           ports_override: [
             %{"internal" => "8080", "role" => "web"},
@@ -587,7 +587,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "8000",
+      assert spec.labels["traefik.http.services.example-org.loadbalancer.server.port"] == "8000",
              "the proxy must forward to the declared port, not the first web-ish one"
     end
 
@@ -597,13 +597,13 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: nil,
           ports_override: [%{"internal" => "9000", "role" => "web"}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
-      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "9000"
+      assert spec.labels["traefik.http.services.example-org.loadbalancer.server.port"] == "9000"
     end
 
     test "the guess never lands on a UDP port, even when it sorts first" do
@@ -657,7 +657,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           ports_override: [
             %{"internal" => "8080", "role" => "web"},
@@ -674,7 +674,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   describe "volumes_override (durable storage a template never declared)" do
     # Volumes came from the TEMPLATE only -- build_volumes/2 never looked at the
     # deployment -- so an app needing storage its catalog entry did not declare had no way
-    # to get it short of editing the shared catalog entry. aut.hair needs exactly that.
+    # to get it short of editing the shared catalog entry. example.org needs exactly that.
     test "a deployment can add a durable volume its template never declared" do
       tenant = build_tenant()
       template = build_template(%{volumes: [], exposure_mode: :public})
@@ -754,8 +754,8 @@ defmodule Homelab.Deployments.SpecBuilderTest do
   end
 
   describe "extra routes (a second protocol on a second port)" do
-    # aut.hair: Laravel on 8000, Reverb websockets on 6001. The browser opens
-    # wss://aut.hair/app -- 443, path /app -- and the HTTP server does not speak the
+    # example.org: Laravel on 8000, Reverb websockets on 6001. The browser opens
+    # wss://example.org/app -- 443, path /app -- and the HTTP server does not speak the
     # websocket protocol, so every handshake died on 8000 until /app could be pointed
     # at 6001.
     test "a path route reaches a different container port than the app" do
@@ -764,7 +764,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
@@ -772,13 +772,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
       # The websocket route: same host, specific path, DIFFERENT backend port.
-      assert spec.labels["traefik.http.routers.aut-hair-app.rule"] ==
-               "Host(`aut.hair`) && PathPrefix(`/app`)"
+      assert spec.labels["traefik.http.routers.example-org-app.rule"] ==
+               "Host(`example.org`) && PathPrefix(`/app`)"
 
-      assert spec.labels["traefik.http.services.aut-hair-app.loadbalancer.server.port"] == "6001"
+      assert spec.labels["traefik.http.services.example-org-app.loadbalancer.server.port"] ==
+               "6001"
 
       # ...and the app route is untouched.
-      assert spec.labels["traefik.http.services.aut-hair.loadbalancer.server.port"] == "8000"
+      assert spec.labels["traefik.http.services.example-org.loadbalancer.server.port"] == "8000"
     end
 
     # THE trap. Traefik auto-links a router to a same-named service only while the
@@ -791,15 +792,15 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      assert spec.labels["traefik.http.routers.aut-hair.service"] == "aut-hair"
-      assert spec.labels["traefik.http.routers.aut-hair-app.service"] == "aut-hair-app"
+      assert spec.labels["traefik.http.routers.example-org.service"] == "example-org"
+      assert spec.labels["traefik.http.routers.example-org-app.service"] == "example-org-app"
     end
 
     # The service label is emitted even with no extra routes, so that ADDING one later is
@@ -809,10 +810,10 @@ defmodule Homelab.Deployments.SpecBuilderTest do
       template = build_template(%{exposure_mode: :public})
 
       deployment =
-        build_deployment(tenant, template, %{domain: "aut.hair", extra_routes: []})
+        build_deployment(tenant, template, %{domain: "example.org", extra_routes: []})
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
-      assert spec.labels["traefik.http.routers.aut-hair.service"] == "aut-hair"
+      assert spec.labels["traefik.http.routers.example-org.service"] == "example-org"
     end
 
     # Traefik's default priority IS the rule length, and Host && PathPrefix is strictly
@@ -824,17 +825,17 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      base = spec.labels["traefik.http.routers.aut-hair.rule"]
-      path = spec.labels["traefik.http.routers.aut-hair-app.rule"]
+      base = spec.labels["traefik.http.routers.example-org.rule"]
+      path = spec.labels["traefik.http.routers.example-org-app.rule"]
 
       assert String.length(path) > String.length(base)
-      refute Map.has_key?(spec.labels, "traefik.http.routers.aut-hair-app.priority")
+      refute Map.has_key?(spec.labels, "traefik.http.routers.example-org-app.priority")
     end
 
     test "a nested path becomes a valid router name" do
@@ -843,14 +844,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           extra_routes: [%{"path_prefix" => "/apps/events", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      assert spec.labels["traefik.http.routers.aut-hair-apps-events.rule"] ==
-               "Host(`aut.hair`) && PathPrefix(`/apps/events`)"
+      assert spec.labels["traefik.http.routers.example-org-apps-events.rule"] ==
+               "Host(`example.org`) && PathPrefix(`/apps/events`)"
     end
 
     # Traefik applies middleware PER ROUTER, and an extra route is its own router. An
@@ -864,14 +865,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      names = middlewares_on(spec.labels, "aut-hair-app")
+      names = middlewares_on(spec.labels, "example-org-app")
       refute names == [], "the /app router carries no middleware — the path is unguarded"
 
       # A dangling reference is not a safe failure mode: Traefik rejects a router naming
@@ -893,14 +894,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           routed_port: 8000,
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      names = middlewares_on(spec.labels, "aut-hair-app")
+      names = middlewares_on(spec.labels, "example-org-app")
       refute names == [], "the /app router carries no middleware — the path is unguarded"
 
       assert Enum.any?(names, fn name ->
@@ -920,14 +921,14 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
       deployment =
         build_deployment(tenant, template, %{
-          domain: "aut.hair",
+          domain: "example.org",
           extra_routes: [%{"path_prefix" => "/app", "port" => 6001}]
         })
 
       assert {:ok, spec} = SpecBuilder.build(deployment)
 
-      assert middlewares_on(spec.labels, "aut-hair") == []
-      assert middlewares_on(spec.labels, "aut-hair-app") == []
+      assert middlewares_on(spec.labels, "example-org") == []
+      assert middlewares_on(spec.labels, "example-org-app") == []
       refute Enum.any?(Map.keys(spec.labels), &String.contains?(&1, ".middlewares."))
     end
 
@@ -942,7 +943,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
         deployment =
           build_deployment(tenant, template, %{
-            domain: "aut.hair",
+            domain: "example.org",
             routed_port: 8000,
             extra_routes: [
               %{"path_prefix" => "/app", "port" => 6001},
@@ -958,7 +959,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
         assert {:ok, spec} = SpecBuilder.build(deployment)
 
-        base = middlewares_on(spec.labels, "aut-hair")
+        base = middlewares_on(spec.labels, "example-org")
         refute base == [], "#{exposure} base router lost its middleware"
 
         for router <- router_names(spec.labels) do
@@ -1848,7 +1849,7 @@ defmodule Homelab.Deployments.SpecBuilderTest do
 
   # Every router NAME the label map mentions, discovered rather than listed, so an
   # assertion can be written about routers a test never named.
-  # "traefik.http.routers.aut-hair-app.rule" -> "aut-hair-app".
+  # "traefik.http.routers.example-org-app.rule" -> "example-org-app".
   # A regression guard on the SHAPE of every rule the spec emits, not on one known-bad
   # value. `communication.ventures,matrix.communication.ventures` reached Traefik as a
   # single ``Host(`a,b`)`` and cost a router that would not build and an ACME order

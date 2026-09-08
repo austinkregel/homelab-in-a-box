@@ -155,7 +155,7 @@ defmodule Homelab.Auth.MachineToken do
   defp scopes(body) do
     case body["scopes"] || body["scope"] do
       list when is_list(list) -> Enum.filter(list, &is_binary/1)
-      # RFC 6749 allows one space-delimited string; aut.hair sends a list.
+      # RFC 6749 allows one space-delimited string; some providers send a list.
       str when is_binary(str) -> String.split(str, " ", trim: true)
       _ -> []
     end

@@ -21,7 +21,7 @@ Wrapper: `bin/homelab.sh` → `docker compose --project-directory "$ROOT_DIR" --
 | Nginx Proxy Manager | `apps/nginx-reverse-proxy.yaml` | Ports 80/81/443 |
 | Prometheus stack | `apps/prometheus.yaml` | Prometheus, Alertmanager, Grafana, InfluxDB, node-exporter |
 | Healthchecks | `apps/healthchecks.yaml` | Status monitoring (not Uptime Kuma) |
-| aut.hair | `apps/personal-apps.yaml` | OIDC provider for homelab-in-a-box |
+| Personal OIDC app | `apps/personal-apps.yaml` | OIDC provider for homelab-in-a-box |
 | docker-socket-proxy | `apps/socket-proxy.yaml` | Restricted Docker API |
 | Watchtower | `apps/watchtower.yaml` | Scheduled image updates |
 | Media stack | `apps/media-stack.yaml`, `apps/plex.yaml` | VPN via gluetun |
@@ -46,7 +46,7 @@ Wrapper: `bin/homelab.sh` → `docker compose --project-directory "$ROOT_DIR" --
 |--------------|------------------|
 | NPM reverse proxy | Traefik gateway |
 | Prometheus/Grafana | Dashboard metrics from Docker/Traefik |
-| aut.hair OIDC | `AuthController` + setup seed env vars |
+| Personal OIDC app | `AuthController` + setup seed env vars |
 | socket-proxy | Raw socket mount (hardening opportunity) |
 
 When documenting URLs for MCP or debugging, use the hostnames configured in NPM for Grafana/Prometheus/Healthchecks.

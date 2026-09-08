@@ -136,9 +136,9 @@ defmodule HomelabWeb.Plugs.HoldingPageTest do
     end
 
     test "a domain outside the base domain is still held", %{conn: conn} do
-      deployment(domain: "aut.hair", status: :stopped)
+      deployment(domain: "example.org", status: :stopped)
 
-      conn = get(conn, "https://aut.hair/")
+      conn = get(conn, "https://example.org/")
 
       assert held?(conn)
       assert hold_state(conn) == "offline"

@@ -828,8 +828,8 @@ defmodule Homelab.Deployments.SpecBuilder do
   must reach a DIFFERENT container port.
 
   One backend port per workload holds until an app serves a second protocol from a
-  second port. aut.hair does: Laravel on 8000, Reverb (websockets) on 6001, and the
-  browser opens `wss://aut.hair/app` — port 443, path `/app`. The HTTP server does not
+  second port. example.org does: Laravel on 8000, Reverb (websockets) on 6001, and the
+  browser opens `wss://example.org/app` — port 443, path `/app`. The HTTP server does not
   speak the websocket protocol, so without a second route every handshake died on 8000.
 
   No priority label is set, deliberately. Traefik's default priority is the RULE LENGTH,
@@ -1108,7 +1108,7 @@ defmodule Homelab.Deployments.SpecBuilder do
   An explicit `routed_port` is a DECISION and always wins. Everything below it is a
   guess, kept only for deployments that never made one.
 
-  The guess is why aut.hair served a 502: `PortRoles.infer/1` calls *every*
+  The guess is why example.org served a 502: `PortRoles.infer/1` calls *every*
   conventional HTTP port "web" (8000 and 8080 are both on the list), so an app
   exposing two of them had its upstream decided by array order — and an operator's
   explicit pick was re-inferred back to "web" on the next save, handing the route to

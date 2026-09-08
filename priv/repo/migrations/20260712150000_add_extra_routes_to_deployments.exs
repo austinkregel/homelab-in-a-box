@@ -7,8 +7,8 @@ defmodule Homelab.Repo.Migrations.AddExtraRoutesToDeployments do
   # router, one service, `routed_port`. That holds until an app serves a second
   # protocol from a second port in the same container.
   #
-  # aut.hair does. Laravel answers on 8000 and Reverb (websockets) on 6001, and the
-  # browser reaches Reverb at wss://aut.hair/app -- port 443, path /app. With one
+  # example.org does. Laravel answers on 8000 and Reverb (websockets) on 6001, and the
+  # browser reaches Reverb at wss://example.org/app -- port 443, path /app. With one
   # backend port there was no way to say "/app goes to 6001", so every websocket
   # handshake landed on the HTTP server, which does not speak it.
   #

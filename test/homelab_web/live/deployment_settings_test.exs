@@ -50,7 +50,7 @@ defmodule HomelabWeb.DeploymentSettingsTest do
             ],
             exposure_mode: :public
           ),
-        domain: "git.kregel.dev",
+        domain: "git.example.com",
         routed_port: 3000,
         ports_override: [
           %{"internal" => "3000", "role" => "web", "protocol" => "tcp"},
@@ -91,7 +91,7 @@ defmodule HomelabWeb.DeploymentSettingsTest do
       html = open(conn, git) |> render()
 
       assert html =~ "How it&#39;s reached"
-      assert html =~ "git.kregel.dev"
+      assert html =~ "git.example.com"
       assert html =~ "Version"
       assert html =~ "Runtime"
       assert html =~ "Resources"
@@ -105,7 +105,7 @@ defmodule HomelabWeb.DeploymentSettingsTest do
     } do
       html = open(conn, git) |> render()
 
-      assert html =~ "https://git.kregel.dev"
+      assert html =~ "https://git.example.com"
       assert html =~ "Published"
       assert html =~ "Reverse proxy"
     end

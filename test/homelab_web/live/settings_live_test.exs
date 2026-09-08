@@ -156,11 +156,11 @@ defmodule HomelabWeb.SettingsLiveTest do
 
   describe "OIDC configuration" do
     @discovery %{
-      "issuer" => "https://aut.hair",
-      "authorization_endpoint" => "https://aut.hair/authorize",
-      "token_endpoint" => "https://aut.hair/token",
-      "userinfo_endpoint" => "https://aut.hair/userinfo",
-      "jwks_uri" => "https://aut.hair/.well-known/jwks.json"
+      "issuer" => "https://auth.example.com",
+      "authorization_endpoint" => "https://auth.example.com/authorize",
+      "token_endpoint" => "https://auth.example.com/token",
+      "userinfo_endpoint" => "https://auth.example.com/userinfo",
+      "jwks_uri" => "https://auth.example.com/.well-known/jwks.json"
     }
 
     defp serve_discovery(bypass) do

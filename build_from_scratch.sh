@@ -16,10 +16,11 @@ fi
 # --- Seed values (skip setup wizard) ---
 # Non-secret defaults live here; override any of them via .env or the environment.
 HOMELAB_INSTANCE_NAME="${HOMELAB_INSTANCE_NAME:-Homelab}"
-HOMELAB_BASE_DOMAIN="${HOMELAB_BASE_DOMAIN:-dionysis.kregel.host}"
-HOMELAB_OIDC_ISSUER="${HOMELAB_OIDC_ISSUER:-https://aut.hair}"
+HOMELAB_BASE_DOMAIN="${HOMELAB_BASE_DOMAIN:-homelab.local}"
+# The OIDC issuer and client secret have NO defaults: both name a provider that is
+# specific to the install, so they must come from .env or the environment.
+HOMELAB_OIDC_ISSUER="${HOMELAB_OIDC_ISSUER:-}"
 HOMELAB_OIDC_CLIENT_ID="${HOMELAB_OIDC_CLIENT_ID:-17}"
-# The OIDC client secret has NO default: it must come from .env or the environment.
 HOMELAB_OIDC_CLIENT_SECRET="${HOMELAB_OIDC_CLIENT_SECRET:-}"
 HOMELAB_ORCHESTRATOR="${HOMELAB_ORCHESTRATOR:-docker_engine}"
 HOMELAB_GATEWAY="${HOMELAB_GATEWAY:-traefik}"
@@ -34,9 +35,9 @@ HOMELAB_GATEWAY="${HOMELAB_GATEWAY:-traefik}"
 # (prod release image also supports: bin/homelab rpc '...BreakGlass.arm!()')
 HOMELAB_BREAKGLASS_USER="${HOMELAB_BREAKGLASS_USER:-breakglass}"
 
-if [ -z "${HOMELAB_OIDC_CLIENT_SECRET}" ]; then
-  echo "WARNING: HOMELAB_OIDC_CLIENT_SECRET is empty — OIDC login will fail." >&2
-  echo "         Copy .env.example to .env and set it (and rotate the old secret)." >&2
+if [ -z "${HOMELAB_OIDC_ISSUER}" ] || [ -z "${HOMELAB_OIDC_CLIENT_SECRET}" ]; then
+  echo "WARNING: HOMELAB_OIDC_ISSUER or HOMELAB_OIDC_CLIENT_SECRET is empty — OIDC login will fail." >&2
+  echo "         Copy .env.example to .env and set them (and rotate the old secret)." >&2
 fi
 
 # --- Physical disks to expose for disk telemetry ---
