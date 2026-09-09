@@ -27,6 +27,7 @@ defmodule HomelabWeb.DeploymentSettings do
 
   use HomelabWeb, :html
 
+  alias Homelab.Deployments.Datastore.Connection
   alias Homelab.Deployments.Findings
   alias Homelab.Deployments.GpuSpec
   alias Homelab.Deployments.Netns
@@ -356,8 +357,169 @@ defmodule HomelabWeb.DeploymentSettings do
         <.routes_table form={@form} editing={@editing} deployment={@deployment} />
         <.backend_scheme form={@form} editing={@editing} />
         <.sticky_toggle form={@form} editing={@editing} />
+        <.tcp_routes_table form={@form} editing={@editing} deployment={@deployment} />
       </div>
     </.card>
+    """
+  end
+
+  # Hostname-addressed TCP endpoints — how a database gets reached by name instead of by
+  # a published host port.
+  #
+  # Kept separate from the routes table above rather than folded into it: that table is
+  # `host + path -> port`, and neither half of that fits here. There is no path, and the
+  # port column means something different — the client always connects on 443, and the
+  # number here is the container port behind it.
+  defp tcp_routes_table(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-2 border-t border-base-content/5 pt-4">
+      <div class="flex items-center justify-between">
+        <span class="text-xs font-medium text-base-content/50">TCP routes</span>
+        <button
+          :if={@editing && @form.auth != "sso_protected"}
+          type="button"
+          phx-click="settings_add_tcp_route"
+          class="text-xs text-primary hover:text-primary/80 cursor-pointer"
+        >
+          + Add TCP route
+        </button>
+      </div>
+
+      <%!-- Traefik has no forwardAuth for TCP, so the route would reach the container
+            with no login. The changeset refuses this; saying so here is what stops an
+            operator building a route they cannot save. --%>
+      <p
+        :if={@form.auth == "sso_protected"}
+        class="text-xs text-base-content/50 py-2 leading-relaxed"
+      >
+        Not available while authentication is SSO. A TCP route carries no login — Traefik
+        applies SSO per HTTP router, and there is no equivalent for a raw connection.
+        Set authentication to None or LAN only to add one.
+      </p>
+
+      <p
+        :if={@form.auth != "sso_protected" && @form.tcp_routes == []}
+        class="text-xs text-base-content/50 py-2 leading-relaxed"
+      >
+        None. Add one to reach a database by hostname instead of a published port —
+        clients connect on :443 and Traefik routes by the TLS server name.
+      </p>
+
+      <div :if={@form.tcp_routes != []} class="overflow-x-auto">
+        <table class="w-full min-w-[40rem] border-collapse">
+          <thead>
+            <tr>
+              <th class={th_class()}>Host</th>
+              <th class={th_class()}>To port</th>
+              <th class={th_class()}>Allowed from</th>
+              <th class={th_class()}></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              :for={{route, idx} <- Enum.with_index(@form.tcp_routes)}
+              class="border-b border-base-content/5"
+            >
+              <td class="py-1.5 px-2.5">
+                <input
+                  :if={@editing}
+                  type="text"
+                  name={"settings[tcp_routes][#{idx}][host]"}
+                  value={route["host"]}
+                  placeholder={"#{@deployment.app_template.slug}-db.yourdomain.com"}
+                  aria-label="TCP route host"
+                  class="w-full rounded bg-base-200 border-0 text-xs font-mono py-1 px-2"
+                />
+                <span :if={!@editing} class="font-mono text-xs">{route["host"]}</span>
+              </td>
+              <td class="py-1.5 px-2.5">
+                <input
+                  :if={@editing}
+                  type="text"
+                  inputmode="numeric"
+                  name={"settings[tcp_routes][#{idx}][port]"}
+                  value={route["port"]}
+                  aria-label="TCP backend port"
+                  class="w-24 rounded bg-base-200 border-0 text-xs font-mono py-1 px-2"
+                />
+                <span :if={!@editing} class="font-mono text-xs tabular-nums">
+                  :{route["port"]}
+                </span>
+              </td>
+              <td class="py-1.5 px-2.5">
+                <input
+                  :if={@editing}
+                  type="text"
+                  name={"settings[tcp_routes][#{idx}][source_range]"}
+                  value={route["source_range"]}
+                  placeholder={
+                    if @form.auth == "private", do: "192.168.1.0/24 (required)", else: "anywhere"
+                  }
+                  aria-label="Allowed source CIDRs"
+                  class="w-full rounded bg-base-200 border-0 text-xs font-mono py-1 px-2"
+                />
+                <span :if={!@editing} class="font-mono text-xs text-base-content/50">
+                  {blank(route["source_range"], "anywhere")}
+                </span>
+              </td>
+              <td class="py-1.5 px-2.5 w-8">
+                <button
+                  :if={@editing}
+                  type="button"
+                  phx-click="settings_remove_tcp_route"
+                  phx-value-index={idx}
+                  aria-label={"Remove TCP route #{route["host"]}"}
+                  class="text-base-content/30 hover:text-error cursor-pointer"
+                >
+                  <.icon name="hero-x-mark" class="size-4" />
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <%!-- The two facts that turn a correct-looking route into a support ticket. The
+            sslmode one is the footgun: without TLS the client sends no server name,
+            nothing matches, and the connection falls through to the HTTP routers and
+            fails with "expected authentication request from server, but received H". --%>
+      <p :if={@form.tcp_routes != []} class="text-[11px] text-base-content/40 leading-relaxed">
+        Clients must connect on <span class="font-mono">:443</span>
+        with <span class="font-mono">sslmode=require</span>
+        or stricter — without TLS there is no server name to route on. Traefik terminates
+        TLS and forwards plaintext, so the container sees Traefik's address as the client
+        on every connection.
+      </p>
+
+      <.tcp_connection_strings deployment={@deployment} />
+    </div>
+    """
+  end
+
+  # The saved routes turned into strings someone can paste.
+  #
+  # Read from the DEPLOYMENT rather than the form: these describe what is actually
+  # reachable right now, and rendering them from unsaved edits would offer a connection
+  # string for a route that does not exist yet.
+  defp tcp_connection_strings(assigns) do
+    assigns = assign(assigns, :connections, Connection.for_deployment(assigns.deployment))
+
+    ~H"""
+    <div :if={@connections != []} class="flex flex-col gap-1.5 pt-1">
+      <span class="text-[11px] font-medium text-base-content/50">Connection strings</span>
+
+      <div :for={conn <- @connections} class="flex items-center gap-2">
+        <code class="flex-1 px-2.5 py-1.5 rounded bg-base-200 text-[11px] font-mono text-base-content/80 select-all break-all">
+          {conn.url}
+        </code>
+      </div>
+
+      <%!-- The password is deliberately absent: it lives in the deployment's secrets, and
+            the Environment tab is what reveals it with the masking that page applies. --%>
+      <span class="text-[11px] text-base-content/40">
+        Password omitted — it's the datastore's password secret, on the Environment tab.
+      </span>
+    </div>
     """
   end
 

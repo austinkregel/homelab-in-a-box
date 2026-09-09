@@ -309,6 +309,12 @@ defmodule Homelab.Networking do
   An alias is a host the deployment ANSWERS on; a `path_prefix` on it scopes which
   requests that host serves and has no bearing on whether the name has to resolve, so
   path-scoped aliases are included like any other.
+
+  TCP route hosts are included for the same reason, and they are the case where a missing
+  record is hardest to read: the name is reached by a database client rather than a
+  browser, so an absent record surfaces as a connection timeout in an application's logs
+  with nothing pointing at DNS. Note a TCP-routed deployment may have no `domain` at all —
+  a datastore reachable only over TCP is normal — so this list is not always led by one.
   """
   @spec deployment_hostnames(map()) :: [String.t()]
   def deployment_hostnames(deployment) do
@@ -318,7 +324,13 @@ defmodule Homelab.Networking do
       |> List.wrap()
       |> Enum.map(& &1["host"])
 
-    [deployment.domain | aliases]
+    tcp_hosts =
+      deployment
+      |> Map.get(:tcp_routes)
+      |> List.wrap()
+      |> Enum.map(& &1["host"])
+
+    [deployment.domain | aliases ++ tcp_hosts]
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
   end

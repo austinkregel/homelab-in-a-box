@@ -654,4 +654,156 @@ defmodule Homelab.Deployments.DeploymentSchemaTest do
       assert updated.last_reconciled_at != nil
     end
   end
+
+  describe "changeset/2 tcp_routes validation" do
+    defp tcp_changeset(attrs) do
+      tenant = insert(:tenant)
+      template = insert(:app_template, exposure_mode: attrs[:exposure] || :service)
+
+      Deployment.changeset(
+        %Deployment{app_template: template},
+        Map.merge(
+          %{tenant_id: tenant.id, app_template_id: template.id},
+          Map.drop(attrs, [:exposure])
+        )
+      )
+    end
+
+    test "a host and port is valid" do
+      changeset = tcp_changeset(%{tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]})
+
+      assert changeset.valid?
+    end
+
+    test "the host is normalised the way a primary domain is" do
+      changeset =
+        tcp_changeset(%{tcp_routes: [%{"host" => "https://DB.example.com/", "port" => 5432}]})
+
+      assert changeset.valid?
+      [route] = Ecto.Changeset.get_change(changeset, :tcp_routes)
+      assert route["host"] == "db.example.com"
+    end
+
+    test "a missing host is rejected" do
+      changeset = tcp_changeset(%{tcp_routes: [%{"port" => 5432}]})
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "host is required"))
+    end
+
+    test "a missing or out-of-range port is rejected" do
+      changeset = tcp_changeset(%{tcp_routes: [%{"host" => "db.example.com"}]})
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "port must be 1-65535"))
+    end
+
+    test "a malformed source range is rejected" do
+      changeset =
+        tcp_changeset(%{
+          tcp_routes: [
+            %{"host" => "db.example.com", "port" => 5432, "source_range" => "192.168.1.0"}
+          ]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "comma-separated CIDRs"))
+    end
+
+    # A TCP router carries no forwardAuth -- Traefik has none for TCP -- so the route
+    # would reach the container with no login while sitting under a name the UI presents
+    # as SSO-protected.
+    test "an SSO-protected deployment cannot carry a TCP route" do
+      changeset =
+        tcp_changeset(%{
+          exposure: :sso_protected,
+          tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "SSO-protected"))
+    end
+
+    # The direction `get_change/2` alone would miss: the routes are already stored and
+    # untouched, and only the exposure moves.
+    test "flipping exposure to SSO on a deployment that already has routes is rejected" do
+      template = insert(:app_template, exposure_mode: :service)
+      tenant = insert(:tenant)
+
+      existing = %Deployment{
+        tenant_id: tenant.id,
+        app_template_id: template.id,
+        app_template: template,
+        tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+      }
+
+      changeset = Deployment.changeset(existing, %{exposure_mode_override: "sso_protected"})
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "SSO-protected"))
+    end
+
+    test "host networking cannot carry a TCP route" do
+      changeset =
+        tcp_changeset(%{
+          exposure: :host_network,
+          tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "host networking"))
+    end
+
+    # The RFC1918 default the HTTP path falls back to matches Docker's own bridge
+    # gateway, which is what an inbound connection through a published port can present
+    # as -- so on TCP the range is named explicitly or the route is refused.
+    test "a private deployment must name its source range" do
+      changeset =
+        tcp_changeset(%{
+          exposure: :private,
+          tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "source_range is required"))
+    end
+
+    test "a private deployment with an explicit range is valid" do
+      changeset =
+        tcp_changeset(%{
+          exposure: :private,
+          tcp_routes: [
+            %{"host" => "db.example.com", "port" => 5432, "source_range" => "192.168.1.0/24"}
+          ]
+        })
+
+      assert changeset.valid?
+    end
+
+    # A TCP router's HostSNI outranks every HTTP router for the same name on the shared
+    # entrypoint, so the website would silently become a database port.
+    test "a host already serving HTTP on this deployment is rejected" do
+      changeset =
+        tcp_changeset(%{
+          domain: "app.example.com",
+          tcp_routes: [%{"host" => "app.example.com", "port" => 5432}]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "already an HTTP route"))
+    end
+
+    test "the same host listed twice is rejected" do
+      changeset =
+        tcp_changeset(%{
+          tcp_routes: [
+            %{"host" => "db.example.com", "port" => 5432},
+            %{"host" => "db.example.com", "port" => 5432}
+          ]
+        })
+
+      refute changeset.valid?
+      assert Enum.any?(errors_on(changeset).tcp_routes, &(&1 =~ "listed twice"))
+    end
+  end
 end

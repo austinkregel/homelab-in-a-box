@@ -25,10 +25,6 @@ defmodule Homelab.Orchestrators.DockerEngine do
   @impl true
   def description, do: "Standalone containers — no Swarm required"
 
-  # Must match Homelab.Infrastructure's backbone network (namespaced to avoid
-  # colliding with an existing stack's `homelab-internal`).
-  @routing_network "homelab-iab-internal"
-
   # Docker gives the default route to whichever endpoint attached last at equal priority,
   # and ingress always attaches last. Anything above the default 0 outranks it.
   @primary_gw_priority 100
@@ -286,9 +282,13 @@ defmodule Homelab.Orchestrators.DockerEngine do
   # Called on a CREATED, not-yet-started container -- see `attach_then_start/2` for why
   # that ordering is load-bearing rather than incidental.
   defp maybe_connect_routing_network(container_id, spec) do
-    networks =
-      Map.get(spec, :bridge_networks, []) ++
-        if spec.labels["traefik.enable"] == "true", do: [@routing_network], else: []
+    # `routing_networks` is the spec's own statement of which networks Traefik must be
+    # able to reach this container on. It used to be re-derived here from
+    # `traefik.enable`, which cannot answer the question any more: a TCP-routed datastore
+    # sets that label and must stay OFF ingress, because ingress is one flat segment
+    # shared with every other tenant's routed workload. Traefik joins the datastore's
+    # tenant network instead.
+    networks = Map.get(spec, :bridge_networks, []) ++ Map.get(spec, :routing_networks, [])
 
     networks
     |> Enum.uniq()

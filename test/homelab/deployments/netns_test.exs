@@ -280,6 +280,32 @@ defmodule Homelab.Deployments.NetnsTest do
       assert spec.bridge_networks == []
       refute Map.has_key?(spec.labels, "traefik.enable")
     end
+
+    # The case this whole feature started from: a database behind the tunnel. The child
+    # has no endpoint, so its TCP router is built onto the donor exactly as an HTTP one
+    # is, resolving the child's port against the donor's address.
+    test "carries a TCP-only child's router, without putting the donor on ingress", ctx do
+      {:ok, _} =
+        Deployments.update_deployment(ctx.child, %{
+          domain: nil,
+          tcp_routes: [%{"host" => "postgres-media.example.com", "port" => 5432}]
+        })
+
+      assert {:ok, spec} = SpecBuilder.build(Deployments.get_deployment!(ctx.donor.id))
+
+      assert spec.labels["traefik.tcp.routers.postgres-media-example-com-5432.rule"] ==
+               "HostSNI(`postgres-media.example.com`)"
+
+      assert spec.labels[
+               "traefik.tcp.services.postgres-media-example-com-5432.loadbalancer.server.port"
+             ] == "5432"
+
+      # Traefik joins the tenant network to reach it; the donor does NOT join ingress,
+      # where every other tenant's routed workload could then reach the database at L3.
+      assert spec.bridge_networks == []
+      assert spec.routing_networks == []
+      assert spec.labels["traefik.docker.network"] =~ "homelab_tenant_"
+    end
   end
 
   # The most common way this arrangement fails, and the one with no error anywhere:

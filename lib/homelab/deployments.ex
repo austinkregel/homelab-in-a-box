@@ -462,6 +462,24 @@ defmodule Homelab.Deployments do
     |> Repo.all()
   end
 
+  @doc """
+  Deployments carrying at least one TCP route, preloaded.
+
+  These are the deployments Traefik has to reach on a TENANT network rather than on
+  ingress. A TCP-routed datastore deliberately stays off the ingress network — that
+  network is one flat segment shared with every other tenant's routed workload, so
+  putting a database on it would open the database to all of them at L3, bypassing
+  Traefik entirely. Traefik joins the tenant network instead, which grants reach to the
+  one process that already reaches every routed workload and grants the datastore
+  nothing. `Infrastructure.sync_traefik_networks/0` is what acts on this.
+  """
+  def list_tcp_routed do
+    Deployment
+    |> where([d], fragment("cardinality(?) > 0", d.tcp_routes))
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
   @doc "All non-nil external_ids across every deployment, for orphan detection."
   def list_all_external_ids do
     Deployment

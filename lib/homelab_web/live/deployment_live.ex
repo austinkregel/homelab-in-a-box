@@ -560,6 +560,26 @@ defmodule HomelabWeb.DeploymentLive do
      end)}
   end
 
+  def handle_event("settings_add_tcp_route", _params, socket) do
+    form = socket.assigns.settings_form
+
+    # No host is guessed. A TCP route's hostname is a DIFFERENT name from the app's web
+    # hostname — reusing it would make the TCP router shadow the website, which the
+    # changeset rejects — so an inherited host here would be a suggestion that cannot be
+    # saved. The port is the container port the database listens on.
+    blank = %{"host" => "", "port" => default_route_port(form), "source_range" => ""}
+
+    {:noreply,
+     update_settings(socket, fn form -> %{form | tcp_routes: form.tcp_routes ++ [blank]} end)}
+  end
+
+  def handle_event("settings_remove_tcp_route", %{"index" => index}, socket) do
+    {:noreply,
+     update_settings(socket, fn form ->
+       %{form | tcp_routes: List.delete_at(form.tcp_routes, String.to_integer(index))}
+     end)}
+  end
+
   def handle_event("settings_add_device", _params, socket) do
     blank = %{"host_path" => "", "container_path" => "", "permissions" => "rwm"}
     {:noreply, update_settings(socket, fn form -> %{form | devices: form.devices ++ [blank]} end)}

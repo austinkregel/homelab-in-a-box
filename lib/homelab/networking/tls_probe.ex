@@ -43,6 +43,13 @@ defmodule Homelab.Networking.TlsProbe do
   Returns `{:error, reason}` when the handshake cannot be completed at all — the
   name does not resolve, nothing is listening, the port is closed. That is itself
   worth surfacing: it means the app is not reachable over TLS.
+
+  ## Options
+
+    * `:port` — defaults to 443.
+    * `:timeout` — defaults to 5s.
+    * `:starttls` — `:postgres` to negotiate the upgrade the way `libpq` does before
+      handshaking. Required to probe a TCP route to a database; see `tls_connect/5`.
   """
   @spec inspect_domain(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def inspect_domain(domain, opts \\ []) when is_binary(domain) do
@@ -60,7 +67,7 @@ defmodule Homelab.Networking.TlsProbe do
       versions: [:"tlsv1.2", :"tlsv1.3"]
     ]
 
-    case :ssl.connect(host, port, connect_opts, timeout) do
+    case tls_connect(Keyword.get(opts, :starttls), host, port, connect_opts, timeout) do
       {:ok, socket} ->
         result = read_peer_cert(socket, domain)
         :ssl.close(socket)
@@ -68,6 +75,41 @@ defmodule Homelab.Networking.TlsProbe do
 
       {:error, reason} ->
         {:error, {:handshake_failed, reason}}
+    end
+  end
+
+  defp tls_connect(nil, host, port, connect_opts, timeout),
+    do: :ssl.connect(host, port, connect_opts, timeout)
+
+  # Postgres does not open with a TLS handshake. The client connects in plaintext, sends
+  # an 8-byte SSLRequest, and only starts the handshake once the server answers `S` — so a
+  # bare `:ssl.connect/4` tests a path no `libpq` client takes. Against a Traefik TCP route
+  # that distinction is exactly what a probe should not paper over: Traefik answers the
+  # SSLRequest ITSELF before muxing on the SNI name in the handshake that follows, so this
+  # is the only way to find out whether a Postgres client would actually get through.
+  #
+  # `:ssl.connect/3` upgrades an already-connected socket, so everything after the
+  # handshake — `read_peer_cert/2`, `describe/2` — is the same code the plain path uses.
+  defp tls_connect(:postgres, host, port, connect_opts, timeout) do
+    with {:ok, socket} <-
+           :gen_tcp.connect(host, port, [:binary, active: false, packet: :raw], timeout),
+         :ok <- :gen_tcp.send(socket, <<8::32, 80_877_103::32>>),
+         {:ok, "S"} <- :gen_tcp.recv(socket, 1, timeout) do
+      case :ssl.connect(socket, connect_opts, timeout) do
+        {:ok, ssl_socket} ->
+          {:ok, ssl_socket}
+
+        {:error, reason} ->
+          :gen_tcp.close(socket)
+          {:error, reason}
+      end
+    else
+      # `N` is a well-formed refusal: the server understood the request and does not offer
+      # TLS. Named separately because it means the route is reaching something that speaks
+      # Postgres, which a generic socket error does not.
+      {:ok, "N"} -> {:error, :starttls_refused}
+      {:ok, _other} -> {:error, :not_postgres}
+      {:error, reason} -> {:error, reason}
     end
   end
 

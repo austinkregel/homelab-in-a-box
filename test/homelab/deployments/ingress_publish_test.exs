@@ -143,4 +143,35 @@ defmodule Homelab.Deployments.IngressPublishTest do
 
     assert :ok = Deployments.publish_deployment(ctx.donor)
   end
+
+  # The deployments Traefik has to reach on a TENANT network rather than on ingress.
+  # `cardinality/1` over a `jsonb[]` column is a raw fragment, so this exercises the SQL
+  # itself -- a malformed one would otherwise surface only when the proxy next syncs.
+  describe "list_tcp_routed/0" do
+    test "finds only deployments carrying a TCP route", ctx do
+      routed =
+        insert(:deployment,
+          tenant: ctx.tenant,
+          tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+        )
+
+      _plain = insert(:deployment, tenant: ctx.tenant, tcp_routes: [])
+
+      ids = Deployments.list_tcp_routed() |> Enum.map(& &1.id)
+
+      assert routed.id in ids
+      assert length(ids) == 1
+    end
+
+    test "preloads the tenant the network name is derived from", ctx do
+      insert(:deployment,
+        tenant: ctx.tenant,
+        tcp_routes: [%{"host" => "db.example.com", "port" => 5432}]
+      )
+
+      [deployment] = Deployments.list_tcp_routed()
+
+      assert deployment.tenant.slug == ctx.tenant.slug
+    end
+  end
 end

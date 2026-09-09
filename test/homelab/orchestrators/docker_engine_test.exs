@@ -374,7 +374,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       spec =
         base_spec(%{
           bridge_networks: ["shared_net"],
-          labels: %{"traefik.enable" => "true"}
+          routing_networks: ["homelab-iab-internal"]
         })
 
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
@@ -453,7 +453,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         end
       end)
 
-      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+      spec = base_spec(%{routing_networks: ["homelab-iab-internal"]})
 
       assert {:ok, "cid-full-id"} = DockerEngine.deploy(spec)
       assert_received {:post, "/containers/cid-full-id/start"}
@@ -479,7 +479,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         end
       end)
 
-      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+      spec = base_spec(%{routing_networks: ["homelab-iab-internal"]})
 
       assert {:error, {:network_attach_failed, "homelab-iab-internal", _}} =
                DockerEngine.deploy(spec)
@@ -533,7 +533,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
       spec =
         base_spec(%{
           bridge_networks: ["shared_net"],
-          labels: %{"traefik.enable" => "true"}
+          routing_networks: ["homelab-iab-internal"]
         })
 
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
@@ -586,7 +586,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         end
       end)
 
-      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+      spec = base_spec(%{routing_networks: ["homelab-iab-internal"]})
 
       assert {:ok, "cid"} = DockerEngine.deploy(spec)
 
@@ -1056,7 +1056,7 @@ defmodule Homelab.Orchestrators.DockerEngineTest do
         end
       end)
 
-      spec = base_spec(%{labels: %{"traefik.enable" => "true"}})
+      spec = base_spec(%{routing_networks: ["homelab-iab-internal"]})
 
       assert {:error, {:network_attach_failed, "homelab-iab-internal", :network_gone}} =
                DockerEngine.deploy(spec)

@@ -5,6 +5,7 @@ defmodule Homelab.Infrastructure do
   """
 
   require Logger
+  alias Homelab.Deployments.SpecBuilder
   alias Homelab.Docker.Client
 
   @system_label "homelab.system"
@@ -205,6 +206,10 @@ defmodule Homelab.Infrastructure do
          # the name is already in the dynamic volume, and again below for the fresh
          # install where there was no container to write into yet.
          _ <- ensure_internal_tls_transport(),
+         # Same ordering, same reason again: a Postgres TCP router naming TLS options
+         # that do not resolve cannot complete a handshake, and the failure surfaces to
+         # whoever is holding a psql prompt rather than to this process.
+         _ <- ensure_postgres_tls_options(),
          result when result in [{:ok, :already_running}, {:ok, :started}] <-
            ensure_traefik_current(template) do
       sync_traefik_networks()
@@ -214,6 +219,7 @@ defmodule Homelab.Infrastructure do
       # The fresh-install path, where the write above had no container to reach.
       _ = ensure_hold_ingress()
       _ = ensure_internal_tls_transport()
+      _ = ensure_postgres_tls_options()
       result
     end
   end
@@ -359,6 +365,70 @@ defmodule Homelab.Infrastructure do
         "  serversTransports:",
         "    #{@internal_tls_transport}:",
         "      insecureSkipVerify: true"
+      ],
+      "\n"
+    ) <> "\n"
+  end
+
+  # The TLS options a Postgres TCP router must carry. One name, defined by the file
+  # provider, referenced from generated Docker labels -- the same shape as
+  # `hiab-internal-tls` above.
+  @postgres_tls_options "hiab-postgres"
+  @postgres_tls_file "postgres-tls.yml"
+
+  @doc """
+  The `tls.options` reference a Postgres TCP router's labels must carry.
+
+  Provider-qualified (`@file`), like `internal_tls_transport/0`.
+  """
+  def postgres_tls_options, do: "#{@postgres_tls_options}@file"
+
+  @doc """
+  Registers the TLS options that let a Postgres client complete a handshake with the
+  proxy.
+
+  Without this a TCP route to Postgres fails at the TLS layer, and the error names
+  nothing an operator would connect to routing: `psql` reports `SSL error: tlsv1 alert
+  no application protocol` and Traefik logs `client requested unsupported application
+  protocols (["postgresql"])`.
+
+  The cause is ALPN. libpq 17 advertises the `postgresql` protocol in its ClientHello,
+  and the `websecure` entrypoint these routers share with every HTTP route offers only
+  `h2` and `http/1.1`. A TLS server presented with an ALPN list it shares nothing with
+  rejects the handshake outright rather than negotiating nothing, so the connection dies
+  before Traefik's router ever sees it.
+
+  Naming `postgresql` here is what gives the two lists an overlap. It is scoped to the
+  routers that reference it, so the HTTP routers on the same entrypoint keep negotiating
+  h2 exactly as before -- Traefik resolves TLS options per router, and the TCP muxer
+  picks the router by SNI before the handshake begins. A client that advertises no ALPN
+  at all (libpq before 17) is unaffected either way: with nothing to match, TLS simply
+  skips the negotiation.
+
+  Idempotent (same file each time) and best-effort.
+  """
+  def ensure_postgres_tls_options do
+    tar = dynamic_config_tar(@postgres_tls_file, postgres_tls_yaml())
+
+    case Client.upload_archive("homelab-traefik", @traefik_dynamic_dir, tar) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Infrastructure: Postgres TLS options upload failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  @doc "Pure Traefik dynamic-config (YAML) for the Postgres TLS options. Public for testing."
+  def postgres_tls_yaml do
+    Enum.join(
+      [
+        "tls:",
+        "  options:",
+        "    #{@postgres_tls_options}:",
+        "      alpnProtocols:",
+        "        - postgresql"
       ],
       "\n"
     ) <> "\n"
@@ -856,7 +926,55 @@ defmodule Homelab.Infrastructure do
     Homelab.Deployments.list_published_running()
     |> Enum.each(&Homelab.Deployments.publish_deployment/1)
 
+    sync_traefik_tenant_networks()
+
     :ok
+  end
+
+  @doc """
+  Attaches Traefik to the tenant networks that TCP routes need, and detaches it from the
+  ones that no longer do.
+
+  This is the inverse of how an HTTP route is made reachable, and deliberately so. An
+  HTTP-routed workload joins the shared ingress network; a TCP-routed one — in practice a
+  datastore — must not, because ingress is one flat segment carrying every tenant's routed
+  workloads, and a database placed there is reachable at L3 by all of them with no proxy,
+  no SNI and no certificate in the way. Moving Traefik instead inverts what is granted:
+  Traefik already reaches every routed workload, so a tenant network is no new capability
+  for it, while the datastore gains reach to nothing.
+
+  The desired set is recomputed whole rather than diffed against what asked for it, so a
+  removed TCP route detaches Traefik on the next sync without needing to have recorded why
+  it was attached. Only TENANT networks are considered — the ingress network and the
+  proxy's own attachments are never candidates for removal here.
+  """
+  def sync_traefik_tenant_networks do
+    desired =
+      Homelab.Deployments.list_tcp_routed()
+      |> Enum.filter(& &1.tenant)
+      |> Enum.map(&SpecBuilder.tenant_network(&1.tenant))
+      |> MapSet.new()
+
+    Enum.each(desired, &connect_traefik_to_network/1)
+
+    traefik_tenant_networks()
+    |> Enum.reject(&MapSet.member?(desired, &1))
+    |> Enum.each(&disconnect_traefik_from_network/1)
+
+    :ok
+  end
+
+  # Traefik's CURRENT tenant-network memberships. Matched on the `homelab_tenant_` prefix
+  # `SpecBuilder.tenant_network/1` builds, so the ingress network, the default bridge and
+  # anything an operator attached by hand are all out of scope for the prune above.
+  defp traefik_tenant_networks do
+    case Client.get("/containers/homelab-traefik/json") do
+      {:ok, %{"NetworkSettings" => %{"Networks" => networks}}} when is_map(networks) ->
+        networks |> Map.keys() |> Enum.filter(&String.starts_with?(&1, "homelab_tenant_"))
+
+      _ ->
+        []
+    end
   end
 
   defp ensure_network(network_name), do: Homelab.Docker.Network.ensure(network_name)
