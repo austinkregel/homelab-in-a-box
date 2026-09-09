@@ -83,6 +83,9 @@ defmodule HomelabWeb.DeployWizardLive do
       # Suggestions for the volume rows' name field, read when the config step is first
       # reached — see `maybe_load_known_volumes/2`.
       |> assign(:known_volumes, [])
+      # Extra hostnames beyond the primary domain, as editable rows. A template can seed
+      # these (Synapse's /.well-known/matrix apex row); any operator can add their own.
+      |> assign(:additional_domains, [])
       |> assign(:env_vars, [])
       |> assign(:revealed_env, MapSet.new())
       |> assign(:db_suggestions, [])
@@ -145,6 +148,14 @@ defmodule HomelabWeb.DeployWizardLive do
         |> assign(:selected_template, template)
         |> assign(:ports, template.ports || [])
         |> assign(:volumes, template.volumes || [])
+        # Seeded from the template's suggestion as EDITABLE rows -- the host is left blank
+        # here and filled from the primary domain once the operator types it (see
+        # `update_network`), so the operator sees and confirms the row rather than having a
+        # guessed apex applied invisibly.
+        |> assign(
+          :additional_domains,
+          editable_suggested_domains(template.suggested_additional_domains)
+        )
         |> assign(:env_vars, env_vars)
         |> assign(:enriching, if(connected?(socket), do: "inspecting", else: nil))
         |> assign(
@@ -839,9 +850,25 @@ defmodule HomelabWeb.DeployWizardLive do
   # --- Events: Network ---
 
   def handle_event("update_network", %{"network" => network_params} = _params, socket) do
+    domain = network_params["domain"] || socket.assigns.domain
+
+    # Round-trip the domain rows into assigns (the deploy handler reads them from there,
+    # not from the review-step form), then fill any still-blank host from the parent of the
+    # primary domain -- matrix.example.com -> example.com. A host the operator typed is
+    # non-blank and left untouched.
+    additional_domains =
+      network_params
+      |> Map.get("domains")
+      |> sync_wizard_domains(socket.assigns.additional_domains)
+      |> fill_suggested_hosts(domain)
+
     socket =
       socket
-      |> put_domain(network_params["domain"] || socket.assigns.domain)
+      # `put_domain/2`, not `assign(:domain, ...)`: it also refreshes `:domain_preview`,
+      # which is the operator's only sight of how a multi-host value split. Assigning the
+      # raw field alone leaves those chips one edit behind.
+      |> put_domain(domain)
+      |> assign(:additional_domains, additional_domains)
       |> assign(:tenant_id, non_blank(network_params["tenant_id"]) || socket.assigns.tenant_id)
       # `""` is a real value — the operator choosing "its own network" — so it must not
       # fall through to the previous choice the way a blank domain does.
@@ -865,6 +892,16 @@ defmodule HomelabWeb.DeployWizardLive do
       |> assign_exposure(params["exposure_mode"] || socket.assigns.exposure_mode)
 
     {:noreply, socket}
+  end
+
+  def handle_event("wizard_add_domain", _params, socket) do
+    blank = %{"host" => "", "path_prefix" => "", "port" => ""}
+    {:noreply, assign(socket, :additional_domains, socket.assigns.additional_domains ++ [blank])}
+  end
+
+  def handle_event("wizard_remove_domain", %{"index" => idx}, socket) do
+    domains = List.delete_at(socket.assigns.additional_domains, String.to_integer(idx))
+    {:noreply, assign(socket, :additional_domains, domains)}
   end
 
   # Access model: choose the access mode (proxy/host/internal) and, for proxy,
@@ -935,6 +972,7 @@ defmodule HomelabWeb.DeployWizardLive do
         |> Map.put(:app_template_id, template.id)
         |> Map.merge(domain_attrs)
         |> Map.merge(advanced_attrs(socket))
+        |> merge_wizard_domains(socket, Access.access_of(exposure_mode))
         |> Map.merge(netns_attrs(socket))
 
       # The saga, not `deploy_now/1`: it re-deploys the netns donor first (re-deriving
@@ -1013,6 +1051,7 @@ defmodule HomelabWeb.DeployWizardLive do
             # away every limit, routed port and restart policy the operator had just
             # filled in, with the panel still showing them on screen.
             |> Map.merge(advanced_attrs(socket))
+            |> merge_wizard_domains(socket, Access.access_of(exposure_mode))
           )
         end
 
@@ -1584,6 +1623,7 @@ defmodule HomelabWeb.DeployWizardLive do
               tenants={@tenants}
               network_parent_id={@network_parent_id}
               netns_candidates={@netns_candidates}
+              additional_domains={@additional_domains}
             />
             <.step_config
               :if={@step == "config"}
@@ -2959,6 +2999,76 @@ defmodule HomelabWeb.DeployWizardLive do
           </div>
         </div>
 
+        <%!-- Additional domains: extra hostnames routed to this same container. A template
+              can seed a row (Synapse's /.well-known/matrix apex); the host is filled from
+              the parent of the domain above once it is typed. --%>
+        <div
+          :if={@access == "proxy"}
+          class="rounded-lg bg-base-100 border border-base-content/5 p-3 lg:col-span-2"
+        >
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-semibold text-base-content flex items-center gap-2">
+              <.icon name="hero-globe-alt-mini" class="size-4 text-info" /> Additional domains
+              <span class="text-[10px] font-normal text-base-content/30">optional</span>
+            </h3>
+            <button
+              type="button"
+              phx-click="wizard_add_domain"
+              class="text-[10px] text-primary hover:underline cursor-pointer"
+            >
+              + Add domain
+            </button>
+          </div>
+          <p
+            :if={@additional_domains != []}
+            class="text-[10px] text-base-content/40 leading-snug mb-2"
+          >
+            Route another hostname to this same container. Leave the path blank to send the whole
+            host, or scope it — Synapse answers on
+            <code phx-no-curly-interpolation>matrix.example.com</code>
+            while <code phx-no-curly-interpolation>example.com/.well-known/matrix</code>
+            serves only the delegation files, leaving the rest of the apex free. Blank port
+            reuses the routed port.
+          </p>
+          <div
+            :for={{domain, idx} <- Enum.with_index(@additional_domains)}
+            class="flex items-center gap-2 mb-2"
+          >
+            <input
+              type="text"
+              name={"network[domains][#{idx}][host]"}
+              value={domain["host"]}
+              placeholder="example.com"
+              class="flex-1 rounded-md bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+            />
+            <input
+              type="text"
+              name={"network[domains][#{idx}][path_prefix]"}
+              value={domain["path_prefix"]}
+              placeholder="/.well-known/matrix (optional)"
+              class="flex-1 rounded-md bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+            />
+            <span class="text-[10px] text-base-content/40">→</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              name={"network[domains][#{idx}][port]"}
+              value={domain["port"]}
+              placeholder="port"
+              class="w-20 rounded-md bg-base-200 border-0 text-xs font-mono py-1.5 px-2"
+            />
+            <button
+              type="button"
+              phx-click="wizard_remove_domain"
+              phx-value-index={idx}
+              class="p-1.5 text-base-content/40 hover:text-error cursor-pointer"
+              aria-label={"Remove domain #{domain["host"]}"}
+            >
+              <.icon name="hero-trash" class="size-3.5" />
+            </button>
+          </div>
+        </div>
+
         <%!-- Whose network stack this container uses. Offered here rather than only
               after deploying, because an app meant to run behind a VPN must never come
               up outside it even once. --%>
@@ -4208,6 +4318,103 @@ defmodule HomelabWeb.DeployWizardLive do
   # Only the fields the operator actually filled in. A blank stays absent rather than
   # becoming an explicit override, so an untouched Advanced panel leaves the deployment
   # inheriting from its template exactly as before.
+  # A template's suggested additional-domain maps, turned into editable form rows. Host is
+  # kept as-is (blank from a template suggestion) and filled from the domain later.
+  defp editable_suggested_domains(suggested) do
+    suggested
+    |> List.wrap()
+    |> Enum.map(fn entry ->
+      %{
+        "host" => entry["host"] || "",
+        "path_prefix" => entry["path_prefix"] || "",
+        "port" => to_string(entry["port"] || "")
+      }
+    end)
+  end
+
+  # The network form posts its domain rows as an indexed map; parse them back to a list.
+  # A change that carries no `domains` key (nothing rendered yet) keeps the existing rows
+  # rather than wiping them.
+  defp sync_wizard_domains(params, _fallback) when is_map(params) do
+    params
+    |> Enum.sort_by(fn {idx, _row} -> String.to_integer(idx) end)
+    |> Enum.map(fn {_idx, row} ->
+      %{
+        "host" => row["host"] || "",
+        "path_prefix" => row["path_prefix"] || "",
+        "port" => row["port"] || ""
+      }
+    end)
+  end
+
+  defp sync_wizard_domains(_params, fallback), do: fallback
+
+  # Fill a still-blank host with the parent of the primary domain (matrix.example.com ->
+  # example.com), so a template suggestion becomes concrete once the operator names their
+  # domain. A host they typed is non-blank and left alone.
+  defp fill_suggested_hosts(rows, domain) do
+    case Catalog.parent_domain(domain) do
+      nil -> rows
+      apex -> Enum.map(rows, &fill_blank_host(&1, apex))
+    end
+  end
+
+  defp fill_blank_host(row, apex) do
+    if String.trim(row["host"] || "") == "", do: Map.put(row, "host", apex), else: row
+  end
+
+  # Additional hostnames are proxy-only, same as the primary domain -- host/internal access
+  # never gets a route. A blank-host row is dropped rather than saved as an unroutable rule.
+  #
+  # The domain FIELD and this editor both name extra hostnames, and both are the operator's
+  # input, so they COMBINE rather than replace. Merging the editor's list over the field's
+  # -- which is what a plain `Map.merge` of the two did -- silently dropped every alias
+  # typed into the domain box the moment a template seeded a row: deploy Synapse under
+  # `matrix.example.com, chat.example.com` and `chat.example.com` never reached Traefik,
+  # with no error, nothing in the logs, and the row still on screen.
+  #
+  # Deduped on {host, path_prefix} because that PAIR, not the host alone, is what makes a
+  # distinct router -- the same line `Deployment.duplicates_primary?/2` draws when it calls
+  # a path-scoped duplicate "a genuinely distinct router". An editor row wins a true tie,
+  # being the only one of the two that can carry a `port`.
+  #
+  # The dedupe lives here because this is the only place the two lists meet:
+  # `validate_additional_domains/1` checks entries but does not dedupe them, so a blind
+  # `++` would have shipped two identical routers unchallenged.
+  defp merge_wizard_domains(attrs, socket, "proxy") do
+    from_editor = parse_wizard_domains(socket.assigns.additional_domains)
+    editor_keys = MapSet.new(from_editor, &domain_key/1)
+
+    from_field =
+      attrs
+      |> Map.get(:additional_domains, [])
+      |> Enum.reject(&MapSet.member?(editor_keys, domain_key(&1)))
+
+    Map.put(attrs, :additional_domains, from_field ++ from_editor)
+  end
+
+  defp merge_wizard_domains(attrs, _socket, _access), do: attrs
+
+  # Through `Hostname.normalize/1` so the two sources are compared as they will be STORED:
+  # the changeset normalizes both lists on the way in, so `Matrix.Example.COM` typed in one
+  # place has to collide with `matrix.example.com` seeded in the other.
+  defp domain_key(entry) do
+    {Hostname.normalize(entry["host"]), non_blank(entry["path_prefix"])}
+  end
+
+  defp parse_wizard_domains(rows) do
+    rows
+    |> List.wrap()
+    |> Enum.reject(fn row -> String.trim(row["host"] || "") == "" end)
+    |> Enum.map(fn row ->
+      %{
+        "host" => String.trim(row["host"]),
+        "path_prefix" => non_blank(String.trim(row["path_prefix"] || "")),
+        "port" => parse_int(row["port"])
+      }
+    end)
+  end
+
   defp advanced_attrs(socket) do
     limits =
       %{}
