@@ -452,9 +452,7 @@ defmodule HomelabWeb.DeploymentSettings do
                   type="text"
                   name={"settings[tcp_routes][#{idx}][source_range]"}
                   value={route["source_range"]}
-                  placeholder={
-                    if @form.auth == "private", do: "192.168.1.0/24 (required)", else: "anywhere"
-                  }
+                  placeholder={if @form.auth == "private", do: "CIDRs (required)", else: "anywhere"}
                   aria-label="Allowed source CIDRs"
                   class="w-full rounded bg-base-200 border-0 text-xs font-mono py-1 px-2"
                 />
@@ -491,15 +489,7 @@ defmodule HomelabWeb.DeploymentSettings do
         on every connection.
       </p>
 
-      <%!-- 172.16/12 is the trap: it reads as "the private ranges" and it covers this
-            host's own bridge networks, so it admits every container on the box. --%>
-      <p :if={@form.tcp_routes != []} class="text-[11px] text-base-content/40 leading-relaxed">
-        <span class="font-medium">Allowed from</span>
-        blank lets anyone who can resolve the name connect. Comma-separated CIDRs are
-        refused by Traefik before the container is dialled. Not
-        <span class="font-mono">172.16.0.0/12</span>
-        — it covers this host's own Docker networks.
-      </p>
+      <.source_range_help :if={@form.tcp_routes != []} />
 
       <.tcp_connection_strings deployment={@deployment} />
     </div>
@@ -530,6 +520,33 @@ defmodule HomelabWeb.DeploymentSettings do
         Password omitted — it's the datastore's password secret, on the Environment tab.
       </span>
     </div>
+    """
+  end
+
+  # The networks this host is on, offered as the values to put in "Allowed from".
+  #
+  # Read from the interfaces rather than illustrated with a plausible-looking example: a
+  # `/24` is the reflex and plenty of LANs are not one, so an example range is a value
+  # that looks right and silently excludes half the network. Docker's own bridges are
+  # already filtered out by `host_networks/0`, which is what keeps the list from
+  # suggesting a range that would admit every container on the box.
+  defp source_range_help(assigns) do
+    assigns = assign(assigns, :networks, Homelab.Networking.host_networks())
+
+    ~H"""
+    <p class="text-[11px] text-base-content/40 leading-relaxed">
+      <span class="font-medium">Allowed from</span>
+      blank lets anyone who can resolve the name connect. Comma-separated CIDRs are
+      refused by Traefik before the container is dialled.
+      <span :if={@networks != []}>
+        This host is on
+        <span :for={{cidr, idx} <- Enum.with_index(@networks)}>
+          <span :if={idx > 0}>,</span>
+          <span class="font-mono text-base-content/60">{cidr}</span>
+        </span>
+        .
+      </span>
+    </p>
     """
   end
 

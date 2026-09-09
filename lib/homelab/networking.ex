@@ -750,4 +750,84 @@ defmodule Homelab.Networking do
       name -> name
     end
   end
+
+  # Interfaces the daemon owns. Their addresses are this host talking to its own
+  # containers, so they are never an answer to "which network are my clients on" — and
+  # offering one would produce an allowlist admitting every container on the box.
+  @container_interfaces ~w(docker docker0 docker_gwbridge)
+  @container_prefixes ~w(br- veth virbr)
+
+  @doc """
+  The CIDRs this host is actually on, widest interface first, as an allowlist can use
+  them directly.
+
+  Read from the interfaces rather than assumed, because the assumption is wrong on
+  ordinary hardware: a `/24` is the reflex and this developer's LAN is a `/22`, so a
+  guessed range would silently exclude half of it. The netmask the interface reports is
+  the only thing that knows.
+
+  Docker's own bridges are excluded (see `@container_interfaces`). Everything else is
+  offered, including VPN interfaces — a WireGuard or ZeroTier subnet is exactly the
+  other network someone reaching a database over a TCP route is coming from.
+
+  Deliberately NOT built on `Deployments.detect_ip_config/0`. That answers a different
+  question — which single address to publish as an A record — by taking the first
+  non-loopback address it finds, container bridges included.
+  """
+  @spec host_networks() :: [String.t()]
+  def host_networks do
+    case :inet.getifaddrs() do
+      {:ok, interfaces} ->
+        interfaces
+        |> Enum.reject(fn {name, _opts} -> container_interface?(to_string(name)) end)
+        |> Enum.flat_map(&interface_cidrs/1)
+        |> Enum.uniq()
+        |> Enum.sort_by(&prefix_length/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp container_interface?(name) do
+    name in @container_interfaces or String.starts_with?(name, @container_prefixes)
+  end
+
+  # One interface can carry several addresses, and `:addr`/`:netmask` come back as
+  # repeated keys in declaration order — so they are zipped rather than read with
+  # `Keyword.get/2`, which would pair every address with the first mask.
+  defp interface_cidrs({_name, opts}) do
+    addresses = Keyword.get_values(opts, :addr)
+    masks = Keyword.get_values(opts, :netmask)
+
+    addresses
+    |> Enum.zip(masks)
+    |> Enum.filter(fn {addr, mask} -> routable_v4?(addr) and tuple_size(mask) == 4 end)
+    |> Enum.map(fn {addr, mask} -> cidr(addr, mask) end)
+  end
+
+  defp routable_v4?({127, _, _, _}), do: false
+  defp routable_v4?(addr) when tuple_size(addr) == 4, do: true
+  defp routable_v4?(_addr), do: false
+
+  defp cidr({a, b, c, d}, {ma, mb, mc, md} = mask) do
+    network =
+      {Bitwise.band(a, ma), Bitwise.band(b, mb), Bitwise.band(c, mc), Bitwise.band(d, md)}
+
+    "#{network |> :inet.ntoa() |> to_string()}/#{mask_bits(mask)}"
+  end
+
+  defp mask_bits({a, b, c, d}) do
+    [a, b, c, d]
+    |> Enum.map_join(&Integer.to_string(&1, 2))
+    |> String.graphemes()
+    |> Enum.count(&(&1 == "1"))
+  end
+
+  defp prefix_length(cidr) do
+    case String.split(cidr, "/") do
+      [_network, bits] -> String.to_integer(bits)
+      _ -> 32
+    end
+  end
 end
