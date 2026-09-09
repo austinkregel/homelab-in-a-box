@@ -197,12 +197,53 @@ defmodule Homelab.Deployments.SpecBuilderTcpRoutesTest do
       assert labels["traefik.tcp.routers.#{router}.middlewares"] == "#{router}-ipallow"
     end
 
-    test "a public deployment gets no allowlist middleware" do
+    test "a route with no source range gets no allowlist middleware" do
       deployment = build_deployment(%{}, %{exposure_mode: :public})
 
       labels = labels(deployment)
 
       refute Enum.any?(Map.keys(labels), &String.contains?(&1, "ipallowlist"))
+    end
+
+    # The exposure modes describe how the HTTP side is guarded, and a datastore is
+    # typically `:service` -- no HTTP route to guard at all. Gating the allowlist on
+    # `:private` silently dropped a range the operator typed and left the database open.
+    test "a source range is honoured on an internal-only datastore too" do
+      deployment =
+        build_deployment(%{
+          tcp_routes: [
+            %{
+              "host" => "postgres-media.example.com",
+              "port" => 5432,
+              "source_range" => "192.168.1.0/24"
+            }
+          ]
+        })
+
+      labels = labels(deployment)
+      router = "postgres-media-example-com-5432"
+
+      assert labels["traefik.tcp.middlewares.#{router}-ipallow.ipallowlist.sourcerange"] ==
+               "192.168.1.0/24"
+
+      assert labels["traefik.tcp.routers.#{router}.middlewares"] == "#{router}-ipallow"
+    end
+
+    test "several ranges travel as the comma-joined list Traefik reads" do
+      deployment =
+        build_deployment(%{
+          tcp_routes: [
+            %{
+              "host" => "db.example.com",
+              "port" => 5432,
+              "source_range" => "192.168.1.0/24,10.8.0.0/24"
+            }
+          ]
+        })
+
+      assert labels(deployment)[
+               "traefik.tcp.middlewares.db-example-com-5432-ipallow.ipallowlist.sourcerange"
+             ] == "192.168.1.0/24,10.8.0.0/24"
     end
   end
 

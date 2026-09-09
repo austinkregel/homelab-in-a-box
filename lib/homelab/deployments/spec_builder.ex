@@ -1132,18 +1132,29 @@ defmodule Homelab.Deployments.SpecBuilder do
   # `additional_router_name/2` folds in the path.
   defp tcp_router_name(host, port), do: "#{sanitize_domain(host)}-#{port}"
 
+  # The firewall in front of a TCP route: only these source addresses may open a
+  # connection, enforced by Traefik before it dials the backend.
+  #
+  # Emitted on ANY exposure, not only `:private`. The exposure modes describe how the
+  # HTTP side is guarded, and a datastore is typically `:service` — it has no HTTP route
+  # to protect at all — so gating this on `:private` would silently drop a range the
+  # operator typed and leave the database open. `:private` is where a range is
+  # *mandatory* (`Deployment.validate_private_source_ranges/2`); everywhere else it is
+  # optional and honoured when present.
+  #
   # TCP middlewares are a much smaller set than HTTP's: `ipAllowList` and `inFlightConn`,
   # and no forwardAuth. So `:sso_protected` has no representation here at all, which is
   # why `tcp_routes/1` refuses to emit for it rather than emitting something weaker.
   #
-  # The range is taken from the route and never defaulted. The HTTP path falls back to
-  # the RFC1918 blocks, and that fallback is wrong here: a connection arriving through
-  # Traefik's published host port can present as the Docker bridge gateway — an address
-  # inside 172.16/12 — which would make the allowlist match every client on the internet.
-  # A TCP `ipAllowList` also sees only the connecting socket; there is no forwarded header
-  # to look past. `Deployment.validate_private_source_ranges/2` is what makes sure the
-  # value is here to be read.
-  defp tcp_allowlist_labels(name, route, "private") do
+  # The range is never defaulted. The HTTP path falls back to the RFC1918 blocks, and
+  # that fallback is wrong here: `172.16/12` covers Docker's own bridge networks, so it
+  # would admit every container on this host, and a host-local connection arriving
+  # through the userland proxy presents as the bridge gateway rather than its real
+  # origin. A LAN client's address IS preserved — Docker's MASQUERADE rules only SNAT
+  # traffic leaving containers, never inbound — so an explicit range does what it says.
+  # There is no forwarded header to look past either way: `ipAllowList` sees the
+  # connecting socket and nothing else.
+  defp tcp_allowlist_labels(name, route, _exposure) do
     case route["source_range"] do
       range when is_binary(range) and range != "" ->
         %{
@@ -1155,8 +1166,6 @@ defmodule Homelab.Deployments.SpecBuilder do
         %{}
     end
   end
-
-  defp tcp_allowlist_labels(_name, _route, _exposure), do: %{}
 
   defp sticky_labels(router, deployment) do
     if sticky?(deployment) do
