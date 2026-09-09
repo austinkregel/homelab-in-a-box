@@ -55,6 +55,13 @@ defmodule Homelab.Catalog.AppTemplate do
     field :netns_donor_kind, :string
 
     field :ports, {:array, :map}, default: []
+    # A template's suggestion for the EXTRA hostnames a deployment of it needs, beyond its
+    # primary domain -- the catalog-side companion to `Deployment.additional_domains`.
+    # Synapse is why: `matrix.<domain>` is the homeserver, but the apex has to serve
+    # `/.well-known/matrix/*` for user ids to read `@you:<domain>`. `host` is left blank
+    # and resolved from the primary domain at deploy time; each entry: %{"host" => "",
+    # "path_prefix" => "/.well-known/matrix", "port" => nil}.
+    field :suggested_additional_domains, {:array, :map}, default: []
     field :resource_limits, :map, default: %{}
     field :backup_policy, :map, default: %{}
     field :health_check, :map, default: %{}
@@ -81,7 +88,8 @@ defmodule Homelab.Catalog.AppTemplate do
   @optional_fields ~w(description exposure_mode auth_integration default_env required_env
                       env_schema volumes network_aliases command entrypoint
                       capabilities_add capabilities_drop devices sysctls netns_donor_kind
-                      ports resource_limits backup_policy health_check depends_on
+                      ports suggested_additional_domains resource_limits backup_policy
+                      health_check depends_on
                       source source_id logo_url category auth_mode user)a
 
   def changeset(app_template, attrs) do
