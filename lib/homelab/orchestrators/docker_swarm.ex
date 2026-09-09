@@ -14,10 +14,6 @@ defmodule Homelab.Orchestrators.DockerSwarm do
   alias Homelab.Docker.RegistryAuth
   alias Homelab.Infrastructure.GpuFacts
 
-  # Must match Homelab.Infrastructure's backbone network (namespaced to avoid
-  # colliding with an existing stack's `homelab-internal`).
-  @routing_network "homelab-iab-internal"
-
   # Swarm's task lifecycle, split by what it means for readiness.
   #
   # `starting` is the load-bearing one: Swarm keeps a task there until the container's
@@ -655,13 +651,14 @@ defmodule Homelab.Orchestrators.DockerSwarm do
     # external access" and the service was placed on `homelab-iab-internal`, the network
     # Traefik and every routed workload of every tenant share, reachable at L3 from any
     # of them. It contradicted `SpecBuilder`'s stated model and the Engine driver, which
-    # joins on `traefik.enable` alone and has a test forbidding exactly this.
-    routing =
-      if spec.labels["traefik.enable"] == "true" do
-        [%{"Target" => @routing_network}]
-      else
-        []
-      end
+    # has a test forbidding exactly this.
+    #
+    # It then joined on `traefik.enable`, which cannot decide it either: a TCP-routed
+    # datastore carries that label and must stay off ingress for the same reason a
+    # `:service` one must. `routing_networks` is the spec saying which networks Traefik
+    # needs to reach this workload on, rather than the driver inferring it from a label
+    # that now means two things.
+    routing = Enum.map(Map.get(spec, :routing_networks, []), &%{"Target" => &1})
 
     primary ++ bridges ++ routing
   end

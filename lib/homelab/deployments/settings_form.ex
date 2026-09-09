@@ -61,7 +61,8 @@ defmodule Homelab.Deployments.SettingsForm do
             gpu_kind: "",
             health: %{},
             ports: [],
-            routes: []
+            routes: [],
+            tcp_routes: []
 
   @type t :: %__MODULE__{}
 
@@ -97,6 +98,7 @@ defmodule Homelab.Deployments.SettingsForm do
       health: read_health(Access.effective_health_check(deployment)),
       ports: ports,
       routes: read_routes(deployment),
+      tcp_routes: read_tcp_routes(deployment),
       command: join_words(Access.effective_command(deployment)),
       entrypoint: join_words(Access.effective_entrypoint(deployment)),
       aliases: join_words(Access.effective_network_aliases(deployment)),
@@ -206,6 +208,25 @@ defmodule Homelab.Deployments.SettingsForm do
     end
   end
 
+  # A TCP route is deliberately NOT folded into the routes table above. That table is one
+  # shape -- `host + path -> port` -- and a TCP route does not fit it: there is no path,
+  # and the port means something different on each side (the client always connects to
+  # 443, and the number here is the container port behind it). Showing them together
+  # would present a port column whose meaning changed by row.
+  #
+  # Unlike the routes table this is not gated on proxy mode: a `:service` datastore
+  # reachable only over TCP is the ordinary case for this feature, and it has no HTTP
+  # route at all.
+  defp read_tcp_routes(deployment) do
+    for route <- List.wrap(deployment.tcp_routes) do
+      %{
+        "host" => route["host"] || "",
+        "port" => to_string(route["port"] || ""),
+        "source_range" => route["source_range"] || ""
+      }
+    end
+  end
+
   # ------------------------------------------------------------------
   # Round-tripping the form
   # ------------------------------------------------------------------
@@ -245,7 +266,8 @@ defmodule Homelab.Deployments.SettingsForm do
         gpu_kind: carry(params["gpu_kind"], form.gpu_kind),
         health: carry_health(params["health"], form.health),
         ports: carry_rows(params["ports"], form.ports, &port_rows/1),
-        routes: carry_rows(params["routes"], form.routes, &route_rows/1)
+        routes: carry_rows(params["routes"], form.routes, &route_rows/1),
+        tcp_routes: carry_rows(params["tcp_routes"], form.tcp_routes, &tcp_route_rows/1)
     }
     |> normalize()
   end
@@ -306,6 +328,20 @@ defmodule Homelab.Deployments.SettingsForm do
   end
 
   defp route_rows(_params), do: []
+
+  defp tcp_route_rows(params) when is_map(params) do
+    params
+    |> indexed()
+    |> Enum.map(fn r ->
+      %{
+        "host" => r["host"] || "",
+        "port" => r["port"] || "",
+        "source_range" => r["source_range"] || ""
+      }
+    end)
+  end
+
+  defp tcp_route_rows(_params), do: []
 
   defp sysctl_rows(params) do
     params
@@ -582,6 +618,7 @@ defmodule Homelab.Deployments.SettingsForm do
       routed_port: primary_port(form),
       extra_routes: extra_routes,
       additional_domains: additional_domains,
+      tcp_routes: tcp_routes(form),
       ports_override: ports_override(form),
       proxy_options: proxy_options(form),
       restart_policy_override: blank_to_nil(form.restart_policy),
@@ -742,6 +779,38 @@ defmodule Homelab.Deployments.SettingsForm do
     end
   end
 
+  # Rows the operator left blank are dropped rather than saved as empty routes: an editor
+  # that starts a row with empty fields would otherwise fail the changeset for a row
+  # nobody filled in. A row with a host but no port is NOT dropped — that is an
+  # incomplete route the operator meant to add, and the changeset says so by name.
+  defp tcp_routes(%__MODULE__{} = form) do
+    form.tcp_routes
+    |> Enum.reject(&blank_tcp_route?/1)
+    |> Enum.map(fn row ->
+      %{
+        "host" => String.trim(row["host"] || ""),
+        "port" => parse_tcp_port(row["port"]),
+        "source_range" => blank_to_nil(String.trim(row["source_range"] || ""))
+      }
+    end)
+  end
+
+  defp blank_tcp_route?(row) do
+    blank?(row["host"]) and blank?(row["port"]) and blank?(row["source_range"])
+  end
+
+  defp blank?(value), do: String.trim(to_string(value || "")) == ""
+
+  # A non-numeric port is passed through as-is so the changeset can reject it with the
+  # value the operator typed, rather than being silently coerced to nil and reported as
+  # a missing port they did not leave blank.
+  defp parse_tcp_port(value) do
+    case Integer.parse(String.trim(to_string(value || ""))) do
+      {port, ""} -> port
+      _ -> value
+    end
+  end
+
   # A stale tab or a hand-built payload can post anything, and "anything" fails the
   # changeset rather than quietly meaning plaintext — taking the whole save with it.
   defp scheme("https"), do: "https"
@@ -864,6 +933,7 @@ defmodule Homelab.Deployments.SettingsForm do
       {"Sticky sessions", &if(&1.sticky, do: "on", else: "off")},
       {"Ports", &ports_label/1},
       {"Routes", &routes_label/1},
+      {"TCP routes", &tcp_routes_label/1},
       {"exposure_mode (derived)", &exposure/1}
     ]
     |> Enum.map(fn {label, read} -> {label, read.(base), read.(current)} end)
@@ -934,6 +1004,20 @@ defmodule Homelab.Deployments.SettingsForm do
     form
     |> live_routes()
     |> Enum.map_join(", ", &"#{&1["host"]}#{&1["path_prefix"]} -> :#{&1["port"]}")
+    |> blank_dash("none")
+  end
+
+  # The source range travels in the label. On a private deployment it is the whole
+  # protection the route has, so a change to it is exactly the kind of thing the review
+  # sheet exists to put in front of someone before the container is recreated.
+  defp tcp_routes_label(%__MODULE__{} = form) do
+    form.tcp_routes
+    |> Enum.reject(&blank_tcp_route?/1)
+    |> Enum.map_join(", ", fn row ->
+      range = String.trim(row["source_range"] || "")
+      suffix = if range == "", do: "", else: " from #{range}"
+      "#{row["host"]} -> :#{row["port"]}#{suffix}"
+    end)
     |> blank_dash("none")
   end
 

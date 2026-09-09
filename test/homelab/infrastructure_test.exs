@@ -48,6 +48,32 @@ defmodule Homelab.InfrastructureTest do
     end
   end
 
+  describe "postgres_tls_yaml/0" do
+    # Without the `postgresql` ALPN protocol a Postgres TCP route cannot complete a
+    # handshake at all: libpq 17 advertises it, the shared `websecure` entrypoint offers
+    # only h2/http1.1, and a TLS server with no overlap rejects the ClientHello. The
+    # failure reads as `SSL error: tlsv1 alert no application protocol`, which points at
+    # nothing.
+    test "names the ALPN protocol a Postgres client advertises" do
+      yaml = Infrastructure.postgres_tls_yaml()
+
+      assert yaml =~ "options:"
+      assert yaml =~ "alpnProtocols:"
+      assert yaml =~ "- postgresql"
+    end
+
+    # Same two-halves-of-one-name check the transport above gets: a router naming TLS
+    # options the file provider does not define fails at the handshake, in front of
+    # whoever is holding a psql prompt.
+    test "the name the labels reference is the name this file defines" do
+      options = Infrastructure.postgres_tls_options()
+      assert String.ends_with?(options, "@file")
+
+      name = String.trim_trailing(options, "@file")
+      assert Infrastructure.postgres_tls_yaml() =~ "    #{name}:"
+    end
+  end
+
   # async: false would be needed to mutate app env; these two only read the override
   # they set and restore, and no other test in this file touches :containerized.
   describe "containerized?/0" do

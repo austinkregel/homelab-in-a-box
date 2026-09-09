@@ -272,9 +272,9 @@ defmodule Homelab.Networking do
   to", where there is nothing to lose. It carries EVERY reason, not just the first.
 
   "Nothing was ASKED for" is a different answer and is `{:ok, []}`. `detect_ip_config/0`
-  returns both addresses as `nil` whenever `get_host_lan_ip/0` finds no non-loopback IPv4
-  — a loopback-only or IPv6-only host, or `:inet.getifaddrs/0` erroring — and on such a
-  host there is no address to publish and nothing has gone wrong. Conflating the two
+  returns both addresses as `nil` whenever `host_ip/0` finds none — a loopback-only or
+  IPv6-only host, one with neither a route nor a usable interface — and on such a host
+  there is no address to publish and nothing has gone wrong. Conflating the two
   failed those deploys outright with an empty reason list, which is its own tell: nothing
   failed, so nothing had a reason.
   """
@@ -309,6 +309,12 @@ defmodule Homelab.Networking do
   An alias is a host the deployment ANSWERS on; a `path_prefix` on it scopes which
   requests that host serves and has no bearing on whether the name has to resolve, so
   path-scoped aliases are included like any other.
+
+  TCP route hosts are included for the same reason, and they are the case where a missing
+  record is hardest to read: the name is reached by a database client rather than a
+  browser, so an absent record surfaces as a connection timeout in an application's logs
+  with nothing pointing at DNS. Note a TCP-routed deployment may have no `domain` at all —
+  a datastore reachable only over TCP is normal — so this list is not always led by one.
   """
   @spec deployment_hostnames(map()) :: [String.t()]
   def deployment_hostnames(deployment) do
@@ -318,7 +324,13 @@ defmodule Homelab.Networking do
       |> List.wrap()
       |> Enum.map(& &1["host"])
 
-    [deployment.domain | aliases]
+    tcp_hosts =
+      deployment
+      |> Map.get(:tcp_routes)
+      |> List.wrap()
+      |> Enum.map(& &1["host"])
+
+    [deployment.domain | aliases ++ tcp_hosts]
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
   end
@@ -736,6 +748,196 @@ defmodule Homelab.Networking do
     case String.trim_trailing(fqdn, ".#{zone_name}") do
       ^fqdn -> "@"
       name -> name
+    end
+  end
+
+  # Interfaces the daemon owns. Their addresses are this host talking to its own
+  # containers, so they are never an answer to "which network are my clients on" — and
+  # offering one would produce an allowlist admitting every container on the box.
+  @container_interfaces ~w(docker docker0 docker_gwbridge)
+  @container_prefixes ~w(br- veth virbr)
+
+  @doc """
+  The CIDRs this host is actually on, widest interface first, as an allowlist can use
+  them directly.
+
+  Read from the interfaces rather than assumed, because the assumption is wrong on
+  ordinary hardware: a `/24` is the reflex and this developer's LAN is a `/22`, so a
+  guessed range would silently exclude half of it. The netmask the interface reports is
+  the only thing that knows.
+
+  Docker's own bridges are excluded (see `@container_interfaces`). Everything else is
+  offered, including VPN interfaces — a WireGuard or ZeroTier subnet is exactly the
+  other network someone reaching a database over a TCP route is coming from.
+
+  Deliberately NOT built on `Deployments.detect_ip_config/0`. That answers a different
+  question — which single address to publish as an A record — by taking the first
+  non-loopback address it finds, container bridges included.
+  """
+  @spec host_networks() :: [String.t()]
+  def host_networks do
+    host_addresses()
+    |> Enum.map(& &1.cidr)
+    |> Enum.uniq()
+    |> Enum.sort_by(&prefix_length/1)
+  end
+
+  @doc """
+  Every address this host holds, each labelled with the interface carrying it.
+
+  The interface name is what makes the list choosable. `192.168.0.0/22` and
+  `10.244.0.0/16` say nothing about which is the LAN and which is a VPN; `enp73s0` and
+  `ztwdjnw6im` say it immediately, and that is the distinction anyone picking one is
+  actually making.
+
+  Same exclusions as `host_networks/0` — the daemon's bridges are this host talking to
+  its own containers, never a network its clients are on.
+  """
+  @spec host_addresses() :: [%{interface: String.t(), address: String.t(), cidr: String.t()}]
+  def host_addresses do
+    host_interfaces()
+    |> Enum.flat_map(&interface_addresses/1)
+    |> Enum.sort_by(& &1.interface)
+  end
+
+  # An address reserved for documentation (RFC 5737). Nothing listens on it and nothing
+  # is sent to it — see `routed_source_address/0`.
+  @route_probe {192, 0, 2, 1}
+
+  @publish_address_setting "dns_publish_address"
+
+  @doc "The settings key holding the operator's chosen publish address."
+  def publish_address_setting, do: @publish_address_setting
+
+  @doc """
+  The address deployment DNS records point at.
+
+  The OPERATOR'S CHOICE when they have made one — `host_addresses/0` is offered on the
+  DNS settings page, labelled by interface, and the chosen address is stored under
+  `#{@publish_address_setting}`. A multi-homed host has no single right answer that this
+  code can work out: which of a LAN, a VPN and a management network clients should be
+  sent to is a decision about the network, not a fact about it.
+
+  A stored address that no longer exists falls through to detection rather than being
+  published. An interface can be renamed or a VPN can be down, and a record pointing at
+  an address the host no longer holds resolves to nothing — worse than a detected one
+  that at least answers.
+
+  Detection is the default, and asks the KERNEL rather than ranking interfaces: opening
+  a UDP socket and connecting it performs a routing lookup and binds the source address
+  the host would send from. `connect` on a datagram socket transmits nothing — it fixes
+  the peer and selects a route — so this touches the network stack without touching the
+  network, and `@route_probe` is a documentation address that is never contacted.
+
+  Detection replaced taking the first non-loopback address `:inet.getifaddrs/0` happened
+  to return, which on a host running containers includes the daemon's bridges: the
+  answer depended on interface ordering and could be `172.17.0.1`, an address reachable
+  from nowhere, published as the A record for every app on the box.
+
+  The interface scan remains the last resort, for a host with no route to look up at all.
+  """
+  @spec host_ip() :: String.t() | nil
+  def host_ip, do: chosen_address() || routed_source_address() || first_host_address()
+
+  defp chosen_address do
+    chosen =
+      @publish_address_setting |> Homelab.Settings.get_cached("") |> to_string() |> String.trim()
+
+    if chosen != "" and Enum.any?(host_addresses(), &(&1.address == chosen)) do
+      chosen
+    else
+      nil
+    end
+  end
+
+  defp routed_source_address do
+    case :gen_udp.open(0, [:binary, active: false]) do
+      {:ok, socket} ->
+        try do
+          resolve_source_address(socket)
+        after
+          :gen_udp.close(socket)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp resolve_source_address(socket) do
+    with :ok <- :gen_udp.connect(socket, @route_probe, 53),
+         {:ok, {address, _port}} <- :inet.sockname(socket),
+         true <- routable_v4?(address) do
+      address |> :inet.ntoa() |> to_string()
+    else
+      _ -> nil
+    end
+  end
+
+  defp first_host_address do
+    case host_addresses() do
+      [%{address: address} | _rest] -> address
+      [] -> nil
+    end
+  end
+
+  defp host_interfaces do
+    case :inet.getifaddrs() do
+      {:ok, interfaces} ->
+        Enum.reject(interfaces, fn {name, _opts} -> container_interface?(to_string(name)) end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp container_interface?(name) do
+    name in @container_interfaces or String.starts_with?(name, @container_prefixes)
+  end
+
+  # One interface can carry several addresses, and `:addr`/`:netmask` come back as
+  # repeated keys in declaration order — so they are zipped rather than read with
+  # `Keyword.get/2`, which would pair every address with the first mask.
+  defp interface_addresses({name, opts}) do
+    addresses = Keyword.get_values(opts, :addr)
+    masks = Keyword.get_values(opts, :netmask)
+
+    addresses
+    |> Enum.zip(masks)
+    |> Enum.filter(fn {addr, mask} -> routable_v4?(addr) and tuple_size(mask) == 4 end)
+    |> Enum.map(fn {addr, mask} ->
+      %{
+        interface: to_string(name),
+        address: addr |> :inet.ntoa() |> to_string(),
+        cidr: cidr(addr, mask)
+      }
+    end)
+  end
+
+  defp routable_v4?({127, _, _, _}), do: false
+  # What an unbound socket reports, and never an address anything reaches this host on.
+  defp routable_v4?({0, 0, 0, 0}), do: false
+  defp routable_v4?(addr) when tuple_size(addr) == 4, do: true
+  defp routable_v4?(_addr), do: false
+
+  defp cidr({a, b, c, d}, {ma, mb, mc, md} = mask) do
+    network =
+      {Bitwise.band(a, ma), Bitwise.band(b, mb), Bitwise.band(c, mc), Bitwise.band(d, md)}
+
+    "#{network |> :inet.ntoa() |> to_string()}/#{mask_bits(mask)}"
+  end
+
+  defp mask_bits({a, b, c, d}) do
+    [a, b, c, d]
+    |> Enum.map_join(&Integer.to_string(&1, 2))
+    |> String.graphemes()
+    |> Enum.count(&(&1 == "1"))
+  end
+
+  defp prefix_length(cidr) do
+    case String.split(cidr, "/") do
+      [_network, bits] -> String.to_integer(bits)
+      _ -> 32
     end
   end
 end

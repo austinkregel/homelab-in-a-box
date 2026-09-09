@@ -703,9 +703,9 @@ defmodule Homelab.NetworkingTest do
       assert [%{name: "good"}] = Networking.list_dns_records_for_deployment(deployment.id)
     end
 
-    # `detect_ip_config/0` returns both addresses as nil whenever `get_host_lan_ip/0`
-    # finds no non-loopback IPv4 -- a loopback-only or IPv6-only host, or getifaddrs
-    # erroring. Nothing is asked for and nothing goes wrong, so this must stay the no-op
+    # `detect_ip_config/0` returns both addresses as nil whenever `host_ip/0` finds none
+    # -- a loopback-only or IPv6-only host, one with neither a route nor a usable
+    # interface. Nothing is asked for and nothing goes wrong, so this must stay the no-op
     # it has always been rather than failing the release with an EMPTY reason list.
     test "no address to publish is a no-op, not a failure" do
       deployment = insert(:deployment, domain: "app.example.com")

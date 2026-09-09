@@ -496,7 +496,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
         {:ok, %{"ID" => "svc1"}}
       end)
 
-      spec = Map.put(build_spec(), :labels, %{"traefik.enable" => "true"})
+      spec = Map.put(build_spec(), :routing_networks, ["homelab-iab-internal"])
 
       assert {:ok, "svc1"} = DockerSwarm.deploy(spec)
 
@@ -629,10 +629,10 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
       assert {:error, {:pull_failed, _image, :nope}} = DockerSwarm.deploy(build_spec())
     end
 
-    test "routing network is added when traefik.enable is true" do
+    test "routing network is added when the spec names one" do
       spec =
         build_spec()
-        |> put_in([:labels, "traefik.enable"], "true")
+        |> Map.put(:routing_networks, ["homelab-iab-internal"])
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
@@ -656,7 +656,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
         |> Map.put(:host_network, true)
         |> Map.put(:network, "host")
         |> Map.put(:network_aliases, ["mysql"])
-        |> put_in([:labels, "traefik.enable"], "true")
+        |> Map.put(:routing_networks, ["homelab-iab-internal"])
 
       stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
 
@@ -695,7 +695,7 @@ defmodule Homelab.Orchestrators.DockerSwarmTest do
     test "creates every missing network as an ATTACHABLE OVERLAY before creating the service" do
       test_pid = self()
 
-      spec = build_spec() |> put_in([:labels, "traefik.enable"], "true")
+      spec = build_spec() |> Map.put(:routing_networks, ["homelab-iab-internal"])
 
       stub(Homelab.Mocks.DockerClient, :get, fn
         "/info", _opts ->

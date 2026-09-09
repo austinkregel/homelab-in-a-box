@@ -69,6 +69,12 @@ defmodule Homelab.Deployments.Deployment do
     # "path_prefix" => "/.well-known/matrix", "port" => nil}; path_prefix and port are
     # optional (port falls back to routed_port, e.g. a sibling app in a shared netns).
     field :additional_domains, {:array, :map}, default: []
+    # Hostname-addressed TCP endpoints -- a database reachable as
+    # `postgres-media.example.com` rather than as a published host port. The three fields
+    # above are all HTTP routers; a database speaks its own wire protocol, so it needs a
+    # Traefik TCP router matching on the TLS SNI name. Each:
+    # %{"host" => "postgres-media.example.com", "port" => 5432, "source_range" => nil}.
+    field :tcp_routes, {:array, :map}, default: []
     # The donor CONTAINER id this child was last created against. Diverges from the
     # donor's current `external_id` the moment the donor is re-created, which is the
     # only signal that a child is unstartable — see Netns.stale?/2.
@@ -105,7 +111,7 @@ defmodule Homelab.Deployments.Deployment do
                       command_override entrypoint_override network_aliases_override
                       capabilities_add_override capabilities_drop_override
                       devices_override sysctls_override
-                      proxy_options routed_port extra_routes additional_domains
+                      proxy_options routed_port extra_routes additional_domains tcp_routes
                       network_parent_id
                       netns_parent_external_id
                       computed_spec last_reconciled_at error_message)a
@@ -128,6 +134,10 @@ defmodule Homelab.Deployments.Deployment do
     |> normalize_additional_domains()
     |> validate_additional_domains()
     |> validate_duplicate_primary()
+    |> normalize_tcp_routes()
+    |> validate_tcp_routes()
+    |> validate_tcp_route_exposure()
+    |> validate_tcp_route_hosts()
     |> VolumeSpec.validate_changeset(:volumes_override)
     |> GpuSpec.validate_changeset(:resource_limits_override)
     |> RuntimeSpec.validate_capabilities(:capabilities_add_override)
@@ -228,6 +238,19 @@ defmodule Homelab.Deployments.Deployment do
           changeset,
           :replicas_override,
           "cannot be used with host ports or host networking"
+        )
+
+      # A TCP load balancer round-robins CONNECTIONS, and there is no TCP equivalent of
+      # the sticky cookie that keeps an HTTP session on one task. Scaling a TCP-routed
+      # workload therefore spreads a client's connections across replicas that do not
+      # share state -- for the datastores this routing exists to reach, that is a pool
+      # pointing at several independent databases.
+      get_field(changeset, :tcp_routes) not in [nil, []] ->
+        add_error(
+          changeset,
+          :replicas_override,
+          "cannot be used with TCP routes: connections would be balanced across replicas " <>
+            "with no way to keep a client on one"
         )
 
       true ->
@@ -465,6 +488,204 @@ defmodule Homelab.Deployments.Deployment do
         end
       end)
     end
+  end
+
+  defp normalize_tcp_routes(changeset) do
+    case get_change(changeset, :tcp_routes) do
+      routes when is_list(routes) ->
+        put_change(changeset, :tcp_routes, Enum.map(routes, &normalize_domain_entry/1))
+
+      _ ->
+        changeset
+    end
+  end
+
+  # A TCP route reaches a database, so a malformed one fails in a way nobody reads as a
+  # routing problem: Traefik declines the router, the name resolves to the proxy anyway,
+  # and the client reports a connection error from a hostname that looks configured.
+  defp validate_tcp_routes(changeset) do
+    case get_change(changeset, :tcp_routes) do
+      nil ->
+        changeset
+
+      routes when is_list(routes) ->
+        Enum.reduce(routes, changeset, &validate_tcp_route/2)
+
+      _ ->
+        add_error(changeset, :tcp_routes, "must be a list")
+    end
+  end
+
+  defp validate_tcp_route(route, changeset) do
+    cond do
+      not is_binary(route["host"]) or Hostname.normalize(route["host"]) in [nil, ""] ->
+        add_error(changeset, :tcp_routes, "host is required (got #{inspect(route["host"])})")
+
+      not valid_port?(route["port"]) ->
+        add_error(changeset, :tcp_routes, "port must be 1-65535 (got #{inspect(route["port"])})")
+
+      not optional_source_range?(route["source_range"]) ->
+        add_error(
+          changeset,
+          :tcp_routes,
+          "source_range must be comma-separated CIDRs (got #{inspect(route["source_range"])})"
+        )
+
+      true ->
+        changeset
+    end
+  end
+
+  # Absent is allowed here and required later: `validate_tcp_route_exposure/1` is what
+  # demands a range on a `:private` deployment, because that is the exposure whose whole
+  # meaning is "LAN only".
+  defp optional_source_range?(range) when range in [nil, ""], do: true
+
+  defp optional_source_range?(range) when is_binary(range) do
+    ranges = String.split(range, ",", trim: true)
+
+    ranges != [] and Enum.all?(ranges, &valid_cidr?/1)
+  end
+
+  defp optional_source_range?(_range), do: false
+
+  defp valid_cidr?(cidr) do
+    case cidr |> String.trim() |> String.split("/") do
+      [address, bits] ->
+        case {:inet.parse_address(String.to_charlist(address)), Integer.parse(bits)} do
+          {{:ok, {_, _, _, _}}, {mask, ""}} -> mask in 0..32
+          {{:ok, _v6}, {mask, ""}} -> mask in 0..128
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  # Exposure and TCP routes are a two-field relationship, so this reads both through
+  # `get_field/2` and runs whenever EITHER changes. Scoping it to `get_change(:tcp_routes)`
+  # would guard one direction only: flipping `exposure_mode_override` to `sso_protected`
+  # on a deployment that already holds TCP routes never mentions the routes at all, and
+  # the result would be a database published under a name that looks SSO-guarded and is
+  # not.
+  #
+  # `effective_exposure/1` reads `app_template.exposure_mode`, which is not in the
+  # changeset, so an unloaded template means this cannot decide and does not guess.
+  defp validate_tcp_route_exposure(changeset) do
+    routes = changeset |> get_field(:tcp_routes) |> List.wrap()
+
+    cond do
+      routes == [] ->
+        changeset
+
+      is_nil(get_change(changeset, :tcp_routes)) and
+          is_nil(get_change(changeset, :exposure_mode_override)) ->
+        changeset
+
+      true ->
+        validate_routes_against_exposure(changeset, routes)
+    end
+  end
+
+  defp validate_routes_against_exposure(changeset, routes) do
+    case Netns.effective_exposure_for_changeset(changeset) do
+      "sso_protected" ->
+        add_error(
+          changeset,
+          :tcp_routes,
+          "cannot be used on an SSO-protected deployment: Traefik applies forwardAuth per " <>
+            "HTTP router, and a TCP router carries no auth middleware, so this route would " <>
+            "reach the container with no login"
+        )
+
+      "host_network" ->
+        add_error(
+          changeset,
+          :tcp_routes,
+          "cannot be used with host networking: the container has no address on any " <>
+            "network for Traefik to forward to"
+        )
+
+      "private" ->
+        validate_private_source_ranges(changeset, routes)
+
+      _ ->
+        changeset
+    end
+  end
+
+  # A `:private` HTTP route falls back to an RFC1918 default. That default is not safe on
+  # a TCP route: a connection arriving through Traefik's published host port can present
+  # as the Docker bridge gateway (172.17.0.1 / 172.31.0.1 -- inside 172.16/12), which
+  # would make the allowlist match every client on the internet. TCP `ipAllowList` also
+  # sees only the socket peer; there is no XFF to look past. So the ranges are named
+  # explicitly or the route is refused.
+  defp validate_private_source_ranges(changeset, routes) do
+    if Enum.any?(routes, &(&1["source_range"] in [nil, ""])) do
+      add_error(
+        changeset,
+        :tcp_routes,
+        "source_range is required on a private deployment: a TCP route sees only the " <>
+          "connecting socket's address, and the default private ranges match Docker's " <>
+          "own bridge gateway"
+      )
+    else
+      changeset
+    end
+  end
+
+  # A TCP router's `HostSNI` outranks every HTTP router for the same name on a shared
+  # entrypoint, so a host claimed by both does not serve both -- the website silently
+  # becomes a database port. Checked against this deployment's own HTTP hostnames; the
+  # cross-deployment case needs a query and lives in `Deployments.validate_tcp_conflicts/1`.
+  defp validate_tcp_route_hosts(changeset) do
+    routes = changeset |> get_field(:tcp_routes) |> List.wrap()
+
+    if routes == [] or not touches_hosts?(changeset) do
+      changeset
+    else
+      http_hosts = http_hostnames(changeset)
+
+      routes
+      |> Enum.map(&Hostname.normalize(&1["host"]))
+      |> Enum.reduce({changeset, MapSet.new()}, &check_tcp_host(&1, &2, http_hosts))
+      |> elem(0)
+    end
+  end
+
+  defp touches_hosts?(changeset) do
+    not (is_nil(get_change(changeset, :tcp_routes)) and
+           is_nil(get_change(changeset, :domain)) and
+           is_nil(get_change(changeset, :additional_domains)))
+  end
+
+  defp check_tcp_host(nil, acc, _http_hosts), do: acc
+
+  defp check_tcp_host(host, {changeset, seen}, http_hosts) do
+    cond do
+      MapSet.member?(seen, host) ->
+        {add_error(changeset, :tcp_routes, "#{host} is listed twice"), seen}
+
+      MapSet.member?(http_hosts, host) ->
+        {add_error(changeset, :tcp_routes, "#{host} is already an HTTP route on this deployment"),
+         MapSet.put(seen, host)}
+
+      true ->
+        {changeset, MapSet.put(seen, host)}
+    end
+  end
+
+  defp http_hostnames(changeset) do
+    aliases =
+      changeset
+      |> get_field(:additional_domains)
+      |> List.wrap()
+      |> Enum.map(&Hostname.normalize(&1["host"]))
+
+    [Hostname.normalize(get_field(changeset, :domain)) | aliases]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> MapSet.new()
   end
 
   # A path-scoped duplicate is fine and stays allowed: it gets a name including the path,

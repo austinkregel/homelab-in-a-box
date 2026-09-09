@@ -462,6 +462,24 @@ defmodule Homelab.Deployments do
     |> Repo.all()
   end
 
+  @doc """
+  Deployments carrying at least one TCP route, preloaded.
+
+  These are the deployments Traefik has to reach on a TENANT network rather than on
+  ingress. A TCP-routed datastore deliberately stays off the ingress network — that
+  network is one flat segment shared with every other tenant's routed workload, so
+  putting a database on it would open the database to all of them at L3, bypassing
+  Traefik entirely. Traefik joins the tenant network instead, which grants reach to the
+  one process that already reaches every routed workload and grants the datastore
+  nothing. `Infrastructure.sync_traefik_networks/0` is what acts on this.
+  """
+  def list_tcp_routed do
+    Deployment
+    |> where([d], fragment("cardinality(?) > 0", d.tcp_routes))
+    |> preload([:tenant, :app_template])
+    |> Repo.all()
+  end
+
   @doc "All non-nil external_ids across every deployment, for orphan detection."
   def list_all_external_ids do
     Deployment
@@ -1484,37 +1502,22 @@ defmodule Homelab.Deployments do
   defp create_dns_records(_deployment), do: :ok
 
   @doc """
-  The address deployment DNS records point at: this host's first non-loopback IPv4,
-  used for both the internal and public scope.
+  The address deployment DNS records point at, used for both the internal and public
+  scope.
 
-  Public only so `ReleaseSteps.PublishDns` can use the SAME guess the imperative
+  This used to be "the first non-loopback IPv4 `:inet.getifaddrs/0` returns", which on
+  any host running containers includes the daemon's own bridges — so the A record for
+  every app could come out as `172.17.0.1`, an address reachable from nowhere, decided
+  by interface ordering. `Networking.host_ip/0` now returns the address the operator
+  chose on the DNS settings page, falling back to detection when they have not chosen.
+
+  Public only so `ReleaseSteps.PublishDns` uses the SAME answer the imperative
   `create_dns_records/1` uses. Two copies of "which IP does this host answer on"
   drifting apart would publish one address through `deploy_now/1` and a different one
   through the saga for the same deployment.
   """
   def detect_ip_config do
-    internal_ip = get_host_lan_ip()
-    %{internal_ip: internal_ip, public_ip: internal_ip}
-  end
-
-  defp get_host_lan_ip do
-    case :inet.getifaddrs() do
-      {:ok, addrs} ->
-        addrs
-        |> Enum.flat_map(fn {_iface, opts} ->
-          opts
-          |> Keyword.get_values(:addr)
-          |> Enum.filter(&(tuple_size(&1) == 4))
-          |> Enum.reject(&(&1 == {127, 0, 0, 1}))
-        end)
-        |> List.first()
-        |> case do
-          nil -> nil
-          ip -> ip |> :inet.ntoa() |> to_string()
-        end
-
-      _ ->
-        nil
-    end
+    host_ip = Homelab.Networking.host_ip()
+    %{internal_ip: host_ip, public_ip: host_ip}
   end
 end

@@ -4,6 +4,7 @@ defmodule Homelab.Deployments.ReleaseStepReasonMigrationTest do
   """
   use Homelab.DataCase, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
   import Homelab.Factory
 
   alias Ecto.Adapters.SQL
@@ -38,12 +39,12 @@ defmodule Homelab.Deployments.ReleaseStepReasonMigrationTest do
     # migrating at once, and this is one sandboxed test owning its own transaction.
 
     # Back to the pre-rename shape: one `error_message` column and no type at all.
-    assert :ok = Ecto.Migrator.down(Repo, @version, @migration, log: false, migration_lock: false)
+    assert :ok = migrate(:down)
 
     assert %{rows: [["boom"]]} =
              SQL.query!(Repo, "SELECT error_message FROM release_steps WHERE id = $1", [step.id])
 
-    assert :ok = Ecto.Migrator.up(Repo, @version, @migration, log: false, migration_lock: false)
+    assert :ok = migrate(:up)
 
     assert %{rows: [["boom", "error"]]} =
              SQL.query!(
@@ -51,5 +52,20 @@ defmodule Homelab.Deployments.ReleaseStepReasonMigrationTest do
                "SELECT reason_message, reason_type FROM release_steps WHERE id = $1",
                [step.id]
              )
+  end
+
+  # Wrapped in `capture_log/1` because `Ecto.Migrator` warns whenever it runs a version
+  # older than one already applied, and this test deliberately re-runs a historical one.
+  # Every migration added after this test's target makes that warning fire, so without
+  # this the suite grows a permanent "an older migration has already run" warning that
+  # says nothing about the code under test. `log: false` does not cover it -- that option
+  # silences the migration's own SQL, not the ordering check.
+  defp migrate(direction) do
+    opts = [log: false, migration_lock: false]
+
+    {result, _log} =
+      with_log(fn -> apply(Ecto.Migrator, direction, [Repo, @version, @migration, opts]) end)
+
+    result
   end
 end

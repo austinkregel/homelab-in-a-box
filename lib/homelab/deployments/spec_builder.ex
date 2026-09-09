@@ -106,6 +106,7 @@ defmodule Homelab.Deployments.SpecBuilder do
       # netns section of the moduledoc.
       netns_children = if netns_child?, do: [], else: Netns.children(deployment)
       routed_children = Enum.filter(netns_children, &routed?/1)
+      http_routed_children = Enum.filter(netns_children, &http_routed?/1)
 
       ports = if netns_child?, do: [], else: build_ports(deployment)
 
@@ -128,11 +129,8 @@ defmodule Homelab.Deployments.SpecBuilder do
           true -> tenant_network(tenant)
         end
 
-      # A donor with a routed child must be reachable BY TRAEFIK, because the child's
-      # route resolves to the donor's address. This is the one real use of
-      # `bridge_networks` for a deployment — it was plumbed through both drivers and the
-      # orchestrator behaviour and then hardcoded to [] here, so nothing ever multi-homed.
-      bridge_networks = if routed_children == [], do: [], else: [ingress_network]
+      %{bridge: bridge_networks, routing: routing_network, on_ingress?: on_ingress?} =
+        network_roles(deployment, http_routed_children, host_network?, tenant, ingress_network)
 
       base_labels = build_labels(template, tenant, deployment)
 
@@ -144,8 +142,9 @@ defmodule Homelab.Deployments.SpecBuilder do
           %{}
         else
           deployment
-          |> build_routing_labels(ingress_network)
-          |> Map.merge(children_routing_labels(routed_children, ingress_network))
+          |> build_routing_labels(routing_network)
+          |> Map.merge(tcp_route_labels(deployment, routing_network))
+          |> Map.merge(children_routing_labels(routed_children, routing_network))
         end
 
       gpu = GpuSpec.parse(Access.effective_resource_limits(deployment))
@@ -164,6 +163,14 @@ defmodule Homelab.Deployments.SpecBuilder do
         ports: ports,
         network: primary_network,
         bridge_networks: bridge_networks,
+        # The networks the ORCHESTRATOR must attach this container to so Traefik can
+        # reach it. Stated outright rather than rediscovered by the drivers from
+        # `traefik.enable`, which stopped being able to answer this the moment a second
+        # router kind existed: a TCP-routed datastore sets `traefik.enable` and must NOT
+        # be attached to ingress, because ingress is one flat segment shared with every
+        # other tenant's routed workload. Traefik joins the datastore's tenant network
+        # instead — see `Infrastructure.sync_traefik_networks/0`.
+        routing_networks: if(on_ingress?, do: [ingress_network], else: []),
         # The container lives in the HOST's network namespace. The drivers read this
         # rather than string-matching the network name, and it is what tells them to
         # skip everything host mode forbids (see moduledoc).
@@ -245,11 +252,67 @@ defmodule Homelab.Deployments.SpecBuilder do
     end
   end
 
-  defp routed?(%Deployment{domain: domain} = child)
+  # Which networks this container needs, and which one Traefik resolves its backends on.
+  #
+  #   * `bridge` — a donor with an HTTP-routed child must be reachable BY TRAEFIK on
+  #     ingress, because the child's route resolves to the donor's address. This is the
+  #     one real use of `bridge_networks` for a deployment. A TCP-routed child does NOT
+  #     put its donor here: Traefik joins the tenant network to reach it instead.
+  #
+  #   * `routing` — the ONE network named in `traefik.docker.network`. That label is
+  #     per-container, so every router the container carries shares the answer. Ingress
+  #     whenever the container is on ingress at all (its own HTTP route, or a donor
+  #     carrying one for a child); otherwise the tenant network, which is where a
+  #     TCP-routed datastore stays. See `tcp_route_labels/2` for why Traefik comes to it
+  #     rather than the other way around.
+  #
+  #   * `on_ingress?` — what the orchestrator attaches, as `routing_networks`.
+  defp network_roles(deployment, http_routed_children, host_network?, tenant, ingress_network) do
+    on_ingress? = http_routed?(deployment) or http_routed_children != []
+
+    %{
+      bridge: if(http_routed_children == [], do: [], else: [ingress_network]),
+      routing:
+        if(on_ingress? or host_network?, do: ingress_network, else: tenant_network(tenant)),
+      on_ingress?: on_ingress?
+    }
+  end
+
+  # Whether this deployment has any route at all — which is what decides whether a netns
+  # child's labels are worth building onto its donor.
+  #
+  # Split from `http_routed?/1` because the two answers stopped agreeing once TCP routers
+  # existed: a `:service` Postgres with a TCP route is ROUTED (it has a router, a name and
+  # a certificate) while having no HTTP route and no business on the ingress network. One
+  # predicate answering both questions is how such a datastore would have ended up on
+  # ingress purely as a side effect of being reachable.
+  defp routed?(%Deployment{} = child), do: http_routed?(child) or tcp_routed?(child)
+
+  defp http_routed?(%Deployment{domain: domain} = child)
        when is_binary(domain) and domain != "",
        do: Access.proxy_mode?(child)
 
-  defp routed?(_child), do: false
+  defp http_routed?(_child), do: false
+
+  defp tcp_routed?(%Deployment{} = deployment), do: tcp_routes(deployment) != []
+
+  # `:sso_protected` never gets TCP labels, whatever the column holds. The changeset
+  # rejects the combination, but rows written before that validation, and anything
+  # reaching the schema through the API, both exist -- and a route dropped here is a
+  # support ticket while a route emitted here is an unauthenticated database.
+  defp tcp_routes(%Deployment{} = deployment) do
+    if Access.protected?(deployment) and Access.effective_exposure(deployment) == :sso_protected do
+      []
+    else
+      deployment |> Map.get(:tcp_routes) |> List.wrap() |> Enum.filter(&valid_tcp_route?/1)
+    end
+  end
+
+  defp valid_tcp_route?(%{"host" => host, "port" => port})
+       when is_binary(host) and host != "" and is_integer(port),
+       do: true
+
+  defp valid_tcp_route?(_route), do: false
 
   # A routed child's Traefik labels, built onto the DONOR.
   #
@@ -260,9 +323,11 @@ defmodule Homelab.Deployments.SpecBuilder do
   #
   # Router names derive from each child's DOMAIN, so two children never collide; two
   # children on one domain is a configuration the operator has to resolve anyway.
-  defp children_routing_labels(routed_children, ingress_network) do
+  defp children_routing_labels(routed_children, routing_network) do
     Enum.reduce(routed_children, %{}, fn child, acc ->
-      Map.merge(acc, build_routing_labels(child, ingress_network))
+      acc
+      |> Map.merge(build_routing_labels(child, routing_network))
+      |> Map.merge(tcp_route_labels(child, routing_network))
     end)
   end
 
@@ -642,7 +707,16 @@ defmodule Homelab.Deployments.SpecBuilder do
       |> Enum.filter(&(is_binary(&1["host"]) and &1["host"] != ""))
       |> Enum.map(&additional_backend_port(&1["port"], default))
 
-    MapSet.new([default | extra ++ aliases])
+    # A TCP router is a door onto a port exactly as an HTTP router is. On a `:private`
+    # deployment that door carries an ip allowlist, so publishing the same port on the
+    # host would put the identical socket on the LAN with nothing in front of it — the
+    # bypass this whole function exists to describe.
+    tcp =
+      deployment
+      |> tcp_routes()
+      |> Enum.map(&to_string(&1["port"]))
+
+    MapSet.new([default | extra ++ aliases ++ tcp])
   end
 
   defp bind_host_ports(deployment) do
@@ -754,7 +828,7 @@ defmodule Homelab.Deployments.SpecBuilder do
 
     base
     |> Map.merge(backend_labels(router, to_string(port), backend_scheme(deployment)))
-    |> Map.merge(wildcard_cert_labels(router, domain))
+    |> Map.merge(wildcard_cert_labels("http", router, domain))
     |> Map.merge(exposure_middleware_labels(router, exposure))
     |> Map.merge(sticky_labels(router, deployment))
     |> Map.merge(extra_route_labels(deployment, router, domain))
@@ -785,15 +859,18 @@ defmodule Homelab.Deployments.SpecBuilder do
   # EXACT label count rather than a suffix, at most one parent can ever match a given
   # host — `downloads.lab.example.com` is one label under `lab.example.com` and two
   # under `example.com` — so the list needs no precedence rule and `find` is honest.
-  defp wildcard_cert_labels(router, domain) do
+  # `kind` is the router namespace -- "http" or "tcp". A TCP router orders certificates
+  # exactly the way an HTTP one does, and a database hostname sitting one label under a
+  # configured wildcard must reuse that certificate rather than open its own ACME order.
+  defp wildcard_cert_labels(kind, router, domain) do
     case Enum.find(Homelab.Config.wildcard_domains(), &covered_by_wildcard?(domain, &1)) do
       nil ->
         %{}
 
       parent ->
         %{
-          "traefik.http.routers.#{router}.tls.domains[0].main" => parent,
-          "traefik.http.routers.#{router}.tls.domains[0].sans" => "*.#{parent}"
+          "traefik.#{kind}.routers.#{router}.tls.domains[0].main" => parent,
+          "traefik.#{kind}.routers.#{router}.tls.domains[0].sans" => "*.#{parent}"
         }
     end
   end
@@ -872,7 +949,7 @@ defmodule Homelab.Deployments.SpecBuilder do
         ] ++
           Map.to_list(backend_labels(name, to_string(port), scheme)) ++
           Map.to_list(router_middleware_labels(name, router, exposure)) ++
-          Map.to_list(wildcard_cert_labels(name, domain))
+          Map.to_list(wildcard_cert_labels("http", name, domain))
       else
         []
       end
@@ -936,7 +1013,7 @@ defmodule Homelab.Deployments.SpecBuilder do
         ] ++
           Map.to_list(backend_labels(name, backend, scheme)) ++
           Map.to_list(router_middleware_labels(name, base_router, exposure)) ++
-          Map.to_list(wildcard_cert_labels(name, host))
+          Map.to_list(wildcard_cert_labels("http", name, host))
       else
         []
       end
@@ -979,6 +1056,117 @@ defmodule Homelab.Deployments.SpecBuilder do
   # round-robins, so a websocket (or LiveView) reconnect can land on a different
   # container than the one holding the session. A sticky cookie pins a client to the
   # replica it first reached.
+  @doc """
+  Routers + services for a deployment's `tcp_routes` — a hostname that reaches a container
+  port over raw TCP instead of HTTP.
+
+  This is the only way to reach a database by name. Every other router this module emits
+  is an HTTP router, which parses what arrives as a request; a Postgres client's startup
+  packet is not one, so an HTTP route in front of a database drops the connection and no
+  `backend_scheme` value changes that. A TCP router matches on the TLS SNI name and
+  forwards bytes.
+
+  Three things make that work, and all three are load-bearing:
+
+    * **The client must speak TLS.** SNI is the only thing a TCP router can match on, and
+      it exists only inside a TLS handshake. `sslmode=disable` sends none, matches no TCP
+      router, falls through to the HTTP routers on the same entrypoint and fails with
+      `expected authentication request from server, but received H` — the `H` being the
+      first byte of `HTTP/1.1`. So: `sslmode=require` at minimum.
+
+    * **Postgres negotiates TLS in its own protocol**, not by opening with a handshake.
+      Traefik reads the `SSLRequest` message, answers it, and only then muxes on the SNI
+      name from the handshake that follows. This is Postgres-specific: another protocol
+      is routable here only if its client opens with a real TLS `ClientHello`.
+
+    * **The TLS options must name the `postgresql` ALPN protocol**, which is why every
+      router here carries `Infrastructure.postgres_tls_options/0`. Without it the
+      handshake is rejected before any of the above happens — see that function.
+
+  Traefik terminates TLS and forwards PLAINTEXT to the container, so the certificate a
+  client verifies is the proxy's, and the container sees Traefik's address as the peer on
+  every connection. A `pg_hba.conf` that distinguishes clients by host no longer can.
+
+  `entrypoints` is emitted always. A TCP router without it binds to EVERY entrypoint,
+  which for a `HostSNI` rule means quietly claiming that hostname on port 80 as well.
+  """
+  def tcp_route_labels(deployment, routing_network) do
+    case tcp_routes(deployment) do
+      [] ->
+        %{}
+
+      routes ->
+        exposure = to_string(Access.effective_exposure(deployment))
+
+        base = %{
+          "traefik.enable" => "true",
+          network_label_key() => routing_network
+        }
+
+        Enum.reduce(routes, base, fn route, acc ->
+          Map.merge(acc, one_tcp_route_labels(route, exposure))
+        end)
+    end
+  end
+
+  defp one_tcp_route_labels(route, exposure) do
+    host = route["host"]
+    port = route["port"]
+    name = tcp_router_name(host, port)
+
+    %{
+      "traefik.tcp.routers.#{name}.rule" => "HostSNI(`#{host}`)",
+      "traefik.tcp.routers.#{name}.entrypoints" => "websecure",
+      "traefik.tcp.routers.#{name}.tls" => "true",
+      "traefik.tcp.routers.#{name}.tls.certresolver" => "letsencrypt",
+      "traefik.tcp.routers.#{name}.tls.options" => Homelab.Infrastructure.postgres_tls_options(),
+      "traefik.tcp.routers.#{name}.service" => name,
+      "traefik.tcp.services.#{name}.loadbalancer.server.port" => to_string(port)
+    }
+    |> Map.merge(wildcard_cert_labels("tcp", name, host))
+    |> Map.merge(tcp_allowlist_labels(name, route, exposure))
+  end
+
+  # The port is part of the name, so one host published on two ports is two routers rather
+  # than one silently overwriting the other in the label map — the same reason
+  # `additional_router_name/2` folds in the path.
+  defp tcp_router_name(host, port), do: "#{sanitize_domain(host)}-#{port}"
+
+  # The firewall in front of a TCP route: only these source addresses may open a
+  # connection, enforced by Traefik before it dials the backend.
+  #
+  # Emitted on ANY exposure, not only `:private`. The exposure modes describe how the
+  # HTTP side is guarded, and a datastore is typically `:service` — it has no HTTP route
+  # to protect at all — so gating this on `:private` would silently drop a range the
+  # operator typed and leave the database open. `:private` is where a range is
+  # *mandatory* (`Deployment.validate_private_source_ranges/2`); everywhere else it is
+  # optional and honoured when present.
+  #
+  # TCP middlewares are a much smaller set than HTTP's: `ipAllowList` and `inFlightConn`,
+  # and no forwardAuth. So `:sso_protected` has no representation here at all, which is
+  # why `tcp_routes/1` refuses to emit for it rather than emitting something weaker.
+  #
+  # The range is never defaulted. The HTTP path falls back to the RFC1918 blocks, and
+  # that fallback is wrong here: `172.16/12` covers Docker's own bridge networks, so it
+  # would admit every container on this host, and a host-local connection arriving
+  # through the userland proxy presents as the bridge gateway rather than its real
+  # origin. A LAN client's address IS preserved — Docker's MASQUERADE rules only SNAT
+  # traffic leaving containers, never inbound — so an explicit range does what it says.
+  # There is no forwarded header to look past either way: `ipAllowList` sees the
+  # connecting socket and nothing else.
+  defp tcp_allowlist_labels(name, route, _exposure) do
+    case route["source_range"] do
+      range when is_binary(range) and range != "" ->
+        %{
+          "traefik.tcp.middlewares.#{name}-ipallow.ipallowlist.sourcerange" => range,
+          "traefik.tcp.routers.#{name}.middlewares" => "#{name}-ipallow"
+        }
+
+      _ ->
+        %{}
+    end
+  end
+
   defp sticky_labels(router, deployment) do
     if sticky?(deployment) do
       %{
