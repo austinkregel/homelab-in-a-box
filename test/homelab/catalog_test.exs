@@ -122,4 +122,56 @@ defmodule Homelab.CatalogTest do
       assert {:error, :not_found} = Catalog.get_app_template(template.id)
     end
   end
+
+  describe "parent_domain/1" do
+    test "returns the host one label up" do
+      assert Catalog.parent_domain("matrix.example.com") == "example.com"
+      assert Catalog.parent_domain("a.b.example.com") == "b.example.com"
+    end
+
+    test "returns nil for a bare apex (no routable parent)" do
+      # example.com -> "com", which is not a delegation target, so nil rather than "com".
+      assert Catalog.parent_domain("example.com") == nil
+    end
+
+    test "returns nil for a single label or a non-binary" do
+      assert Catalog.parent_domain("localhost") == nil
+      assert Catalog.parent_domain(nil) == nil
+      assert Catalog.parent_domain("") == nil
+    end
+  end
+
+  describe "resolve_suggested_domains/2" do
+    # The Synapse shape: a blank-host suggestion resolved against the deployed domain.
+    test "fills a blank host from the parent of the primary domain" do
+      suggested = [%{"host" => "", "path_prefix" => "/.well-known/matrix", "port" => nil}]
+
+      assert Catalog.resolve_suggested_domains(suggested, "matrix.example.com") == [
+               %{"host" => "example.com", "path_prefix" => "/.well-known/matrix", "port" => nil}
+             ]
+    end
+
+    test "drops a blank-host row when the primary domain has no usable parent" do
+      suggested = [%{"host" => "", "path_prefix" => "/.well-known/matrix"}]
+
+      # A bare apex primary domain (or none) leaves the host unresolvable, so the row is
+      # dropped rather than saved and rejected by the deployment changeset.
+      assert Catalog.resolve_suggested_domains(suggested, "example.com") == []
+      assert Catalog.resolve_suggested_domains(suggested, nil) == []
+    end
+
+    test "leaves an explicitly-set host alone" do
+      suggested = [%{"host" => "status.example.org", "path_prefix" => nil, "port" => nil}]
+
+      assert Catalog.resolve_suggested_domains(suggested, "matrix.example.com") == suggested
+    end
+
+    test "accepts a template struct and reads its suggestion" do
+      template = insert(:app_template, suggested_additional_domains: [%{"host" => ""}])
+
+      assert Catalog.resolve_suggested_domains(template, "matrix.example.com") == [
+               %{"host" => "example.com"}
+             ]
+    end
+  end
 end
