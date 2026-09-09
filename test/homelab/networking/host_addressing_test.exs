@@ -51,6 +51,27 @@ defmodule Homelab.Networking.HostAddressingTest do
     refute Enum.any?(Networking.host_networks(), &String.starts_with?(&1, "127."))
   end
 
+  # The interface name is what makes the list choosable: two private CIDRs say nothing
+  # about which is the LAN and which is a VPN.
+  describe "host_addresses/0" do
+    test "labels every address with the interface carrying it" do
+      for entry <- Networking.host_addresses() do
+        assert is_binary(entry.interface) and entry.interface != ""
+        assert {:ok, _} = :inet.parse_address(String.to_charlist(entry.address))
+        assert String.contains?(entry.cidr, "/")
+      end
+    end
+
+    test "offers no Docker bridge" do
+      refute Enum.any?(Networking.host_addresses(), &docker_interface?(&1.interface))
+    end
+
+    test "covers the same set host_networks/0 summarises" do
+      assert Enum.sort(Networking.host_networks()) ==
+               Networking.host_addresses() |> Enum.map(& &1.cidr) |> Enum.uniq() |> Enum.sort()
+    end
+  end
+
   describe "host_ip/0" do
     test "is an address on one of this host's own networks" do
       ip = Networking.host_ip()

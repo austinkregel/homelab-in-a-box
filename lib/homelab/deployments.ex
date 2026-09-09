@@ -1508,7 +1508,8 @@ defmodule Homelab.Deployments do
   This used to be "the first non-loopback IPv4 `:inet.getifaddrs/0` returns", which on
   any host running containers includes the daemon's own bridges — so the A record for
   every app could come out as `172.17.0.1`, an address reachable from nowhere, decided
-  by interface ordering. `Networking.host_ip/0` asks the routing table instead.
+  by interface ordering. `Networking.host_ip/0` now returns the address the operator
+  chose on the DNS settings page, falling back to detection when they have not chosen.
 
   Public only so `ReleaseSteps.PublishDns` uses the SAME answer the imperative
   `create_dns_records/1` uses. Two copies of "which IP does this host answer on"

@@ -586,6 +586,7 @@ defmodule HomelabWeb.SettingsLive do
     put_setting(params, "unifi_site")
     put_setting(params, "unifi_api_version")
     put_setting(params, "pihole_url")
+    put_setting(params, Homelab.Networking.publish_address_setting())
     put_setting(params, "namecheap_api_user")
     put_setting(params, "namecheap_client_ip")
 
@@ -755,6 +756,12 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:unifi_site, Settings.get("unifi_site", "default"))
     |> assign(:unifi_api_version, Settings.get("unifi_api_version", "auto"))
     |> assign(:unifi_skip_tls_verify, Settings.get("unifi_skip_tls_verify", "false"))
+    |> assign(:host_addresses, Homelab.Networking.host_addresses())
+    |> assign(
+      :dns_publish_address,
+      Settings.get(Homelab.Networking.publish_address_setting(), "")
+    )
+    |> assign(:detected_publish_address, Homelab.Networking.host_ip())
     |> assign(:pihole_url, Settings.get("pihole_url", ""))
     |> assign(:pihole_api_key_set?, Settings.get("pihole_api_key") != nil)
     |> assign(:namecheap_api_user, Settings.get("namecheap_api_user", ""))
@@ -1954,6 +1961,55 @@ defmodule HomelabWeb.SettingsLive do
                   Skip TLS verification (for self-signed certs)
                 </span>
               </label>
+            </div>
+
+            <%!-- Which of this host's addresses every A record points at. Offered as a
+                  choice rather than detected, because a multi-homed host has no single
+                  right answer: sending clients to the LAN, a VPN or a management network
+                  is a decision about the network, not a fact about it. Interfaces are
+                  named because `192.168.0.0/22` and `10.244.0.0/16` do not say which is
+                  which, and that is the whole distinction being made. --%>
+            <div class="rounded-lg border border-base-content/[0.06] p-4 space-y-3">
+              <h3 class="text-sm font-semibold text-base-content flex items-center gap-2">
+                <.icon name="hero-map-pin" class="size-4 text-primary" /> Record address
+              </h3>
+              <div>
+                <label class="block text-xs font-medium text-base-content/60 mb-1">
+                  Point records at
+                </label>
+                <select
+                  id="dns-publish-address"
+                  name={"dns[#{Homelab.Networking.publish_address_setting()}]"}
+                  class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2 px-3 focus:ring-2 focus:ring-primary/50"
+                >
+                  <option value="" selected={@dns_publish_address in [nil, ""]}>
+                    Detect automatically{if @detected_publish_address,
+                      do: " — #{@detected_publish_address}",
+                      else: ""}
+                  </option>
+                  <option
+                    :for={address <- @host_addresses}
+                    value={address.address}
+                    selected={@dns_publish_address == address.address}
+                  >
+                    {address.interface} — {address.address} ({address.cidr})
+                  </option>
+                </select>
+                <p class="text-[11px] text-base-content/40 mt-1 leading-relaxed">
+                  Every app's A record resolves to this. Docker's own bridges are left out —
+                  nothing outside this host can reach one.
+                </p>
+                <%!-- A stored address the host no longer holds resolves to nothing, so
+                      `host_ip/0` falls back to detection. Say so, or the page shows a
+                      selection that is not what is being published. --%>
+                <p
+                  :if={@dns_publish_address not in [nil, ""] and stale_publish_address?(assigns)}
+                  class="text-[11px] text-warning mt-1 leading-relaxed"
+                >
+                  {@dns_publish_address} is not on this host any more — records are using {@detected_publish_address ||
+                    "no address"} until you pick another.
+                </p>
+              </div>
             </div>
 
             <%!-- Pi-hole settings --%>
@@ -3181,6 +3237,10 @@ defmodule HomelabWeb.SettingsLive do
 
   # Absent from params → the field was not rendered; leave the stored value alone.
   # Present and blank → the operator cleared it; delete it.
+  defp stale_publish_address?(assigns) do
+    not Enum.any?(assigns.host_addresses, &(&1.address == assigns.dns_publish_address))
+  end
+
   defp put_setting(params, key) do
     case Map.get(params, key, :absent) do
       :absent ->

@@ -776,38 +776,79 @@ defmodule Homelab.Networking do
   """
   @spec host_networks() :: [String.t()]
   def host_networks do
-    host_interfaces()
-    |> Enum.flat_map(&interface_cidrs/1)
+    host_addresses()
+    |> Enum.map(& &1.cidr)
     |> Enum.uniq()
     |> Enum.sort_by(&prefix_length/1)
+  end
+
+  @doc """
+  Every address this host holds, each labelled with the interface carrying it.
+
+  The interface name is what makes the list choosable. `192.168.0.0/22` and
+  `10.244.0.0/16` say nothing about which is the LAN and which is a VPN; `enp73s0` and
+  `ztwdjnw6im` say it immediately, and that is the distinction anyone picking one is
+  actually making.
+
+  Same exclusions as `host_networks/0` — the daemon's bridges are this host talking to
+  its own containers, never a network its clients are on.
+  """
+  @spec host_addresses() :: [%{interface: String.t(), address: String.t(), cidr: String.t()}]
+  def host_addresses do
+    host_interfaces()
+    |> Enum.flat_map(&interface_addresses/1)
+    |> Enum.sort_by(& &1.interface)
   end
 
   # An address reserved for documentation (RFC 5737). Nothing listens on it and nothing
   # is sent to it — see `routed_source_address/0`.
   @route_probe {192, 0, 2, 1}
 
+  @publish_address_setting "dns_publish_address"
+
+  @doc "The settings key holding the operator's chosen publish address."
+  def publish_address_setting, do: @publish_address_setting
+
   @doc """
-  The single address other machines reach this host on.
+  The address deployment DNS records point at.
 
-  Asks the KERNEL rather than ranking interfaces: opening a UDP socket and connecting it
-  performs a routing lookup and binds the source address the host would actually send
-  from, which is the definition of the answer wanted here. `connect` on a datagram
-  socket transmits nothing — it fixes the peer and selects a route — so this touches the
-  network stack without touching the network, and `@route_probe` is a documentation
-  address that is never contacted.
+  The OPERATOR'S CHOICE when they have made one — `host_addresses/0` is offered on the
+  DNS settings page, labelled by interface, and the chosen address is stored under
+  `#{@publish_address_setting}`. A multi-homed host has no single right answer that this
+  code can work out: which of a LAN, a VPN and a management network clients should be
+  sent to is a decision about the network, not a fact about it.
 
-  This replaced taking the first non-loopback address `:inet.getifaddrs/0` happened to
-  return. On any host running containers that list also holds the daemon's bridges, so
-  the answer depended on interface ordering and could be `172.17.0.1` — an address
-  reachable from nowhere, published as the A record for every app on the box. It could
-  equally return a VPN interface's address on a multi-homed host.
+  A stored address that no longer exists falls through to detection rather than being
+  published. An interface can be renamed or a VPN can be down, and a record pointing at
+  an address the host no longer holds resolves to nothing — worse than a detected one
+  that at least answers.
 
-  Falls back to the interface scan when there is no route to look up at all (an isolated
-  host, a machine with no default gateway), where interface order is genuinely all there
-  is to go on — but container bridges are excluded even then.
+  Detection is the default, and asks the KERNEL rather than ranking interfaces: opening
+  a UDP socket and connecting it performs a routing lookup and binds the source address
+  the host would send from. `connect` on a datagram socket transmits nothing — it fixes
+  the peer and selects a route — so this touches the network stack without touching the
+  network, and `@route_probe` is a documentation address that is never contacted.
+
+  Detection replaced taking the first non-loopback address `:inet.getifaddrs/0` happened
+  to return, which on a host running containers includes the daemon's bridges: the
+  answer depended on interface ordering and could be `172.17.0.1`, an address reachable
+  from nowhere, published as the A record for every app on the box.
+
+  The interface scan remains the last resort, for a host with no route to look up at all.
   """
   @spec host_ip() :: String.t() | nil
-  def host_ip, do: routed_source_address() || first_host_address()
+  def host_ip, do: chosen_address() || routed_source_address() || first_host_address()
+
+  defp chosen_address do
+    chosen =
+      @publish_address_setting |> Homelab.Settings.get_cached("") |> to_string() |> String.trim()
+
+    if chosen != "" and Enum.any?(host_addresses(), &(&1.address == chosen)) do
+      chosen
+    else
+      nil
+    end
+  end
 
   defp routed_source_address do
     case :gen_udp.open(0, [:binary, active: false]) do
@@ -834,14 +875,9 @@ defmodule Homelab.Networking do
   end
 
   defp first_host_address do
-    host_interfaces()
-    |> Enum.flat_map(fn {_name, opts} ->
-      opts |> Keyword.get_values(:addr) |> Enum.filter(&routable_v4?/1)
-    end)
-    |> List.first()
-    |> case do
-      nil -> nil
-      address -> address |> :inet.ntoa() |> to_string()
+    case host_addresses() do
+      [%{address: address} | _rest] -> address
+      [] -> nil
     end
   end
 
@@ -862,14 +898,20 @@ defmodule Homelab.Networking do
   # One interface can carry several addresses, and `:addr`/`:netmask` come back as
   # repeated keys in declaration order — so they are zipped rather than read with
   # `Keyword.get/2`, which would pair every address with the first mask.
-  defp interface_cidrs({_name, opts}) do
+  defp interface_addresses({name, opts}) do
     addresses = Keyword.get_values(opts, :addr)
     masks = Keyword.get_values(opts, :netmask)
 
     addresses
     |> Enum.zip(masks)
     |> Enum.filter(fn {addr, mask} -> routable_v4?(addr) and tuple_size(mask) == 4 end)
-    |> Enum.map(fn {addr, mask} -> cidr(addr, mask) end)
+    |> Enum.map(fn {addr, mask} ->
+      %{
+        interface: to_string(name),
+        address: addr |> :inet.ntoa() |> to_string(),
+        cidr: cidr(addr, mask)
+      }
+    end)
   end
 
   defp routable_v4?({127, _, _, _}), do: false
