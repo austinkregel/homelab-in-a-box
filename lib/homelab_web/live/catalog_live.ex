@@ -408,6 +408,16 @@ defmodule HomelabWeb.CatalogLive do
       exposure_mode_override: exposure_mode
     }
 
+    # This path has no domains editor, so a template's suggested additional domains (the
+    # Synapse /.well-known/matrix row) are resolved against the primary domain and applied
+    # directly. Only for proxy access — `domain` is nil otherwise — and only when they
+    # actually resolve (a bare apex has no parent to delegate from).
+    attrs =
+      case domain && Catalog.resolve_suggested_domains(template, domain) do
+        [_ | _] = resolved -> Map.put(attrs, :additional_domains, resolved)
+        _ -> attrs
+      end
+
     case Homelab.Deployments.deploy_now(attrs) do
       {:ok, _deployment} ->
         {:noreply,
