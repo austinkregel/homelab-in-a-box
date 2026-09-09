@@ -10,6 +10,34 @@ alias Homelab.Catalog.AppTemplate
 
 templates = [
   %{
+    slug: "matrix-synapse",
+    name: "Matrix Synapse",
+    description:
+      "Matrix homeserver for federated chat. Answers on matrix.<domain>; the apex serves " <>
+        "the /.well-known/matrix delegation so user ids read @you:<domain>.",
+    version: "latest",
+    image: "matrixdotorg/synapse:latest",
+    # Federation must be publicly reachable, and the well-known delegation is served over
+    # the same public route -- so this is a proxy :public app, not SSO-protected.
+    exposure_mode: :public,
+    auth_integration: false,
+    # Synapse's own config generation reads these; SERVER_NAME is the apex that becomes the
+    # server_name in @you:<apex>, which is exactly the host the delegation row is for.
+    default_env: %{"SYNAPSE_REPORT_STATS" => "no"},
+    required_env: ["SYNAPSE_SERVER_NAME"],
+    volumes: [
+      %{"container_path" => "/data", "description" => "Synapse config, signing keys, and media"}
+    ],
+    ports: [%{"container" => 8008, "protocol" => "tcp"}],
+    resource_limits: %{"memory_mb" => 1024, "cpu_shares" => 1024},
+    # The delegation row the deploy wizard pre-fills. Host is blank -- resolved from the
+    # primary domain the operator types (matrix.example.com -> example.com) at deploy time.
+    suggested_additional_domains: [
+      %{"host" => "", "path_prefix" => "/.well-known/matrix", "port" => nil}
+    ],
+    depends_on: []
+  },
+  %{
     slug: "nextcloud",
     name: "Nextcloud",
     description:
