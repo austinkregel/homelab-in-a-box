@@ -491,16 +491,13 @@ defmodule HomelabWeb.DeploymentSettings do
         on every connection.
       </p>
 
-      <%!-- Blank is the open default, so say what blank means. The Docker caveat is the
-            one that would otherwise be found the hard way: 172.16/12 covers this host's
-            own bridge networks, so the "private ranges" people reach for first admit
-            every container on the box. --%>
+      <%!-- 172.16/12 is the trap: it reads as "the private ranges" and it covers this
+            host's own bridge networks, so it admits every container on the box. --%>
       <p :if={@form.tcp_routes != []} class="text-[11px] text-base-content/40 leading-relaxed">
         <span class="font-medium">Allowed from</span>
-        is a firewall on the route — Traefik refuses the connection before reaching the
-        container. Leave it blank and anyone who can resolve the name may connect. Give
-        comma-separated CIDRs to restrict it; a LAN client's real address is what gets
-        matched. Avoid <span class="font-mono">172.16.0.0/12</span>
+        blank lets anyone who can resolve the name connect. Comma-separated CIDRs are
+        refused by Traefik before the container is dialled. Not
+        <span class="font-mono">172.16.0.0/12</span>
         — it covers this host's own Docker networks.
       </p>
 
