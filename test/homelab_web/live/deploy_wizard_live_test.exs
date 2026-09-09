@@ -1324,6 +1324,79 @@ defmodule HomelabWeb.DeployWizardLiveTest do
       assert [%{"host" => "matrix.communication.ventures"}] = deployment.additional_domains
     end
 
+    test "a template's suggested domain and the field's aliases both survive a deploy", %{
+      conn: conn,
+      tenant: tenant
+    } do
+      # Two sources name extra hostnames -- the comma in the domain field, and the row a
+      # template seeds -- and merging one map over the other meant whichever ran last won
+      # outright. A template carrying a suggestion silently ate every alias the operator
+      # typed: no error, nothing in the logs, the row still on screen, and one of the two
+      # names simply never reaching Traefik.
+      seeded_template =
+        insert(:app_template,
+          name: "Synapse",
+          slug: "synapse-delegated",
+          image: "synapse:latest",
+          exposure_mode: :public,
+          default_env: %{},
+          required_env: [],
+          ports: [],
+          volumes: [],
+          suggested_additional_domains: [
+            %{"host" => "", "path_prefix" => "/.well-known/matrix", "port" => nil}
+          ]
+        )
+
+      Homelab.Mocks.Orchestrator
+      |> stub(:deploy, fn _spec -> {:ok, "svc_matrix"} end)
+      |> stub(:stats, fn _id -> {:error, :not_found} end)
+      |> stub(:logs, fn _id, _opts -> {:ok, ""} end)
+      |> stub(:list_services, fn -> {:ok, []} end)
+      |> stub(:get_service, fn _id -> {:error, :not_found} end)
+
+      Homelab.Mocks.DnsProvider
+      |> stub(:list_records, fn _zone -> {:ok, []} end)
+      |> stub(:create_record, fn _zone, _record -> {:ok, %{id: "rec_1"}} end)
+      |> stub(:update_record, fn _zone, _id, _record -> {:ok, %{id: "rec_1"}} end)
+      |> stub(:delete_record, fn _zone, _id -> :ok end)
+
+      {:ok, view, _html} =
+        live(conn, ~p"/deploy/new?step=network&template_id=#{seeded_template.id}")
+
+      # Resolves the seeded row's blank host against the PRIMARY host. Taking the parent of
+      # the raw field would yield "example.com, chat.example.com" and fail alias validation.
+      render_change(view, "update_network", %{
+        "network" => %{
+          "tenant_id" => to_string(tenant.id),
+          "domain" => "matrix.example.com, chat.example.com"
+        }
+      })
+
+      render_click(view, "deploy", %{
+        "tenant_id" => to_string(tenant.id),
+        "domain" => "matrix.example.com, chat.example.com",
+        "exposure_mode" => "public"
+      })
+
+      assert_redirect(view, "/")
+
+      deployment =
+        Homelab.Deployments.Deployment
+        |> Homelab.Repo.get_by!(app_template_id: seeded_template.id)
+
+      assert deployment.domain == "matrix.example.com"
+
+      hosts = Enum.map(deployment.additional_domains, & &1["host"])
+
+      # The alias off the domain field, which merging the editor over it dropped outright.
+      assert "chat.example.com" in hosts
+
+      # The template's delegation row, resolved to the apex of the primary host.
+      assert %{"path_prefix" => "/.well-known/matrix"} =
+               Enum.find(deployment.additional_domains, &(&1["host"] == "example.com"))
+    end
+
     test "a typo in the domain field does not create a deployment", %{
       conn: conn,
       tenant: tenant,
