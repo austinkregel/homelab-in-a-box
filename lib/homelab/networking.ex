@@ -272,9 +272,9 @@ defmodule Homelab.Networking do
   to", where there is nothing to lose. It carries EVERY reason, not just the first.
 
   "Nothing was ASKED for" is a different answer and is `{:ok, []}`. `detect_ip_config/0`
-  returns both addresses as `nil` whenever `get_host_lan_ip/0` finds no non-loopback IPv4
-  — a loopback-only or IPv6-only host, or `:inet.getifaddrs/0` erroring — and on such a
-  host there is no address to publish and nothing has gone wrong. Conflating the two
+  returns both addresses as `nil` whenever `host_ip/0` finds none — a loopback-only or
+  IPv6-only host, one with neither a route nor a usable interface — and on such a host
+  there is no address to publish and nothing has gone wrong. Conflating the two
   failed those deploys outright with an empty reason list, which is its own tell: nothing
   failed, so nothing had a reason.
   """
@@ -776,13 +776,79 @@ defmodule Homelab.Networking do
   """
   @spec host_networks() :: [String.t()]
   def host_networks do
+    host_interfaces()
+    |> Enum.flat_map(&interface_cidrs/1)
+    |> Enum.uniq()
+    |> Enum.sort_by(&prefix_length/1)
+  end
+
+  # An address reserved for documentation (RFC 5737). Nothing listens on it and nothing
+  # is sent to it — see `routed_source_address/0`.
+  @route_probe {192, 0, 2, 1}
+
+  @doc """
+  The single address other machines reach this host on.
+
+  Asks the KERNEL rather than ranking interfaces: opening a UDP socket and connecting it
+  performs a routing lookup and binds the source address the host would actually send
+  from, which is the definition of the answer wanted here. `connect` on a datagram
+  socket transmits nothing — it fixes the peer and selects a route — so this touches the
+  network stack without touching the network, and `@route_probe` is a documentation
+  address that is never contacted.
+
+  This replaced taking the first non-loopback address `:inet.getifaddrs/0` happened to
+  return. On any host running containers that list also holds the daemon's bridges, so
+  the answer depended on interface ordering and could be `172.17.0.1` — an address
+  reachable from nowhere, published as the A record for every app on the box. It could
+  equally return a VPN interface's address on a multi-homed host.
+
+  Falls back to the interface scan when there is no route to look up at all (an isolated
+  host, a machine with no default gateway), where interface order is genuinely all there
+  is to go on — but container bridges are excluded even then.
+  """
+  @spec host_ip() :: String.t() | nil
+  def host_ip, do: routed_source_address() || first_host_address()
+
+  defp routed_source_address do
+    case :gen_udp.open(0, [:binary, active: false]) do
+      {:ok, socket} ->
+        try do
+          resolve_source_address(socket)
+        after
+          :gen_udp.close(socket)
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp resolve_source_address(socket) do
+    with :ok <- :gen_udp.connect(socket, @route_probe, 53),
+         {:ok, {address, _port}} <- :inet.sockname(socket),
+         true <- routable_v4?(address) do
+      address |> :inet.ntoa() |> to_string()
+    else
+      _ -> nil
+    end
+  end
+
+  defp first_host_address do
+    host_interfaces()
+    |> Enum.flat_map(fn {_name, opts} ->
+      opts |> Keyword.get_values(:addr) |> Enum.filter(&routable_v4?/1)
+    end)
+    |> List.first()
+    |> case do
+      nil -> nil
+      address -> address |> :inet.ntoa() |> to_string()
+    end
+  end
+
+  defp host_interfaces do
     case :inet.getifaddrs() do
       {:ok, interfaces} ->
-        interfaces
-        |> Enum.reject(fn {name, _opts} -> container_interface?(to_string(name)) end)
-        |> Enum.flat_map(&interface_cidrs/1)
-        |> Enum.uniq()
-        |> Enum.sort_by(&prefix_length/1)
+        Enum.reject(interfaces, fn {name, _opts} -> container_interface?(to_string(name)) end)
 
       _ ->
         []
@@ -807,6 +873,8 @@ defmodule Homelab.Networking do
   end
 
   defp routable_v4?({127, _, _, _}), do: false
+  # What an unbound socket reports, and never an address anything reaches this host on.
+  defp routable_v4?({0, 0, 0, 0}), do: false
   defp routable_v4?(addr) when tuple_size(addr) == 4, do: true
   defp routable_v4?(_addr), do: false
 
