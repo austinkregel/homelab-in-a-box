@@ -4352,8 +4352,16 @@ defmodule HomelabWeb.DeployWizardLive do
   # Fill a still-blank host with the parent of the primary domain (matrix.example.com ->
   # example.com), so a template suggestion becomes concrete once the operator names their
   # domain. A host they typed is non-blank and left alone.
+  #
+  # Taken from the PRIMARY host, not the raw field, because that field may name several
+  # (`Hostname.split_primary/1`). `parent_domain/1` on the whole of
+  # `matrix.example.com, chat.example.com` returns `example.com, chat.example.com` -- not
+  # a hostname, which the alias validation then rejects with an error pointing at a row the
+  # operator never typed and cannot see is wrong.
   defp fill_suggested_hosts(rows, domain) do
-    case Catalog.parent_domain(domain) do
+    {primary, _aliases} = Hostname.split_primary(domain)
+
+    case Catalog.parent_domain(primary) do
       nil -> rows
       apex -> Enum.map(rows, &fill_blank_host(&1, apex))
     end
