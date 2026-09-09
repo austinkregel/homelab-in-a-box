@@ -14,6 +14,30 @@ defmodule Homelab.Schemas.AppTemplateChangesetTest do
 
   defp changeset(attrs), do: AppTemplate.changeset(%AppTemplate{}, attrs)
 
+  describe "changeset/2 suggested_additional_domains" do
+    test "casts the suggested-domains list" do
+      cs =
+        changeset(
+          Map.put(@valid_attrs, :suggested_additional_domains, [
+            %{"host" => "", "path_prefix" => "/.well-known/matrix", "port" => nil}
+          ])
+        )
+
+      assert cs.valid?
+
+      template = Ecto.Changeset.apply_changes(cs)
+
+      assert template.suggested_additional_domains == [
+               %{"host" => "", "path_prefix" => "/.well-known/matrix", "port" => nil}
+             ]
+    end
+
+    test "defaults to an empty list" do
+      template = Ecto.Changeset.apply_changes(changeset(@valid_attrs))
+      assert template.suggested_additional_domains == []
+    end
+  end
+
   describe "changeset/2 required fields" do
     test "is valid with the minimal required attrs" do
       assert changeset(@valid_attrs).valid?
