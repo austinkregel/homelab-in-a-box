@@ -446,6 +446,43 @@ defmodule Homelab.Deployments.SpecBuilder do
   # silently does nothing, which is the bug class this pass exists to remove.
 
   @doc """
+  The name another container on the tenant network reaches `deployment` at.
+
+  Its own service name, normally. For a netns CHILD, the DONOR's — and that difference
+  is the whole point of the function.
+
+  A child is created with `NetworkMode: container:<donor>` and therefore has no network
+  membership, no DNS entry and no address of its own (see the moduledoc's network model).
+  Its ports answer on the DONOR's address, which is the same reason the donor carries a
+  child's Traefik labels rather than the child carrying its own.
+
+  So anything dialling a netns child by `service_name/2` is dialling a name Docker will
+  not resolve. That is not a connection error an operator can act on — it reads as the
+  datastore being down — which is why the resolution belongs here rather than in each
+  caller's error handling.
+
+  Returns `nil` for a child whose donor cannot be loaded, so a caller can say that
+  plainly instead of falling back to a name that cannot work.
+  """
+  def reachable_service_name(%Deployment{} = deployment) do
+    if Netns.child?(deployment) do
+      # Matched on `slug` rather than on `%{}`, which an unloaded association satisfies:
+      # `%Ecto.Association.NotLoaded{}` is a struct and so matches `%{}` happily, and the
+      # `nil` this clause exists to return would instead be a `KeyError` from inside
+      # `service_name/2`. The key named here is the one that function actually reads.
+      case Netns.donor(deployment) do
+        %Deployment{tenant: %{slug: _} = tenant, app_template: %{slug: _} = template} ->
+          service_name(tenant, template)
+
+        _ ->
+          nil
+      end
+    else
+      service_name(deployment.tenant, deployment.app_template)
+    end
+  end
+
+  @doc """
   Builds the tenant-scoped network name used to bridge related deployments.
   """
   def tenant_network(tenant) do

@@ -14,6 +14,7 @@ defmodule HomelabWeb.AppsLive do
   use HomelabWeb, :live_view
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.Access
   alias Homelab.Tenants
 
   @impl true
@@ -108,7 +109,9 @@ defmodule HomelabWeb.AppsLive do
 
     [
       deployment.app_template && deployment.app_template.name,
-      deployment.app_template && deployment.app_template.image,
+      # Searched on the image it RUNS. Matching only the template's meant typing the tag
+      # you can see on the card found nothing, the moment a version bump set an override.
+      deployment.app_template && Access.effective_image(deployment),
       deployment.tenant && deployment.tenant.name,
       deployment.domain,
       to_string(deployment.status)
@@ -230,8 +233,9 @@ defmodule HomelabWeb.AppsLive do
                   <p class="text-sm font-semibold text-base-content truncate">
                     {deployment.app_template.name}
                   </p>
+                  <%!-- The image this deployment RUNS, not the one its template names. --%>
                   <p class="text-xs text-base-content/35 font-mono truncate">
-                    {deployment.app_template.image}
+                    {Access.effective_image(deployment)}
                   </p>
                 </div>
               </.link>

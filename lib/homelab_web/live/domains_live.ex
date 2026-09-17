@@ -4,6 +4,7 @@ defmodule HomelabWeb.DomainsLive do
   alias Homelab.Tenants
   alias Homelab.Networking
   alias Homelab.Deployments
+  alias Homelab.Deployments.Access
 
   @tabs ~w(zones domains records)
 
@@ -331,7 +332,10 @@ defmodule HomelabWeb.DomainsLive do
           app_name: d.app_template.name,
           tenant_name: d.tenant.name,
           tls_status: :pending,
-          exposure_mode: d.app_template.exposure_mode,
+          # The EFFECTIVE exposure. `exposure_mode_override` is what the Access tab writes,
+          # and on this page exposure is the whole point — a deployment made private
+          # listed itself as public for as long as the override stood.
+          exposure_mode: Access.effective_exposure(d),
           zone_name: nil
         }
       end)

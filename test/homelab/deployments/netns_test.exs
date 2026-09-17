@@ -580,6 +580,7 @@ defmodule Homelab.Deployments.NetnsTest do
                {:workload, :ensure_databases},
                {:namespace, :netns_child_container},
                {:namespace, :await_health},
+               {:namespace, :ensure_databases},
                {:naming, :sync_domain},
                {:naming, :publish_dns},
                {:naming, :sync_domain},
@@ -588,6 +589,88 @@ defmodule Homelab.Deployments.NetnsTest do
                {:verification, :verify_public_url},
                {:verification, :verify_public_url}
              ]
+    end
+
+    # A stack release is anchored on the DONOR, so its `:workload` `ensure_databases`
+    # targets gluetun — not a datastore, so it skips, correctly and uselessly. Without a
+    # step naming the CHILD, a Postgres in a media stack declared `HOMELAB_DATABASES`,
+    # deployed green every time, and never got a database: nothing in the release ever
+    # read the declaration.
+    test "a child datastore gets a step that names it, not just the donor", ctx do
+      {:ok, child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+      steps = release |> Repo.preload(:steps) |> Map.fetch!(:steps)
+
+      ensure = Enum.filter(steps, &(&1.type == :ensure_databases))
+
+      # One for the donor (the anchor, empty handle) and one naming the child.
+      assert Enum.any?(ensure, &(&1.resource_handle == %{}))
+
+      assert Enum.any?(ensure, &(get_in(&1.resource_handle, ["deployment_id"]) == child.id))
+    end
+
+    # Postgres in a media stack is infrastructure: the apps dial it on boot, and an -arr
+    # app that cannot reach its database does not wait, it fails. Children used to be
+    # planned in read order, so the consumer could be created first.
+    test "a datastore child is created before the apps that dial it", ctx do
+      {:ok, app} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      postgres_template =
+        insert(:app_template,
+          name: "Postgres",
+          slug: "postgres-#{System.unique_integer([:positive])}",
+          image: "postgres:17-alpine",
+          exposure_mode: :service
+        )
+
+      {:ok, postgres} =
+        Deployments.create_deployment(
+          child_attrs(ctx.tenant, ctx.donor, %{
+            app_template_id: postgres_template.id,
+            domain: nil
+          })
+        )
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+
+      order =
+        release
+        |> Repo.preload(:steps)
+        |> Map.fetch!(:steps)
+        |> Enum.sort_by(& &1.position)
+        |> Enum.filter(&(&1.stage == :namespace))
+        |> Enum.map(&{&1.type, get_in(&1.resource_handle, ["deployment_id"])})
+
+      # Every step for the datastore lands before the app is even created — including
+      # `ensure_databases`, so the database exists by the time anything asks for it.
+      last_postgres = order |> Enum.filter(&(elem(&1, 1) == postgres.id)) |> length()
+      assert last_postgres == 3
+
+      assert Enum.take(order, 3) == [
+               {:netns_child_container, postgres.id},
+               {:await_health, postgres.id},
+               {:ensure_databases, postgres.id}
+             ]
+
+      assert {:netns_child_container, app.id} in Enum.drop(order, 3)
+    end
+
+    # Created, healthy, THEN its databases — an engine that is not up yet accepts nothing.
+    test "a child's databases are ensured only after it is healthy", ctx do
+      {:ok, _child} = Deployments.create_deployment(child_attrs(ctx.tenant, ctx.donor))
+
+      {:ok, release} = Deployments.redeploy_netns_stack(Deployments.get_deployment!(ctx.donor.id))
+
+      types =
+        release
+        |> Repo.preload(:steps)
+        |> Map.fetch!(:steps)
+        |> Enum.sort_by(& &1.position)
+        |> Enum.filter(&(&1.stage == :namespace))
+        |> Enum.map(& &1.type)
+
+      assert types == [:netns_child_container, :await_health, :ensure_databases]
     end
 
     # The donor's Traefik labels serve the CHILDREN's routes — that is the whole reason

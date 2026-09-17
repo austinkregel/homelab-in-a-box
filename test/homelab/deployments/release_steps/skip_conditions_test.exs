@@ -175,6 +175,32 @@ defmodule Homelab.Deployments.ReleaseSteps.SkipConditionsTest do
       assert {:skip, "this companion is not a datastore homelab can grant on"} =
                EnsureDatastoreGrants.skip?(step(), ctx(companion))
     end
+
+    # `image_override` is what a version bump writes, and it is what actually gets
+    # deployed. Judging the template instead skipped the step for the whole life of the
+    # override — silently, since a skip reads as a tidy grey line rather than a failure.
+    test "judges the image the datastore actually runs, not the one its template names" do
+      datastore =
+        insert(:deployment,
+          app_template: insert(:app_template, image: "scratch:latest"),
+          image_override: "mariadb:11"
+        )
+
+      assert :run = EnsureDatastoreGrants.skip?(step(), ctx(datastore))
+    end
+
+    # The same read in the other direction: an override AWAY from a datastore image must
+    # stop the step, or it runs a client that cannot speak to what is there.
+    test "skips when the override moves a datastore template off an engine" do
+      not_a_datastore =
+        insert(:deployment,
+          app_template: insert(:app_template, image: "mariadb:11"),
+          image_override: "nginx:1.27"
+        )
+
+      assert {:skip, "this companion is not a datastore homelab can grant on"} =
+               EnsureDatastoreGrants.skip?(step(), ctx(not_a_datastore))
+    end
   end
 
   # The one handler that reads the step rather than the facts.

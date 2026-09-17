@@ -11,6 +11,8 @@ defmodule HomelabWeb.Topology do
 
   import HomelabWeb.CoreComponents, only: [icon: 1]
 
+  alias Homelab.Deployments.Access
+
   # ============================================================
   # Readonly topology
   # ============================================================
@@ -701,9 +703,18 @@ defmodule HomelabWeb.Topology do
     %{gateway: gateway, services: services, infra: infra}
   end
 
+  # Read through `Access`, not off the template.
+  #
+  # Both of these decide what the node IS, not just what it is labelled: the image picks
+  # `classify_image/1`'s type, and the port roles promote a node to `:database` and give
+  # it its "Web" badge. `image_override` and `ports_override` are what a version bump and
+  # the Ports tab write, so a template read draws the topology of a deployment that is
+  # not running — a Postgres-by-override sitting in Services rather than Infrastructure,
+  # with the old image printed under it.
   defp deployment_to_node(d) do
-    node_type = classify_image(d.app_template.image)
-    ports = d.app_template.ports || []
+    image = Access.effective_image(d)
+    node_type = classify_image(image)
+    ports = Access.effective_ports(d) || []
     port_roles = ports |> Enum.map(fn p -> p["role"] end) |> Enum.filter(& &1) |> Enum.uniq()
     has_web? = "web" in port_roles
 
@@ -718,7 +729,7 @@ defmodule HomelabWeb.Topology do
       %{
         key: "image",
         label: "Image",
-        value: image_short(d.app_template.image),
+        value: image_short(image),
         icon: "hero-cube-mini"
       }
     ]
@@ -730,14 +741,16 @@ defmodule HomelabWeb.Topology do
         props
       end
 
+    exposure = Access.effective_exposure(d)
+
     props =
-      if d.app_template.exposure_mode do
+      if exposure do
         props ++
           [
             %{
               key: "exposure",
               label: "Exposure",
-              value: format_exposure(to_string(d.app_template.exposure_mode)),
+              value: format_exposure(to_string(exposure)),
               icon: "hero-lock-closed-mini"
             }
           ]
@@ -751,7 +764,7 @@ defmodule HomelabWeb.Topology do
       type: node_type,
       status: map_status(d.status),
       icon: type_icon(node_type),
-      subtitle: d.app_template.image,
+      subtitle: image,
       badge: if(has_web?, do: "Web", else: type_badge(node_type)),
       properties: props,
       navigate: "/deployments/#{d.id}"

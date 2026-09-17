@@ -3,6 +3,7 @@ defmodule HomelabWeb.SpaceLive do
 
   alias Homelab.Tenants
   alias Homelab.Deployments
+  alias Homelab.Deployments.Access
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -337,8 +338,11 @@ defmodule HomelabWeb.SpaceLive do
                   <p class="text-sm font-semibold text-base-content truncate">
                     {deployment.app_template.name}
                   </p>
+                  <%!-- The image this deployment RUNS, not the one its template names:
+                        an `image_override` (what a version bump writes) makes those two
+                        different, and the template's is then a value nothing is using. --%>
                   <p class="text-xs text-base-content/35 font-mono truncate">
-                    {deployment.app_template.image}
+                    {Access.effective_image(deployment)}
                   </p>
                 </div>
               </.link>

@@ -31,8 +31,8 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.{Access, Releases, SpecBuilder}
   alias Homelab.Deployments.Datastore.Grants
-  alias Homelab.Deployments.{Releases, SpecBuilder}
   alias Homelab.Deployments.ReleaseSteps.Conditions
 
   @default_port 3306
@@ -50,18 +50,19 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants do
   def run(step, ctx) do
     with {:ok, datastore} <- load_datastore(step),
          {:ok, app} <- load_app(step, ctx),
-         {:ok, engine} <- Grants.engine_for_image(datastore.app_template.image),
+         {:ok, engine} <- Grants.engine_for_image(datastore_image(datastore)),
          {:ok, creds} <-
            Grants.credentials_from_env(
              effective_env(app),
              effective_env(datastore),
              step.resource_handle["keys"] || %{}
-           ) do
+           ),
+         {:ok, host} <- reachable_host(datastore) do
       params =
         Map.merge(creds, %{
           engine: engine,
-          image: datastore.app_template.image,
-          host: SpecBuilder.service_name(datastore.tenant, datastore.app_template),
+          image: datastore_image(datastore),
+          host: host,
           port: @default_port,
           network: SpecBuilder.tenant_network(datastore.tenant)
         })
@@ -97,6 +98,27 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatastoreGrants do
         {:error, {:ensure_datastore_grants_failed, {:deployment_not_found, id}}}
     end
   end
+
+  # Where the throwaway client dials. A datastore in a netns donor's namespace has no
+  # name of its own — its port answers on the donor's address — so its own service name
+  # resolves to nothing and the failure reads as the datastore being down. Same
+  # resolution `EnsureDatabases` makes, for the same reason.
+  defp reachable_host(datastore) do
+    case SpecBuilder.reachable_service_name(datastore) do
+      nil -> {:error, {:grants_failed, datastore.id, :donor_not_found}}
+      host -> {:ok, host}
+    end
+  end
+
+  # The image the datastore is ACTUALLY running. `image_override` is what a version bump
+  # writes, and `DeployContainer` deploys `Access.effective_image/1`, so reading the
+  # template decided "is this a datastore" from a container that may not exist -- and
+  # handed `ContainerGrantsEngine` the wrong client image to run.
+  defp datastore_image(%{app_template: %{image: _}} = deployment),
+    do: Access.effective_image(deployment)
+
+  defp datastore_image(%{image_override: image}) when is_binary(image), do: image
+  defp datastore_image(_deployment), do: nil
 
   # The same merge DeployContainer performs, so we reconcile against exactly the
   # credentials the containers were handed -- not the template defaults.

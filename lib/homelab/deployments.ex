@@ -9,6 +9,7 @@ defmodule Homelab.Deployments do
   import Ecto.Query
   require Logger
   alias Homelab.Repo
+  alias Homelab.Deployments.Datastore
   alias Homelab.Deployments.Deployment
   alias Homelab.Deployments.Netns
   alias Homelab.Deployments.SpecBuilder
@@ -955,6 +956,32 @@ defmodule Homelab.Deployments do
     ]
   end
 
+  # Datastores first, everything else after, each group keeping its original order.
+  #
+  # A netns stack has no companion mechanism to lean on: `dependency_steps/2` deploys an
+  # app's datastore and awaits it healthy BEFORE the app, but that shape applies to
+  # companions, and a datastore sharing a donor's namespace is a child like any other.
+  # Children were planned in whatever order they were read, so a Postgres could be
+  # created after the Sonarr that needs it — and a `-arr` app that cannot reach its
+  # database on boot does not wait, it fails.
+  #
+  # Ordering here rather than in `namespace_steps/1` because it is a property of the SET:
+  # every datastore's create/health/`ensure_databases` completes before the first
+  # consumer is created, which is also what makes auto-created databases arrive in time
+  # to be used. Within each group the read order stands, so a stack with one datastore
+  # gets the obvious plan and nothing else moves.
+  defp infrastructure_first(children) do
+    {datastores, rest} = Enum.split_with(children, &datastore?/1)
+    datastores ++ rest
+  end
+
+  defp datastore?(%Deployment{} = deployment) do
+    case Access.effective_image(deployment) do
+      image when is_binary(image) -> Datastore.Engine.supported_image?(image)
+      _ -> false
+    end
+  end
+
   # One container living in the donor's namespace, created after the donor exists
   # because the donor's container id is part of the child's create payload.
   defp namespace_steps(%Deployment{} = child) do
@@ -967,6 +994,24 @@ defmodule Homelab.Deployments do
       %{
         stage: :namespace,
         type: :await_health,
+        resource_handle: %{"deployment_id" => child.id}
+      },
+      # A datastore is a datastore wherever it lives, and one behind a VPN donor is an
+      # ordinary shape — a Postgres in a media stack, reached over the donor's address.
+      #
+      # This was the one release shape that planned no `:ensure_databases` at all. The
+      # other two both do: `workload_steps/0` for a datastore deployed on its own, and
+      # `dependency_steps/2` for one deployed as an app's companion. A stack release is
+      # anchored on the DONOR, so the workload step targeted gluetun — which is not a
+      # datastore, so it skipped, correctly and uselessly — while the child that actually
+      # declared `HOMELAB_DATABASES` was never named by a step that could read it.
+      #
+      # The operator-visible symptom is the worst kind: `HOMELAB_DATABASES` set correctly,
+      # a green release every time, and a database that never appears. `skip?/2` makes
+      # this free for every child that is not a datastore.
+      %{
+        stage: :namespace,
+        type: :ensure_databases,
         resource_handle: %{"deployment_id" => child.id}
       }
     ]
@@ -1071,7 +1116,7 @@ defmodule Homelab.Deployments do
     donor =
       Repo.preload(donor, [:tenant, :app_template, network_children: [:app_template, :tenant]])
 
-    children = Netns.children(donor)
+    children = infrastructure_first(Netns.children(donor))
 
     # Each child's OWN name and URL: the donor carries its Traefik labels, but the name
     # being served belongs to the child.

@@ -90,8 +90,21 @@ defmodule Homelab.Deployments.ReleaseFacts do
   defp donor_kind?(_deployment), do: false
 
   # An engine `Datastore.Grants` can actually drive; anything else is left alone.
-  defp datastore?(%Deployment{app_template: %{image: image}}) when is_binary(image),
-    do: match?({:ok, _engine}, Datastore.Grants.engine_for_image(image))
+  #
+  # Asks `Access.effective_image/1`, not the template: `image_override` is what a version
+  # bump and every hand-edited image write to, and it is what `DeployContainer` actually
+  # deploys. Reading the template judged a container that may not be running — and got it
+  # wrong in the direction that says nothing, since a `false` here SKIPS the step with a
+  # tidy reason rather than failing it.
+  defp datastore?(%Deployment{app_template: %{image: _}} = deployment) do
+    case Access.effective_image(deployment) do
+      image when is_binary(image) ->
+        match?({:ok, _engine}, Datastore.Grants.engine_for_image(image))
+
+      _ ->
+        false
+    end
+  end
 
   defp datastore?(_deployment), do: false
 end

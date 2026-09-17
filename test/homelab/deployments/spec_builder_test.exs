@@ -466,6 +466,50 @@ defmodule Homelab.Deployments.SpecBuilderTest do
     end
   end
 
+  # Where OTHER containers dial this one — which for a netns child is not its own name.
+  describe "reachable_service_name/1" do
+    test "an ordinary deployment answers at its own service name" do
+      tenant = build_tenant(%{slug: "media"})
+      template = build_template(%{slug: "postgres"})
+      deployment = build_deployment(tenant, template)
+
+      assert SpecBuilder.reachable_service_name(deployment) == "homelab_media_postgres"
+    end
+
+    # The child has `NetworkMode: container:<donor>` and so no DNS entry of its own. Its
+    # port answers on the donor's address; dialling `homelab_media_postgres` reaches
+    # nothing, and the failure reads as the datastore being down.
+    test "a netns child answers at its donor's service name" do
+      tenant = build_tenant(%{slug: "media"})
+      donor_template = build_template(%{slug: "gluetun"})
+      donor = build_deployment(tenant, donor_template, %{id: 2})
+
+      child =
+        build_deployment(tenant, build_template(%{slug: "postgres"}), %{
+          id: 3,
+          network_parent_id: donor.id,
+          network_parent: donor
+        })
+
+      assert SpecBuilder.reachable_service_name(child) == "homelab_media_gluetun"
+    end
+
+    # Nil rather than the child's own name: a caller must be able to say "the donor is
+    # missing" instead of dialling a name that cannot resolve and reporting a timeout.
+    test "a child whose donor cannot be resolved returns nil" do
+      tenant = build_tenant(%{slug: "media"})
+
+      child =
+        build_deployment(tenant, build_template(%{slug: "postgres"}), %{
+          id: 3,
+          network_parent_id: 2,
+          network_parent: %Homelab.Deployments.Deployment{id: 2}
+        })
+
+      assert SpecBuilder.reachable_service_name(child) == nil
+    end
+  end
+
   # `deployment_network/2` and `deployment_network_for/2` are gone. They named
   # `homelab_<tenant>_<app>_net`, a network nothing was ever attached to — retained only
   # so publish/unpublish had something to connect Traefik to, which is why "severing a

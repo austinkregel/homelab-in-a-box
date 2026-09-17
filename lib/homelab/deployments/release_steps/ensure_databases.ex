@@ -35,8 +35,8 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatabases do
   require Logger
 
   alias Homelab.Deployments
+  alias Homelab.Deployments.{Access, Releases, SpecBuilder}
   alias Homelab.Deployments.Datastore.{Databases, Engine}
-  alias Homelab.Deployments.{Releases, SpecBuilder}
 
   @impl true
   def skip?(step, ctx) do
@@ -62,11 +62,12 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatabases do
          {:ok, engine} <- Engine.for_image(image(datastore)),
          env = effective_env(datastore),
          {:ok, databases} <- Databases.declared(env),
-         {:ok, admin_password} <- admin_password(engine, env, datastore) do
+         {:ok, admin_password} <- admin_password(engine, env, datastore),
+         {:ok, host} <- reachable_host(datastore) do
       params = %{
         engine: engine,
         image: image(datastore),
-        host: SpecBuilder.service_name(datastore.tenant, datastore.app_template),
+        host: host,
         port: engine.default_port(),
         network: SpecBuilder.tenant_network(datastore.tenant),
         admin_user: engine.admin_user(env),
@@ -99,8 +100,38 @@ defmodule Homelab.Deployments.ReleaseSteps.EnsureDatabases do
     end
   end
 
-  defp image(%{app_template: %{image: image}}), do: image
+  # The image the datastore is ACTUALLY running, not the one its template names.
+  #
+  # `image_override` is what a version bump and every hand-edited image write to, and
+  # `DeployContainer` deploys `Access.effective_image/1` — so reading the template here
+  # made this step reason about a container that may not exist. Two ways that bites, and
+  # the first is silent:
+  #
+  #   * `Engine.for_image/1` decides whether this deployment is a datastore at all. A
+  #     Postgres running by override on top of a template that names something else
+  #     resolves to `{:error, {:unsupported_engine, _}}`, and `skip?/2` then skips the
+  #     step with "not a datastore homelab can create databases on" — on every release,
+  #     for as long as the override stands. Nothing fails; the databases simply never
+  #     get created.
+  #   * `ContainerDatabaseEngine` runs THIS image as the throwaway client. The template's
+  #     image is the wrong client version at best, and the wrong engine's binary at worst.
+  # Delegated rather than re-derived, so the two can never disagree. The template-loaded
+  # clause comes first because `Access.effective_image/1` reads it whenever there is no
+  # override; the second covers an unloaded association, which used to fall through to
+  # `nil` here and must not start raising instead.
+  defp image(%{app_template: %{image: _}} = deployment), do: Access.effective_image(deployment)
+  defp image(%{image_override: image}) when is_binary(image), do: image
   defp image(_deployment), do: nil
+
+  # Where the throwaway client actually dials. A datastore in a netns donor's namespace
+  # has no name of its own, so its own service name resolves to nothing and the failure
+  # reads as "the database is down" rather than "we asked for the wrong name".
+  defp reachable_host(datastore) do
+    case SpecBuilder.reachable_service_name(datastore) do
+      nil -> {:error, {:ensure_databases_failed, datastore.id, :donor_not_found}}
+      host -> {:ok, host}
+    end
+  end
 
   # Without the admin credential nothing can be created, and failing here names the
   # missing variable rather than surfacing an authentication error from the client.
