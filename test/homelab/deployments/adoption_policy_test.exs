@@ -111,6 +111,55 @@ defmodule Homelab.Deployments.AdoptionPolicyTest do
     end
   end
 
+  # The plane's own infra is a THIRD state: not managed (no deployment row backs it, so
+  # claiming it would feed it to the reconciler's orphan sweep) and not foreign either.
+  describe "own_infrastructure?" do
+    @system %{"homelab.system" => "true"}
+
+    test "the label identifies a container the default name list cannot" do
+      # `container_name:` is the operator's to choose, so the name proves nothing.
+      assert AdoptionPolicy.own_infrastructure?("my-little-dashboard", @system)
+      refute AdoptionPolicy.own_infrastructure?("my-little-dashboard", %{})
+    end
+
+    test "the name list still catches infra provisioned before the label existed" do
+      assert AdoptionPolicy.own_infrastructure?("homelab-iab-postgres", %{})
+      assert AdoptionPolicy.own_infrastructure?("homelab-iab-oban-postgres", %{})
+      assert AdoptionPolicy.own_infrastructure?("homelab-in-a-box-postgres-1", %{})
+      assert AdoptionPolicy.own_infrastructure?("homelab-traefik", %{})
+    end
+
+    test "it does not claim a container that merely deploys through us" do
+      refute AdoptionPolicy.own_infrastructure?("sonarr", %{"homelab.managed" => "true"})
+      refute AdoptionPolicy.own_infrastructure?("homelab-mariadb", %{})
+      refute AdoptionPolicy.own_infrastructure?("homelab-postgres", %{})
+    end
+
+    test "labels of the wrong shape do not crash it" do
+      refute AdoptionPolicy.own_infrastructure?("sonarr", nil)
+      refute AdoptionPolicy.own_infrastructure?("sonarr")
+      refute AdoptionPolicy.own_infrastructure?(nil, %{})
+      assert AdoptionPolicy.own_infrastructure?("homelab-traefik", nil)
+    end
+
+    # The label is load-bearing, not decorative: an operator-named control plane with a
+    # bind under the adoption root would otherwise be offered for import — and importing
+    # it would quiesce and cut over the app doing the importing.
+    test "a labelled container is out of scope despite a bind under the root" do
+      mounts = [bind("/srv/homelab/hiab", "/data")]
+
+      assert AdoptionPolicy.service_in_scope?("my-little-dashboard", mounts)
+      refute AdoptionPolicy.service_in_scope?("my-little-dashboard", mounts, @system)
+    end
+
+    test "its mounts classify as out_of_scope, so no backup gate or sweep applies" do
+      m = bind("/srv/homelab/hiab/pg", "/var/lib/postgresql/data")
+
+      assert %{tier: :out_of_scope} =
+               AdoptionPolicy.classify_mount("my-little-dashboard", m, [m], @system)
+    end
+  end
+
   # An ADOPTED container is the adversarial case: it keeps the ORIGINAL name and mounts
   # the ORIGINAL bind under the adoption root, so it passes every scope test there is.
   # The label is the only thing that says "this one is already ours".

@@ -27,8 +27,9 @@ defmodule Homelab.Deployments.AdoptionPolicy do
 
   In-scope = the service has at least one **bind mount whose host path is under
   the adoption root** (default `<home>/homelab`, i.e. `~/homelab`; override with
-  `HOMELAB_ADOPTION_ROOT` or Settings → Infrastructure), AND its name is not in
-  the self-exclusion list, AND it is not **already managed by us**. Path matching
+  `HOMELAB_ADOPTION_ROOT` or Settings → Infrastructure), AND it is not the plane's
+  own infrastructure (`own_infrastructure?/2`), AND it is not **already managed by
+  us**. Path matching
   normalizes Docker Desktop's `/host_mnt` prefix so it works on both the Linux
   prod host and a macOS dev box.
 
@@ -54,6 +55,13 @@ defmodule Homelab.Deployments.AdoptionPolicy do
 
   # The plane's OWN containers — never candidates for adoption (it manages
   # itself). Matched as case-insensitive substrings of the container name.
+  #
+  # The name match is the fallback, not the primary signal: `homelab.system=true`
+  # is. A name list cannot cover a container the operator named themselves —
+  # `container_name:` in the compose file is theirs to choose — so the label is
+  # what makes `own_infrastructure?/2` right for an install that did not use the
+  # default names, and these patterns are what keeps it right for one provisioned
+  # before the label existed.
   @self_excluded_patterns ~w(homelab-iab homelab-in-a-box homelab-traefik)
 
   # Per-(service, container_path) overrides off the `:preserve` default. `service`
@@ -147,9 +155,37 @@ defmodule Homelab.Deployments.AdoptionPolicy do
   and is therefore a candidate for adoption. A mount is `%{source:, target:, type:}`.
   """
   def service_in_scope?(service_name, mounts, labels \\ %{}) when is_list(mounts) do
-    not already_managed?(labels) and not self_excluded?(service_name) and
+    not already_managed?(labels) and not own_infrastructure?(service_name, labels) and
       Enum.any?(mounts, &bind_under_root?/1)
   end
+
+  @doc """
+  True if this container is part of the plane ITSELF — the app, its two Postgres
+  containers, its Traefik.
+
+  This is a THIRD state, not a shade of either existing one, and it exists because
+  the two obvious ways to record it are both wrong:
+
+    * `homelab.managed=true` is an ownership claim the reconciler acts on. It lists
+      services filtered on that label and severs, then eventually `undeploy`s, any
+      of them with no matching deployment row (`Reconciler.sweep_orphans/4`). The
+      plane's own infra has no deployment row — it is provisioned imperatively over
+      the socket before the deployment machinery exists — so claiming it would make
+      the plane reap its own database and its own ingress.
+    * Leaving it unlabelled reads as *unmanaged*, which is the word for a foreign
+      container holding ports and disk. The operator sees their own control plane
+      listed as debris on its own page.
+
+  So: identified, never claimed. Out of adoption scope for the same reason as
+  before, and reported as what it is.
+  """
+  def own_infrastructure?(name, labels \\ %{})
+
+  def own_infrastructure?(name, labels) when is_map(labels) do
+    Map.get(labels, Homelab.Infrastructure.system_label()) == "true" or self_excluded?(name)
+  end
+
+  def own_infrastructure?(name, _labels), do: self_excluded?(name)
 
   @doc """
   True if this container is one WE deployed — it carries the `homelab.managed`

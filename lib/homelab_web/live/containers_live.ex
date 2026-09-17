@@ -16,6 +16,19 @@ defmodule HomelabWeb.ContainersLive do
 
   Scope is shown, not enforced: out-of-scope containers are listed and labelled, with
   the reason they were skipped, rather than filtered out again one layer further down.
+
+  ## Three states, not two
+
+  `managed` and `unmanaged` do not partition the daemon, because the plane's own
+  containers are neither. They carry no `homelab.managed` label — that label is an
+  ownership claim the reconciler acts on, and the app, its two Postgres containers
+  and its Traefik have no deployment row for it to match, so claiming them would
+  sever their routes and then reap the app's own database. Classified on the label
+  alone they landed under *unmanaged*, which is the page's word for a foreign
+  container holding ports and disk.
+
+  So `AdoptionPolicy.own_infrastructure?/2` supplies a third state, and the plane
+  reports itself as itself.
   """
 
   use HomelabWeb, :live_view
@@ -23,7 +36,9 @@ defmodule HomelabWeb.ContainersLive do
   alias Homelab.Deployments.{AdoptionDiscovery, AdoptionPolicy}
   alias Homelab.Tenants
 
-  @tabs ~w(unmanaged managed all)
+  @tabs ~w(unmanaged managed system all)
+
+  defp tabs, do: @tabs
 
   @impl true
   def mount(_params, _session, socket) do
@@ -106,16 +121,20 @@ defmodule HomelabWeb.ContainersLive do
 
   # --- derived views -------------------------------------------------------
 
-  defp visible(containers, "unmanaged"), do: Enum.reject(containers, & &1.managed)
+  defp visible(containers, "unmanaged"),
+    do: Enum.reject(containers, &(&1.managed or &1.system))
+
   defp visible(containers, "managed"), do: Enum.filter(containers, & &1.managed)
+  defp visible(containers, "system"), do: Enum.filter(containers, & &1.system)
   defp visible(containers, _all), do: containers
 
   defp count(containers, tab), do: containers |> visible(tab) |> length()
 
   # Why the adoption scan would skip this container. Only meaningful for unmanaged ones —
-  # a managed container is out of scope because we already own it, which is not a reason
-  # worth printing next to it.
+  # a managed container is out of scope because we already own it, and a system one
+  # because it IS us. Neither is a reason worth printing next to it.
   defp skip_reason(%{managed: true}), do: nil
+  defp skip_reason(%{system: true}), do: nil
   defp skip_reason(%{in_scope: true}), do: nil
 
   defp skip_reason(container) do
@@ -125,6 +144,11 @@ defmodule HomelabWeb.ContainersLive do
       "no folder mounts at all — named volumes only"
     end
   end
+
+  # The badge says which part of the plane this is, falling back to the bare state for
+  # a container provisioned before the role label existed.
+  defp system_role(%{system_role: role}) when is_binary(role), do: role
+  defp system_role(_container), do: "system"
 
   defp state_tone("running"), do: "bg-success/15 text-success"
   defp state_tone("exited"), do: "bg-base-content/10 text-base-content/50"
@@ -162,7 +186,10 @@ defmodule HomelabWeb.ContainersLive do
               <p class="text-sm text-base-content/50 max-w-2xl">
                 Everything running on the Docker daemon, whether or not this app put it there.
                 Containers without the <code class="text-xs">homelab.managed</code>
-                label are invisible to the rest of the UI.
+                label are invisible to the rest of the UI — including this app's own
+                infrastructure, which is listed here under
+                <span class="text-secondary">This app</span>
+                rather than as a stray.
               </p>
             </div>
             <button
@@ -189,7 +216,7 @@ defmodule HomelabWeb.ContainersLive do
         <%!-- Tabs --%>
         <div class="flex items-center gap-1 rounded-xl bg-base-200/60 p-1 w-fit">
           <button
-            :for={tab <- ~w(unmanaged managed all)}
+            :for={tab <- tabs()}
             type="button"
             phx-click="switch_tab"
             phx-value-tab={tab}
@@ -281,7 +308,14 @@ defmodule HomelabWeb.ContainersLive do
                           managed
                         </span>
                         <span
-                          :if={not container.managed and container.in_scope}
+                          :if={container.system}
+                          data-system-role={system_role(container)}
+                          class="px-2 py-0.5 rounded text-[10px] font-medium bg-secondary/15 text-secondary"
+                        >
+                          {system_role(container)}
+                        </span>
+                        <span
+                          :if={not container.managed and not container.system and container.in_scope}
                           class="px-2 py-0.5 rounded text-[10px] font-medium bg-info/15 text-info"
                         >
                           importable
@@ -417,11 +451,18 @@ defmodule HomelabWeb.ContainersLive do
 
   defp tab_label("unmanaged"), do: "Unmanaged"
   defp tab_label("managed"), do: "Managed"
+  defp tab_label("system"), do: "This app"
   defp tab_label("all"), do: "All"
 
   defp empty_message("unmanaged"),
-    do: "Nothing unmanaged — every container on this daemon carries the homelab.managed label."
+    do:
+      "Nothing unmanaged — every container on this daemon is either deployed by this app or part of it."
 
   defp empty_message("managed"), do: "This app has not deployed any containers yet."
+
+  defp empty_message("system"),
+    do:
+      "No system containers found, which is unexpected — this app runs on at least a database and a reverse proxy."
+
   defp empty_message(_), do: "The daemon reports no containers at all."
 end

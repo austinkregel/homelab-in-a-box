@@ -43,6 +43,8 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
           user: String.t() | nil,
           restart_policy: String.t() | nil,
           managed: boolean(),
+          system: boolean(),
+          system_role: String.t() | nil,
           compose_project: String.t() | nil,
           compose_service: String.t() | nil,
           command: [String.t()] | nil,
@@ -107,6 +109,9 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       cond do
         capture.in_scope -> capture
         capture.managed -> capture
+        # The dev compose project IS the plane, so a single in-scope sibling would
+        # otherwise promote the app and its databases into adoption scope.
+        capture.system -> capture
         is_nil(capture.compose_project) -> capture
         not MapSet.member?(anchors, capture.compose_project) -> capture
         true -> promote(capture)
@@ -167,6 +172,13 @@ defmodule Homelab.Deployments.AdoptionDiscovery do
       user: blank_to_nil(Map.get(config, "User")),
       restart_policy: host_config |> Map.get("RestartPolicy", %{}) |> Map.get("Name"),
       managed: AdoptionPolicy.already_managed?(labels),
+      # The plane itself, which is neither managed nor foreign. Never overlaps
+      # `managed`: labelling the plane's own infra as managed would hand it to the
+      # reconciler's orphan sweep.
+      system: AdoptionPolicy.own_infrastructure?(name, labels),
+      # Which part of the plane. Absent on a container provisioned before the label
+      # existed, which `own_infrastructure?/2` still recognizes by name.
+      system_role: blank_to_nil(Map.get(labels, "homelab.system.role")),
       # The stack this container belongs to, and the name its SIBLINGS reach it by.
       # `compose_service` is the load-bearing one: an app's config says `DB_HOST=mysql`,
       # not `DB_HOST=marketplace-mysql-1`. Adopting a container renames it, so without

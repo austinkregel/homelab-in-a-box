@@ -180,6 +180,104 @@ defmodule HomelabWeb.ContainersLiveTest do
       assert html =~ "ours"
       refute html =~ "theirs"
     end
+
+    # The plane's own infra carries no `homelab.managed` label ON PURPOSE — the
+    # reconciler severs and then reaps any managed container with no deployment row,
+    # and these have none. So it must not appear here either.
+    test "does not include this app's own infrastructure", %{conn: conn} do
+      stub_daemon([
+        [id: "sss111", name: "homelab-traefik", labels: %{"homelab.system" => "true"}],
+        [id: "sss222", name: "homelab-iab-postgres"]
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/containers?tab=managed")
+      html = render(view)
+
+      refute html =~ "homelab-traefik"
+      refute html =~ "homelab-iab-postgres"
+    end
+  end
+
+  # The whole point of the third state: before it existed, the app and its databases
+  # were classified on the `homelab.managed` label alone and so landed under
+  # *unmanaged*, i.e. as foreign containers holding ports and disk.
+  describe "this app's own containers" do
+    @system %{"homelab.system" => "true", "homelab.system.role" => "reverse-proxy"}
+
+    test "are not listed as unmanaged", %{conn: conn} do
+      stub_daemon([
+        [id: "sss111", name: "homelab-traefik", labels: @system],
+        [id: "uuu222", name: "redis-stray", mounts: [named_volume("d", "/data")]]
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/containers")
+      html = render(view)
+
+      refute html =~ "homelab-traefik"
+      assert html =~ "redis-stray"
+    end
+
+    test "are listed on their own tab, badged with their role", %{conn: conn} do
+      stub_daemon([
+        [id: "sss111", name: "homelab-traefik", labels: @system],
+        [id: "uuu222", name: "redis-stray"]
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/containers?tab=system")
+
+      assert render(view) =~ "homelab-traefik"
+      refute render(view) =~ "redis-stray"
+      assert has_element?(view, ~s(span[data-system-role="reverse-proxy"]))
+    end
+
+    # `container_name:` is the operator's to choose, so the default name list cannot be
+    # the only signal — otherwise a renamed control plane reads as a stray again.
+    test "are recognized by the label even under a name nobody could predict", %{conn: conn} do
+      stub_daemon([
+        [
+          id: "sss333",
+          name: "my-little-dashboard",
+          labels: %{"homelab.system" => "true", "homelab.system.role" => "control-plane"}
+        ]
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/containers?tab=system")
+
+      assert render(view) =~ "my-little-dashboard"
+      assert has_element?(view, ~s(span[data-system-role="control-plane"]))
+    end
+
+    # Bootstrap provisioned the databases with no labels at all before the label
+    # existed, and an upgrade does not recreate them.
+    test "are recognized by name when they predate the label", %{conn: conn} do
+      stub_daemon([[id: "sss444", name: "homelab-iab-oban-postgres"]])
+
+      {:ok, view, _html} = live(conn, ~p"/containers?tab=system")
+
+      assert render(view) =~ "homelab-iab-oban-postgres"
+      # No role label to read, so the badge falls back to the bare state.
+      assert has_element?(view, ~s(span[data-system-role="system"]))
+    end
+
+    # An in-root bind makes a container importable, and importing the control plane
+    # would quiesce and cut over the app doing the importing.
+    test "are never offered for import, even with a bind under the adoption root", %{conn: conn} do
+      stub_daemon([
+        [
+          id: "sss555",
+          name: "my-little-dashboard",
+          labels: %{"homelab.system" => "true"},
+          mounts: [bind("/srv/homelab/hiab", "/data")]
+        ]
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/containers?tab=all")
+      html = render(view)
+
+      assert html =~ "my-little-dashboard"
+      refute html =~ "can be imported now"
+      refute html =~ "importable"
+    end
   end
 
   describe "expanding a container" do

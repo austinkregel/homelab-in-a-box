@@ -399,6 +399,20 @@ defmodule Homelab.Bootstrap do
     end
   end
 
+  # Marks a container as part of the plane itself. Deliberately NOT
+  # `homelab.managed` — that label is an ownership claim the reconciler acts on,
+  # and these containers have no deployment row for it to match, so it would sever
+  # and then reap the app's own database. `homelab.system` only identifies.
+  #
+  # Without it these read as *unmanaged* on the Containers page, i.e. as foreign
+  # containers holding ports and disk, which is the one thing they are not.
+  defp system_labels(role) do
+    %{
+      Homelab.Infrastructure.system_label() => "true",
+      "homelab.system.role" => role
+    }
+  end
+
   defp create_postgres(password) do
     Logger.info("Bootstrap: pulling #{@postgres_image}...")
 
@@ -418,6 +432,7 @@ defmodule Homelab.Bootstrap do
         "POSTGRES_PASSWORD=#{password}",
         "POSTGRES_DB=#{@postgres_db}"
       ],
+      "Labels" => system_labels("database"),
       "HostConfig" => %{
         "NetworkMode" => @network,
         "Mounts" => [
@@ -526,6 +541,7 @@ defmodule Homelab.Bootstrap do
         "POSTGRES_PASSWORD=#{password}",
         "POSTGRES_DB=#{@oban_postgres_db}"
       ],
+      "Labels" => system_labels("queue-database"),
       "HostConfig" => %{
         "NetworkMode" => @network,
         "Mounts" => [

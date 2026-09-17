@@ -117,6 +117,15 @@ defmodule Homelab.BootstrapTest do
 
       assert_received {:post, "/containers/create?name=homelab-iab-postgres", create_body}
       assert "POSTGRES_DB=homelab_prod" in create_body["Env"]
+
+      # Identifies the container as part of the plane, so its own Containers page
+      # does not report it as an unmanaged stray.
+      assert create_body["Labels"]["homelab.system"] == "true"
+      assert create_body["Labels"]["homelab.system.role"] == "database"
+
+      # And deliberately NOT managed: the reconciler severs and then removes any
+      # managed container with no deployment row, and this one has none.
+      refute Map.has_key?(create_body["Labels"], "homelab.managed")
     end
 
     test "maps a network check failure to {:network_check_failed, _}" do

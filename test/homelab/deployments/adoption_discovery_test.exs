@@ -285,6 +285,102 @@ defmodule Homelab.Deployments.AdoptionDiscoveryTest do
     assert Enum.all?(cap.mounts, &(&1.tier == :out_of_scope))
   end
 
+  # `managed` and `system` are disjoint by construction: the plane's own infra has no
+  # deployment row, so claiming it with `homelab.managed` would hand it to the
+  # reconciler's orphan sweep.
+  test "the plane's own container captures as system, never as managed" do
+    cap =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "Name" => "/my-little-dashboard",
+          "Config" => %{
+            "Image" => "ghcr.io/austinkregel/homelab-in-a-box:latest",
+            "User" => "",
+            "Labels" => %{
+              "homelab.system" => "true",
+              "homelab.system.role" => "control-plane"
+            }
+          }
+        })
+      )
+
+    assert cap.system
+    assert cap.system_role == "control-plane"
+    refute cap.managed
+    refute cap.in_scope
+  end
+
+  test "an ordinary container captures as neither, and carries no role" do
+    cap = AdoptionDiscovery.capture(inspect_json(%{"Name" => "/sonarr"}))
+
+    refute cap.system
+    assert cap.system_role == nil
+    refute cap.managed
+  end
+
+  # Sibling promotion reaches every bind-less container in a project that has one
+  # in-scope anchor. The plane deployed under a compose project of the operator's
+  # naming is exactly that shape, and the name list cannot see it — so without the
+  # `system` guard an in-scope sibling promotes the control plane into adoption scope,
+  # and importing it would quiesce and cut over the app doing the importing.
+  test "a compose sibling cannot promote the plane's own infra into scope" do
+    plane =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "Id" => "plane",
+          "Name" => "/dashboard-db-1",
+          "Config" => %{
+            "Image" => "timescale/timescaledb:2.17.2-pg17",
+            "User" => "",
+            "Labels" => %{
+              "homelab.system" => "true",
+              "homelab.system.role" => "database",
+              "com.docker.compose.project" => "dashboard"
+            }
+          },
+          "Mounts" => [
+            %{
+              "Type" => "volume",
+              "Name" => "dashboard_pgdata",
+              "Source" => "/var/lib/docker/volumes/dashboard_pgdata/_data",
+              "Destination" => "/var/lib/postgresql/data",
+              "RW" => true
+            }
+          ]
+        })
+      )
+
+    anchor =
+      AdoptionDiscovery.capture(
+        inspect_json(%{
+          "Id" => "anchor",
+          "Name" => "/dashboard-web-1",
+          "Config" => %{
+            "Image" => "example:latest",
+            "User" => "",
+            "Labels" => %{"com.docker.compose.project" => "dashboard"}
+          },
+          "Mounts" => [
+            %{
+              "Type" => "bind",
+              "Source" => "/srv/homelab/dashboard",
+              "Destination" => "/data",
+              "RW" => true
+            }
+          ]
+        })
+      )
+
+    assert anchor.in_scope
+
+    expanded = AdoptionDiscovery.expand_compose_scope([plane, anchor])
+    promoted = Enum.find(expanded, &(&1.name == "dashboard-db-1"))
+
+    refute promoted.in_scope
+    assert promoted.system
+    assert Enum.all?(promoted.mounts, &(&1.tier == :out_of_scope))
+  end
+
   describe "inspect_container/1 (mocked daemon)" do
     test "GETs /containers/{id}/json and normalizes a volume mount end-to-end" do
       expect(Homelab.Mocks.DockerClient, :get, fn "/containers/homelab-mariadb/json", _opts ->

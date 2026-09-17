@@ -20,6 +20,15 @@ services:
     image: ghcr.io/austinkregel/homelab-in-a-box:${HOMELAB_IMAGE_TAG:-latest}
     container_name: homelab
     restart: unless-stopped
+    # Marks this container as the plane itself, so its own Containers page reports
+    # it as a system service rather than as an unmanaged stray. The app cannot add
+    # this to its own already-running container, so it has to be declared here.
+    #
+    # NOT `homelab.managed` — that label is an ownership claim the reconciler acts
+    # on, and it would sever this container's route and then remove it.
+    labels:
+      homelab.system: "true"
+      homelab.system.role: "control-plane"
     env_file:
       - .env
     environment:
