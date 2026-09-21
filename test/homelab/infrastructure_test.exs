@@ -26,6 +26,51 @@ defmodule Homelab.InfrastructureTest do
       assert yaml =~ "- \"*.homelab.example.com\""
       assert yaml =~ "- url: \"http://homelab-iab:4000\""
     end
+
+    # The window this exists for: a domain bought this morning. Redirecting to an
+    # entrypoint that has no certificate yet makes the control plane unreachable, so
+    # until one is issued the plane answers on plain HTTP.
+    test "serves a plain web router while HTTPS is not being enforced" do
+      yaml =
+        Infrastructure.self_ingress_yaml("homelab.example.com", "http://homelab-iab:4000",
+          plain?: true,
+          tls?: true
+        )
+
+      assert yaml =~ "homelab-http:"
+      assert yaml =~ "- web"
+      # Both halves present: HTTP now, HTTPS the moment the cert lands.
+      assert yaml =~ "- websecure"
+    end
+
+    # A router naming a certResolver the static config does not define is one Traefik
+    # disables outright, so while ACME is held back there must be no TLS router at all.
+    test "omits the TLS router entirely while ACME is held back" do
+      yaml =
+        Infrastructure.self_ingress_yaml("homelab.example.com", "http://homelab-iab:4000",
+          plain?: true,
+          tls?: false
+        )
+
+      refute yaml =~ "certResolver"
+      refute yaml =~ "- websecure"
+      assert yaml =~ "- web"
+      # Still routable, or the box is unreachable by name in exactly the window this
+      # whole mechanism exists to keep it reachable in.
+      assert yaml =~ "- url: \"http://homelab-iab:4000\""
+    end
+
+    test "drops the plain router once HTTPS is enforced" do
+      yaml =
+        Infrastructure.self_ingress_yaml("homelab.example.com", "http://homelab-iab:4000",
+          plain?: false,
+          tls?: true
+        )
+
+      refute yaml =~ "homelab-http:"
+      assert yaml =~ "- websecure"
+      assert yaml =~ "certResolver: letsencrypt"
+    end
   end
 
   describe "internal_tls_yaml/0" do

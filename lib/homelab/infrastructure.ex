@@ -7,6 +7,7 @@ defmodule Homelab.Infrastructure do
   require Logger
   alias Homelab.Deployments.SpecBuilder
   alias Homelab.Docker.Client
+  alias Homelab.Networking.DnsReadiness
 
   @system_label "homelab.system"
   # The plane's own backbone (system services + the Traefik<->deployment routing
@@ -73,8 +74,13 @@ defmodule Homelab.Infrastructure do
         "--providers.file.watch=true",
         "--entryPoints.web.address=:80",
         "--entryPoints.websecure.address=:443",
-        "--entryPoints.web.http.redirections.entryPoint.to=websecure",
-        "--entryPoints.web.http.redirections.entryPoint.scheme=https",
+        # The HTTP->HTTPS redirect is NOT here. It is appended by
+        # `build_traefik_template/0` once a real certificate has been observed —
+        # see `tls_enforced?/0`. Redirecting before then sends every visitor to an
+        # entrypoint serving Traefik's built-in self-signed default, which browsers
+        # refuse, so a box whose domain is still propagating is unreachable rather
+        # than merely unencrypted.
+        #
         # Every router on the public entrypoint inherits the hold page's `errors`
         # middleware, which is what covers the window a router-level trick cannot see:
         # the container is up, so its labels exist and its route is live, but nothing is
@@ -280,32 +286,69 @@ defmodule Homelab.Infrastructure do
   every dynamic value is double-quoted — `*.<domain>` in particular MUST be quoted
   or YAML reads the leading `*` as an alias.
   """
-  def self_ingress_yaml(base_domain, service_url) do
+  def self_ingress_yaml(base_domain, service_url, opts \\ []) do
     r = @self_ingress_router
+    tls? = Keyword.get(opts, :tls?, acme_ready?() or tls_enforced?())
+    plain? = Keyword.get(opts, :plain?, not tls_enforced?())
 
     Enum.join(
-      [
-        "http:",
-        "  routers:",
-        "    #{r}:",
-        "      rule: \"Host(`#{base_domain}`)\"",
-        "      entryPoints:",
-        "        - websecure",
-        "      service: #{r}",
-        "      tls:",
-        "        certResolver: letsencrypt",
-        "        domains:",
-        "          - main: \"#{base_domain}\"",
-        "            sans:",
-        "              - \"*.#{base_domain}\"",
-        "  services:",
-        "    #{r}:",
-        "      loadBalancer:",
-        "        servers:",
-        "          - url: \"#{service_url}\""
-      ],
+      ["http:", "  routers:"] ++
+        plain_router(r, base_domain, plain?) ++
+        tls_router(r, base_domain, tls?) ++
+        [
+          "  services:",
+          "    #{r}:",
+          "      loadBalancer:",
+          "        servers:",
+          "          - url: \"#{service_url}\""
+        ],
       "\n"
     ) <> "\n"
+  end
+
+  # A router carrying `tls` is matched on TLS connections ONLY, so one router listed on
+  # both entrypoints cannot serve plain HTTP as well — it takes two. This is the one
+  # that makes the control plane reachable before a certificate exists, which is the
+  # whole point of not redirecting yet.
+  #
+  # It is dropped once the redirect latches on. That is belt-and-braces rather than
+  # load-bearing: entrypoint-level redirection happens before router matching, so it
+  # would already be unreachable. Leaving an HTTP route to the control plane defined
+  # when nothing can reach it is the kind of thing that is true until someone changes
+  # the entrypoint.
+  defp plain_router(_r, _base_domain, false), do: []
+
+  defp plain_router(r, base_domain, true) do
+    [
+      "    #{r}-http:",
+      "      rule: \"Host(`#{base_domain}`)\"",
+      "      entryPoints:",
+      "        - web",
+      "      service: #{r}"
+    ]
+  end
+
+  # Asks for the wildcard (`main` + `*.base_domain`) so every deployment beneath the
+  # base domain is covered by the one certificate. Omitted entirely while ACME is held
+  # back: a router naming a `certResolver` that the static config does not define is
+  # one Traefik disables, which would take the HTTPS side down rather than leave it
+  # serving the default cert.
+  defp tls_router(_r, _base_domain, false), do: []
+
+  defp tls_router(r, base_domain, true) do
+    [
+      "    #{r}:",
+      "      rule: \"Host(`#{base_domain}`)\"",
+      "      entryPoints:",
+      "        - websecure",
+      "      service: #{r}",
+      "      tls:",
+      "        certResolver: letsencrypt",
+      "        domains:",
+      "          - main: \"#{base_domain}\"",
+      "            sans:",
+      "              - \"*.#{base_domain}\""
+    ]
   end
 
   # The serversTransport a route uses when its backend speaks TLS. One name, defined by
@@ -600,71 +643,240 @@ defmodule Homelab.Infrastructure do
   @dns_token_env "TRAEFIK_DNS_API_TOKEN"
   @dns_provider "cloudflare"
 
-  # Builds the Traefik template with a wildcard DNS-01 ACME resolver. The DNS
-  # provider API token is supplied by the operator via the #{@dns_token_env}
-  # environment variable and injected as container env — never HTTP-01, and
-  # never provisioned without a token.
+  # The DNS-01 credential, in precedence order. `acme_email` two functions down is
+  # already read from Settings, so ACME config living in the database is the existing
+  # shape here rather than a new one.
+  #
+  #   1. #{@dns_token_env} — an env var set at boot still wins, so an instance that
+  #      supplies it from a Docker/Swarm secret is unaffected by anything below.
+  #   2. `acme_dns_api_token` — set in the UI, for an operator whose Cloudflare
+  #      credential for ACME is not the one they sync domains with.
+  #   3. `cloudflare_api_token` — the token the DNS & Domains page already collects.
+  #
+  # (3) is the case worth naming. lego needs `Zone:Zone:Read` + `Zone:DNS:Edit`, which
+  # is exactly the union of what this token is already used for when Cloudflare is the
+  # public DNS provider: `DnsProviders.Cloudflare` POSTs, PUTs and DELETEs records with
+  # it, and `Registrars.Cloudflare` lists zones with it. Reusing it also moves the
+  # secret nowhere new — the env var already ends up in Traefik's environment as
+  # `CF_DNS_API_TOKEN` either way.
+  #
+  # The exception is a registrar-ONLY configuration, where a `Zone:Read` token is a
+  # legitimate thing to have stored: handing that to lego yields ACME 403s. That is why
+  # (2) exists as somewhere to put the right credential without disturbing (3).
+  #
+  # `get_cached/2` rather than `get/2`, because this runs before the branch that decides
+  # whether Traefik can be provisioned at all, and that decision must not depend on the
+  # Repo being reachable: `GatewayProvisioner.safe_ensure_traefik/0` rescues, so a DB
+  # error here would come back as an opaque `{:error, message}` in place of
+  # `:dns_token_missing` and the "no token" steady state would read as a fault. The
+  # cache is authoritative for this key in practice — `set/3` writes through it, so a
+  # token saved in the UI is visible to the very next tick, and `warm_cache/0` reloads
+  # every setting at boot.
+  defp dns_api_token do
+    case dns_token_source() do
+      {_source, token} -> token
+      nil -> nil
+    end
+  end
+
+  @doc """
+  Which credential `ensure_traefik/0` would use for DNS-01 right now, as
+  `{source, token}` — or `nil` when no source holds one and Traefik cannot be
+  provisioned.
+
+  Public so the settings UI can name the source in effect rather than restating this
+  precedence and drifting from it.
+  """
+  @spec dns_token_source() :: {:env | :acme_setting | :cloudflare_setting, String.t()} | nil
+  def dns_token_source do
+    cond do
+      token = presence(System.get_env(@dns_token_env)) ->
+        {:env, token}
+
+      token = presence(Homelab.Settings.get_cached("acme_dns_api_token")) ->
+        {:acme_setting, token}
+
+      token = presence(Homelab.Settings.get_cached("cloudflare_api_token")) ->
+        {:cloudflare_setting, token}
+
+      true ->
+        nil
+    end
+  end
+
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_), do: nil
+
+  @tls_enforced_setting "tls_enforced"
+
+  @doc """
+  Whether the HTTP->HTTPS redirect is switched on.
+
+  A latch, not a live reading. `CertManager` sets it the first time it observes a real
+  certificate on the base domain, and nothing clears it automatically: a cert that later
+  breaks is a reason to shout, never a reason to quietly start serving the control plane
+  over plain HTTP to whoever is on the network.
+
+  Clearing it is an explicit act — Settings -> Danger Zone.
+  """
+  @spec tls_enforced?() :: boolean()
+  def tls_enforced?, do: Homelab.Settings.get_cached(@tls_enforced_setting) == "true"
+
+  @doc "The settings key holding the TLS-enforcement latch."
+  def tls_enforced_setting, do: @tls_enforced_setting
+
+  @doc """
+  Force-recreates Traefik from the current template, whatever the drift check thinks.
+
+  `ensure_traefik/0` cannot do this. Its drift test is `desired ⊄ actual`, which is
+  what makes every flag this module adds safe to add — but it also means a template
+  that has LOST a flag is still a subset of what is running, so the proxy is left
+  alone. Removing the HTTP->HTTPS redirect is exactly that case, and it is the only
+  caller: everything else here only ever grows the command.
+  """
+  @spec recreate_gateway() :: {:ok, term()} | {:error, term()}
+  def recreate_gateway do
+    with {:ok, template} <- build_traefik_template() do
+      Client.delete("/containers/homelab-traefik?force=true")
+      result = create_system_container("homelab-traefik", template)
+      _ = ensure_self_ingress()
+      result
+    end
+  end
+
+  @doc """
+  Records that a real certificate has been seen, switching the redirect on from the
+  next `ensure_traefik/0` onwards. Idempotent.
+  """
+  def enforce_tls! do
+    if tls_enforced?() do
+      :ok
+    else
+      Logger.info("Infrastructure: certificate confirmed — enabling the HTTP->HTTPS redirect")
+      Homelab.Settings.set(@tls_enforced_setting, "true", category: "tls")
+      :ok
+    end
+  end
+
+  defp redirect_cmd do
+    if tls_enforced?() do
+      [
+        "--entryPoints.web.http.redirections.entryPoint.to=websecure",
+        "--entryPoints.web.http.redirections.entryPoint.scheme=https"
+      ]
+    else
+      []
+    end
+  end
+
+  @doc """
+  Whether to hand Traefik an ACME resolver at all.
+
+  Gated on the base domain resolving, because Let's Encrypt rate-limits *failures*
+  (5/hour/hostname) and a domain that is still propagating cannot be validated by any
+  challenge type. Attempting anyway spends the budget that the successful attempt will
+  need. See `Homelab.Networking.DnsReadiness`, which fails open.
+  """
+  @spec acme_ready?() :: boolean()
+  def acme_ready? do
+    base = Homelab.Config.base_domain()
+
+    if DnsReadiness.resolves?(base) do
+      true
+    else
+      Logger.info(
+        "Infrastructure: #{inspect(base)} does not resolve yet — holding ACME back so a " <>
+          "propagating domain does not spend the Let's Encrypt failure budget. Serving " <>
+          "plain HTTP until it does."
+      )
+
+      false
+    end
+  end
+
+  # The DNS-01 resolver flags, appended only when `acme_ready?/0` says the domain can
+  # actually be validated.
+  defp acme_cmd do
+    # Let's Encrypt rejects a malformed contact, so this must be a real email.
+    # Prefer the operator-set `acme_email`; otherwise default to admin@<domain>
+    # (NOT the bare domain, which isn't an email and fails account registration).
+    acme_email =
+      Homelab.Settings.get("acme_email") ||
+        "admin@#{Homelab.Settings.get("base_domain", "homelab.local")}"
+
+    # The recursive resolver(s) lego uses for its DNS-01 propagation pre-check.
+    # On a DNSSEC-signed zone (e.g. any Cloudflare zone) the provider returns a
+    # SIGNED "no-TXT" NSEC for the challenge name, which validating resolvers
+    # like 1.1.1.1 cache for the SOA-minimum TTL (often 1800s) — far longer than
+    # the pre-check timeout — so the check never sees the freshly-created TXT and
+    # issuance stalls. Point this at the zone's AUTHORITATIVE nameservers, which
+    # never serve a stale negative for their own records, e.g.
+    #   TRAEFIK_DNS_RESOLVERS=sid.ns.cloudflare.com:53,elle.ns.cloudflare.com:53
+    resolvers = System.get_env("TRAEFIK_DNS_RESOLVERS", "1.1.1.1:53")
+
+    [
+      "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
+      "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
+      "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
+      "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
+    ] ++ propagation_check_cmd()
+  end
+
+  # lego does a LOCAL "has the TXT propagated?" pre-check before telling LE to
+  # validate. On a host with a caching/intercepting resolver (Pi-hole,
+  # systemd-resolved — common in a homelab) that pre-check reads stale/negative
+  # answers and times out, even though the record is live at the authoritative
+  # NS. The REAL validation is done by Let's Encrypt's servers against the
+  # authoritative NS directly (never the local cache), so skipping the local
+  # pre-check is safe here. Enable with TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK=true.
+  #
+  # With the active check disabled, lego notifies LE after a FIXED delay instead of
+  # polling. The default is 0s, which rushes LE before Cloudflare has served the
+  # freshly-written TXT — so a base+wildcard cert (both at `_acme-challenge.<domain>`)
+  # can validate one and 403 the other. A short delay lets both records propagate to
+  # the authoritative NS first. Defaults to 30s whenever the check is disabled;
+  # override with TRAEFIK_DNS_DELAY_BEFORE_CHECK.
+  defp propagation_check_cmd do
+    disable_check? = System.get_env("TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK") in ~w(true 1)
+    delay = System.get_env("TRAEFIK_DNS_DELAY_BEFORE_CHECK") || if(disable_check?, do: "30s")
+
+    disable_flag =
+      if disable_check?,
+        do: ["--certificatesresolvers.letsencrypt.acme.dnschallenge.disablepropagationcheck=true"],
+        else: []
+
+    delay_flag =
+      if delay in [nil, ""],
+        do: [],
+        else: ["--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=#{delay}"]
+
+    disable_flag ++ delay_flag
+  end
+
+  # Builds the Traefik template with a wildcard DNS-01 ACME resolver. The DNS provider
+  # API token comes from `dns_api_token/0` and is injected as container env — never
+  # HTTP-01, and never provisioned without a token.
   defp build_traefik_template do
-    case System.get_env(@dns_token_env) do
+    case dns_api_token() do
       token when is_binary(token) and token != "" ->
-        # Let's Encrypt rejects a malformed contact, so this must be a real email.
-        # Prefer the operator-set `acme_email`; otherwise default to admin@<domain>
-        # (NOT the bare domain, which isn't an email and fails account registration).
-        acme_email =
-          Homelab.Settings.get("acme_email") ||
-            "admin@#{Homelab.Settings.get("base_domain", "homelab.local")}"
-
-        # The recursive resolver(s) lego uses for its DNS-01 propagation pre-check.
-        # On a DNSSEC-signed zone (e.g. any Cloudflare zone) the provider returns a
-        # SIGNED "no-TXT" NSEC for the challenge name, which validating resolvers
-        # like 1.1.1.1 cache for the SOA-minimum TTL (often 1800s) — far longer than
-        # the pre-check timeout — so the check never sees the freshly-created TXT and
-        # issuance stalls. Point this at the zone's AUTHORITATIVE nameservers, which
-        # never serve a stale negative for their own records, e.g.
-        #   TRAEFIK_DNS_RESOLVERS=sid.ns.cloudflare.com:53,elle.ns.cloudflare.com:53
-        resolvers = System.get_env("TRAEFIK_DNS_RESOLVERS", "1.1.1.1:53")
-
-        # lego does a LOCAL "has the TXT propagated?" pre-check before telling LE to
-        # validate. On a host with a caching/intercepting resolver (Pi-hole,
-        # systemd-resolved — common in a homelab) that pre-check reads stale/negative
-        # answers and times out, even though the record is live at the authoritative
-        # NS. The REAL validation is done by Let's Encrypt's servers against the
-        # authoritative NS directly (never the local cache), so skipping the local
-        # pre-check is safe here. Enable with TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK=true.
-        disable_check? = System.get_env("TRAEFIK_DNS_DISABLE_PROPAGATION_CHECK") in ~w(true 1)
-
-        # With the active check disabled, lego notifies LE after a FIXED delay
-        # instead of polling. The default is 0s, which rushes LE before Cloudflare
-        # has served the freshly-written TXT — so a base+wildcard cert (both at
-        # _acme-challenge.<domain>) can validate one and 403 the other. A short delay
-        # lets both records propagate to the authoritative NS first. Defaults to 30s
-        # whenever the check is disabled; override with TRAEFIK_DNS_DELAY_BEFORE_CHECK.
-        delay = System.get_env("TRAEFIK_DNS_DELAY_BEFORE_CHECK") || if(disable_check?, do: "30s")
-
-        acme_cmd =
-          [
-            "--certificatesresolvers.letsencrypt.acme.email=#{acme_email}",
-            "--certificatesresolvers.letsencrypt.acme.dnschallenge=true",
-            "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=#{@dns_provider}",
-            "--certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=#{resolvers}"
-          ] ++
-            if(disable_check?,
-              do: [
-                "--certificatesresolvers.letsencrypt.acme.dnschallenge.disablepropagationcheck=true"
-              ],
-              else: []
-            ) ++
-            if(delay in [nil, ""],
-              do: [],
-              else: [
-                "--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=#{delay}"
-              ]
-            )
+        # Both of these are additive, and that is load-bearing. `traefik_config_drifted?/2`
+        # is `desired ⊄ actual`, so a template that GAINS flags forces the recreate that
+        # applies them, while one that loses them is still a subset and leaves the running
+        # proxy alone. Every transition here is therefore one-way — ACME off→on, redirect
+        # off→on — and an install that already enforces HTTPS is never walked backwards
+        # into plain HTTP by this code.
+        acme_cmd = if acme_ready?(), do: acme_cmd(), else: []
 
         template =
           @system_templates
           |> Map.fetch!("traefik")
-          |> Map.update!(:command, &(&1 ++ acme_cmd ++ swarm_provider_cmd()))
+          |> Map.update!(:command, &(&1 ++ acme_cmd ++ redirect_cmd() ++ swarm_provider_cmd()))
           |> Map.put(:env, ["CF_DNS_API_TOKEN=#{token}"])
 
         {:ok, template}
@@ -675,7 +887,8 @@ defmodule Homelab.Infrastructure do
         # configured token-less host, and every routed deploy asks this question. At
         # error severity a steady state reads as a failure worth investigating.
         Logger.warning(
-          "Infrastructure: #{@dns_token_env} is not set — cannot provision Traefik with wildcard DNS-01 TLS"
+          "Infrastructure: no DNS-01 credential (#{@dns_token_env}, acme_dns_api_token, " <>
+            "or cloudflare_api_token) — cannot provision Traefik with wildcard DNS-01 TLS"
         )
 
         {:error, :dns_token_missing}

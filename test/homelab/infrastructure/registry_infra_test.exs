@@ -13,6 +13,7 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
   alias Homelab.Infrastructure
   alias Homelab.Infrastructure.Htpasswd
   alias Homelab.Infrastructure.Registry
+  alias Homelab.Settings
 
   setup :verify_on_exit!
 
@@ -118,7 +119,7 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
           assert {:error, :dns_token_missing} = Infrastructure.ensure_traefik()
         end)
 
-      assert log =~ "TRAEFIK_DNS_API_TOKEN is not set"
+      assert log =~ "no DNS-01 credential"
     end
 
     test "injects DNS-01 provider flags and the CF token env when creating Traefik" do
@@ -156,6 +157,86 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       assert "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare" in cmd
       refute Enum.any?(cmd, &String.contains?(&1, "httpchallenge"))
       assert "CF_DNS_API_TOKEN=cf-token-xyz" in body["Env"]
+    end
+
+    # The token the DNS & Domains page already collects is the same credential lego
+    # needs (`Zone:Zone:Read` + `Zone:DNS:Edit` — the union of what `Registrars.
+    # Cloudflare` and `DnsProviders.Cloudflare` do with it), so configuring Cloudflare
+    # in the UI is enough to get ingress. Before this, the operator had to put a second
+    # copy of the same secret in the environment and restart.
+    test "falls back to the cloudflare_api_token setting when the env var is unset" do
+      System.delete_env("TRAEFIK_DNS_API_TOKEN")
+      {:ok, _} = Settings.set("cloudflare_api_token", "cf-from-settings", encrypt: true)
+
+      assert "CF_DNS_API_TOKEN=cf-from-settings" in created_traefik_env()
+    end
+
+    # Somewhere to put an ACME-specific credential, for the registrar-ONLY setup where
+    # `cloudflare_api_token` is legitimately a `Zone:Read` token that lego would 403 on.
+    test "acme_dns_api_token takes precedence over cloudflare_api_token" do
+      System.delete_env("TRAEFIK_DNS_API_TOKEN")
+      {:ok, _} = Settings.set("cloudflare_api_token", "registrar-only", encrypt: true)
+      {:ok, _} = Settings.set("acme_dns_api_token", "acme-specific", encrypt: true)
+
+      assert "CF_DNS_API_TOKEN=acme-specific" in created_traefik_env()
+    end
+
+    # An instance supplying the token as a Docker/Swarm secret must not have it
+    # silently replaced by whatever is in the database.
+    test "the env var wins over both settings" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "from-env")
+      {:ok, _} = Settings.set("cloudflare_api_token", "from-settings", encrypt: true)
+      {:ok, _} = Settings.set("acme_dns_api_token", "also-from-settings", encrypt: true)
+
+      assert "CF_DNS_API_TOKEN=from-env" in created_traefik_env()
+    end
+
+    # The fresh-domain window. Traefik is still provisioned — the box has to be
+    # reachable — but with no ACME resolver, because Let's Encrypt rate-limits failed
+    # validations and a domain that does not resolve cannot be validated by anything.
+    test "omits the ACME resolver while the base domain does not resolve" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+      Application.put_env(:homelab, :dns_readiness_check, false)
+      on_exit(fn -> Application.put_env(:homelab, :dns_readiness_check, true) end)
+
+      cmd = created_traefik_cmd()
+
+      refute Enum.any?(cmd, &String.contains?(&1, "acme.dnschallenge"))
+      # The token is still handed over, so the resolver appears the moment DNS lands
+      # without the operator touching anything.
+      assert "CF_DNS_API_TOKEN=cf-token-xyz" in created_traefik_env()
+    end
+
+    # The redirect is the thing that makes a certificate-less box unreachable rather
+    # than merely unencrypted, so it must not be there before one is issued.
+    test "omits the HTTP->HTTPS redirect until a certificate has been seen" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+
+      cmd = created_traefik_cmd()
+
+      refute Enum.any?(cmd, &String.contains?(&1, "redirections"))
+    end
+
+    test "adds the redirect once TLS enforcement is latched on" do
+      System.put_env("TRAEFIK_DNS_API_TOKEN", "cf-token-xyz")
+      :ok = Infrastructure.enforce_tls!()
+
+      cmd = created_traefik_cmd()
+
+      assert "--entryPoints.web.http.redirections.entryPoint.to=websecure" in cmd
+      assert "--entryPoints.web.http.redirections.entryPoint.scheme=https" in cmd
+    end
+
+    # The token-less LAN-only host stays a supported configuration: adding two more
+    # sources must not turn an absent credential into a partial one.
+    test "still fails closed with no Docker calls when no source holds a token" do
+      System.delete_env("TRAEFIK_DNS_API_TOKEN")
+      {:ok, _} = Settings.set("cloudflare_api_token", "   ", encrypt: true)
+      {:ok, _} = Settings.set("acme_dns_api_token", "", encrypt: true)
+
+      capture_log(fn ->
+        assert {:error, :dns_token_missing} = Infrastructure.ensure_traefik()
+      end)
     end
 
     # `create_system_container/2` gates its success clause on an `Id` in the create
@@ -384,6 +465,34 @@ defmodule Homelab.Infrastructure.RegistryInfraTest do
       restore_app_env(:base_domain, prev_domain)
       restore_app_env(:registry_credentials, prev_creds)
     end
+  end
+
+  defp created_traefik_env, do: created_traefik_body()["Env"]
+  defp created_traefik_cmd, do: created_traefik_body()["Cmd"]
+
+  # Drives `ensure_traefik/0` down the create path and returns the payload the Traefik
+  # container was created with — `Env` carries the DNS-01 credential, `Cmd` the ACME
+  # resolver and redirect flags.
+  defp created_traefik_body do
+    test_pid = self()
+
+    stub(Homelab.Mocks.DockerClient, :get, fn _path, _opts -> {:error, {:not_found, %{}}} end)
+    stub(Homelab.Mocks.DockerClient, :post_stream, fn _path, _opts -> :ok end)
+    stub(Homelab.Mocks.DockerClient, :upload_archive, fn _name, _path, _tar -> :ok end)
+
+    stub(Homelab.Mocks.DockerClient, :post, fn path, body, _opts ->
+      if path == "/containers/create?name=homelab-traefik" do
+        send(test_pid, {:create, body})
+        {:ok, %{"Id" => "traefik-id"}}
+      else
+        {:ok, %{}}
+      end
+    end)
+
+    Infrastructure.ensure_traefik()
+
+    assert_received {:create, body}
+    body
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

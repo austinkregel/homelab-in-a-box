@@ -90,6 +90,11 @@ config :homelab,
   docker_client: Homelab.Docker.UnavailableClient,
   # Never open a real TLS connection from a test that merely mounts a page.
   tls_probe: Homelab.Networking.TlsProbeStub,
+  # Nor a real DNS query: the ACME gate asks whether the base domain resolves on every
+  # `ensure_traefik/0`, and the factory's domains are made-up names on a host whose
+  # resolver may not answer at all. `true` is the state nearly every test wants — ACME
+  # enabled — so the gate itself is exercised by setting this per test.
+  dns_readiness_check: true,
   # Nor a real HTTPS request: `verify_public_url` is planned on every routed release, and
   # the factory's domains are made-up names.
   url_probe: Homelab.Networking.UrlProbeStub,

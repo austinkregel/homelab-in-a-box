@@ -505,6 +505,30 @@ defmodule HomelabWeb.SettingsLive do
     end
   end
 
+  # Clearing the latch is all this does. The redirect flags are already baked into the
+  # running proxy and `traefik_config_drifted?/2` only ever detects ADDED flags, so the
+  # container has to be recreated from the (now redirect-less) template for the change
+  # to mean anything.
+  def handle_event("disable_tls_enforcement", _params, socket) do
+    Settings.delete(Homelab.Infrastructure.tls_enforced_setting())
+
+    socket =
+      case Homelab.Infrastructure.recreate_gateway() do
+        {:ok, _} ->
+          put_flash(socket, :info, "HTTPS enforcement off. The proxy is serving plain HTTP.")
+
+        {:error, reason} ->
+          put_flash(
+            socket,
+            :error,
+            "Enforcement cleared, but the proxy could not be recreated (#{inspect(reason)}). " <>
+              "It keeps redirecting to HTTPS until it restarts."
+          )
+      end
+
+    {:noreply, load_section_data(socket, "danger_zone")}
+  end
+
   def handle_event("save_sweep_mode", %{"mode" => mode}, socket)
       when mode in ~w(sever_only armed paused) do
     {:ok, _} = Settings.set("reconciler_sweep_mode", mode, category: "reconciler")
@@ -570,6 +594,7 @@ defmodule HomelabWeb.SettingsLive do
     # submission cannot be told apart from "leave it alone" — it means unchanged. The
     # "Clear" affordance next to each one is how you actually remove a credential.
     put_secret(params, "cloudflare_api_token")
+    put_secret(params, "acme_dns_api_token")
     put_secret(params, "unifi_api_key")
     put_secret(params, "pihole_api_key")
     put_secret(params, "namecheap_api_key")
@@ -748,6 +773,8 @@ defmodule HomelabWeb.SettingsLive do
   defp load_section_data(socket, "dns") do
     socket
     |> assign(:cloudflare_token_set?, Settings.get("cloudflare_api_token") != nil)
+    |> assign(:acme_token_set?, Settings.get("acme_dns_api_token") != nil)
+    |> assign(:acme_token_source, acme_token_source())
     |> assign(:selected_registrar, Settings.get("registrar"))
     |> assign(:selected_public_dns, Settings.get("public_dns_provider"))
     |> assign(:selected_internal_dns, Settings.get("internal_dns_provider"))
@@ -840,6 +867,7 @@ defmodule HomelabWeb.SettingsLive do
     socket
     |> assign(:sweep_mode, Settings.get("reconciler_sweep_mode", "sever_only"))
     |> assign(:orphans, Homelab.Services.Reconciler.list_orphans())
+    |> assign(:tls_enforced?, Homelab.Infrastructure.tls_enforced?())
   end
 
   defp load_section_data(socket, _), do: socket
@@ -1864,6 +1892,76 @@ defmodule HomelabWeb.SettingsLive do
 
         <hr class="border-base-content/[0.06]" />
 
+        <%!-- TLS / ACME --%>
+        <div>
+          <h2 class="text-lg font-semibold text-base-content mb-2">TLS Certificates</h2>
+          <p class="text-sm text-base-content/50 mb-4">
+            The reverse proxy requests a wildcard <code>*.{Homelab.Config.base_domain()}</code>
+            certificate from Let's Encrypt over the DNS-01 challenge, using Cloudflare.
+            Without a token it is never provisioned and nothing is reachable by name.
+          </p>
+
+          <div class={[
+            "rounded-lg border p-4 mb-4",
+            @acme_token_source && "border-success/20 bg-success/5",
+            is_nil(@acme_token_source) && "border-warning/20 bg-warning/5"
+          ]}>
+            <div class="flex items-center gap-2 mb-1">
+              <.icon
+                name={
+                  if(@acme_token_source,
+                    do: "hero-check-circle-solid",
+                    else: "hero-exclamation-triangle-solid"
+                  )
+                }
+                class={[
+                  "size-4",
+                  @acme_token_source && "text-success",
+                  is_nil(@acme_token_source) && "text-warning"
+                ]}
+              />
+              <span class="text-sm font-medium text-base-content">
+                {acme_source_label(@acme_token_source)}
+              </span>
+            </div>
+            <p class="text-xs text-base-content/50">
+              {acme_source_detail(@acme_token_source)}
+            </p>
+          </div>
+
+          <div class="space-y-4 max-w-md">
+            <div>
+              <label class="block text-sm font-medium text-base-content/70 mb-1.5">
+                ACME DNS API Token
+              </label>
+              <input
+                type="password"
+                name="dns[acme_dns_api_token]"
+                placeholder={if(@acme_token_set?, do: "••••••••", else: "Leave blank to reuse")}
+                class="w-full rounded-lg bg-base-200 border-0 text-sm text-base-content py-2.5 px-3 focus:ring-2 focus:ring-primary/50"
+              />
+              <p class="text-xs text-base-content/35 mt-1">
+                Optional. Needs <code>Zone:Read</code>
+                and <code>Zone:DNS:Edit</code>. Set this only when the
+                Cloudflare token above cannot edit DNS records — a registrar-only token
+                is often read-only, and Let's Encrypt will reject it.
+              </p>
+              <button
+                :if={@acme_token_set?}
+                type="button"
+                id="clear-acme-dns-api-token"
+                phx-click="clear_setting"
+                phx-value-key="acme_dns_api_token"
+                class="text-xs text-error/70 hover:text-error mt-1.5 transition-colors"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <hr class="border-base-content/[0.06]" />
+
         <%!-- Internal DNS --%>
         <div>
           <h2 class="text-lg font-semibold text-base-content mb-2">Internal DNS Provider</h2>
@@ -2081,8 +2179,11 @@ defmodule HomelabWeb.SettingsLive do
         <div class="rounded-lg border border-warning/20 bg-warning/5 p-4 text-xs text-base-content/70 space-y-1">
           <p>
             Requires a wildcard <code>*.{Homelab.Config.base_domain()}</code>
-            TLS cert (Traefik DNS-01) and the <code>TRAEFIK_DNS_API_TOKEN</code>
-            env var.
+            TLS cert, which needs a DNS-01 credential — see
+            <.link navigate={~p"/settings?section=dns"} class="link link-hover text-primary">
+              DNS &amp; Domains
+            </.link>
+            for the one in effect.
           </p>
           <p>The pull-through mirror caches <strong>docker.io only</strong> — not GHCR/ECR/quay.</p>
         </div>
@@ -3036,6 +3137,32 @@ defmodule HomelabWeb.SettingsLive do
     <div class="p-4">
       <h2 class="text-lg font-semibold text-error mb-4">Danger Zone</h2>
       <div class="space-y-4">
+        <div :if={@tls_enforced?} class="rounded-lg border border-error/20 bg-error/5 p-4">
+          <h3 class="text-sm font-semibold text-base-content mb-2">HTTPS enforcement</h3>
+          <p class="text-xs text-base-content/60 mb-2">
+            A valid certificate was seen for <code>{Homelab.Config.base_domain()}</code>, so the proxy redirects all HTTP
+            traffic to HTTPS. Nothing turns this off on its own — a certificate that later
+            breaks raises an alert rather than quietly serving this page over plain HTTP.
+          </p>
+          <p class="text-xs text-base-content/60 mb-4">
+            Turning it off puts the box back on plain HTTP until a valid certificate is
+            observed again. Do this only to recover from a certificate you cannot fix any
+            other way; anyone on your network can read traffic to this page while it is off.
+          </p>
+          <button
+            type="button"
+            id="disable-tls-enforcement"
+            phx-click="disable_tls_enforcement"
+            data-confirm={
+              "Serve #{Homelab.Config.base_domain()} over plain HTTP until a valid " <>
+                "certificate is seen again?"
+            }
+            class="px-3 py-2 rounded-lg bg-error/10 text-error text-xs font-semibold hover:bg-error/20 transition-colors cursor-pointer"
+          >
+            Stop enforcing HTTPS
+          </button>
+        </div>
+
         <div class="rounded-lg border border-error/20 bg-error/5 p-4">
           <h3 class="text-sm font-semibold text-base-content mb-2">Orphan sweep</h3>
           <p class="text-xs text-base-content/60 mb-4">
@@ -3258,6 +3385,36 @@ defmodule HomelabWeb.SettingsLive do
 
   # A secret field renders a placeholder, never its value, so blank means "unchanged" and
   # there is no way to express "clear" through it. `clear_setting` is that affordance.
+  # Which credential the proxy would actually use, not which ones are stored — the
+  # question an operator has here is "is TLS going to work, and from what".
+  defp acme_token_source do
+    case Homelab.Infrastructure.dns_token_source() do
+      {source, _token} -> source
+      nil -> nil
+    end
+  end
+
+  defp acme_source_label(:env), do: "Using the TRAEFIK_DNS_API_TOKEN environment variable"
+  defp acme_source_label(:acme_setting), do: "Using the ACME DNS API token below"
+  defp acme_source_label(:cloudflare_setting), do: "Using the Cloudflare API token above"
+  defp acme_source_label(nil), do: "No DNS-01 credential — TLS is not being issued"
+
+  defp acme_source_detail(:env),
+    do: "An environment variable set at boot takes precedence over anything stored here."
+
+  defp acme_source_detail(:acme_setting),
+    do: "Set explicitly for ACME, so the Cloudflare token above is left for DNS records."
+
+  defp acme_source_detail(:cloudflare_setting),
+    do:
+      "The same token used for DNS records. Let's Encrypt needs Zone:Read and " <>
+        "Zone:DNS:Edit — if it is missing either, set a dedicated token below."
+
+  defp acme_source_detail(nil),
+    do:
+      "Add a Cloudflare API token above, or a dedicated one below. The proxy retries " <>
+        "every 5 minutes, so no restart is needed."
+
   defp put_secret(params, key) do
     case Map.get(params, key) do
       value when is_binary(value) and value != "" -> Settings.set(key, value, encrypt: true)

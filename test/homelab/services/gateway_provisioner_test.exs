@@ -10,6 +10,12 @@ defmodule Homelab.Services.GatewayProvisionerTest do
     prev_gateway = Application.get_env(:homelab, :gateway)
     prev_ensurer = Application.get_env(:homelab, :ingress_proxy_ensurer)
 
+    # The DNS-01 credential also has two Settings sources, read from the global ETS
+    # cache. This case is not a `DataCase`, so nothing clears that table for it, and a
+    # `cloudflare_api_token` cached by an earlier test would supply a token here and
+    # turn the assertion below into an order-dependent failure.
+    Homelab.Settings.reset_cache()
+
     on_exit(fn ->
       restore(:gateway, prev_gateway)
       restore(:ingress_proxy_ensurer, prev_ensurer)
@@ -32,7 +38,7 @@ defmodule Homelab.Services.GatewayProvisionerTest do
         assert GatewayProvisioner.ensure_now() == {:error, :dns_token_missing}
       end)
 
-    assert log =~ "TRAEFIK_DNS_API_TOKEN is not set"
+    assert log =~ "no DNS-01 credential"
   end
 
   # `ensure_traefik/0` is a `with` with no `else`, so it returns whatever any clause

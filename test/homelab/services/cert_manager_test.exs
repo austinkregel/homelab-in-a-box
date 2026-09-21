@@ -99,6 +99,62 @@ defmodule Homelab.Services.CertManagerTest do
     end
   end
 
+  describe "TLS enforcement latch" do
+    setup do
+      previous = Application.get_env(:homelab, :tls_probe_result, :healthy)
+      on_exit(fn -> Application.put_env(:homelab, :tls_probe_result, previous) end)
+      :ok
+    end
+
+    test "stays off while the domain serves Traefik's self-signed default" do
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+
+      pid = start_supervised!({CertManager, enabled: false})
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+
+      refute Homelab.Infrastructure.tls_enforced?()
+    end
+
+    # A handshake that cannot be completed is the ordinary state during propagation —
+    # nothing is listening on 443 for a name that does not resolve yet.
+    test "stays off when the certificate cannot be read at all" do
+      Application.put_env(:homelab, :tls_probe_result, {:error, :timeout})
+
+      pid = start_supervised!({CertManager, enabled: false})
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+
+      refute Homelab.Infrastructure.tls_enforced?()
+    end
+
+    test "latches on once a real certificate is served" do
+      Application.put_env(:homelab, :tls_probe_result, :healthy)
+
+      pid = start_supervised!({CertManager, enabled: false})
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+
+      assert Homelab.Infrastructure.tls_enforced?()
+    end
+
+    # The point of the latch: a cert that breaks later must raise alarms, never quietly
+    # put the control plane back on plain HTTP for whoever is on the network.
+    test "a later failure does not clear an already-set latch" do
+      Application.put_env(:homelab, :tls_probe_result, :healthy)
+      pid = start_supervised!({CertManager, enabled: false})
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+      assert Homelab.Infrastructure.tls_enforced?()
+
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+      send(pid, :check_certs)
+      _ = :sys.get_state(pid)
+
+      assert Homelab.Infrastructure.tls_enforced?()
+    end
+  end
+
   describe "handle_info :check_certs with no gateway" do
     test "does not crash when gateway is nil" do
       pid = start_supervised!({CertManager, enabled: false})
