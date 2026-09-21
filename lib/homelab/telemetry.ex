@@ -106,6 +106,17 @@ defmodule Homelab.Telemetry do
           "responses_bytes_total",
           stats[:responses_bytes_total]
         )
+        # Latency is a sum and a count rather than an average, because an average
+        # of averages is not an average. Diffing both across a window and dividing
+        # gives the mean latency OF THAT WINDOW; diffing a stored mean gives noise.
+        |> put_row(
+          now,
+          "traefik",
+          to_string(service),
+          "duration_seconds_sum",
+          stats[:duration_seconds_sum]
+        )
+        |> put_row(now, "traefik", to_string(service), "duration_count", stats[:duration_count])
 
       _, acc ->
         acc
@@ -158,6 +169,43 @@ defmodule Homelab.Telemetry do
 
     Repo.all(query)
   end
+
+  @doc """
+  A counter series turned into per-interval increments: what actually happened
+  during the window, rather than the running total since the process started.
+
+  Takes the same options as `series/1`. Each point carries the increment since
+  the previous sample and how many seconds apart the two were, so a caller can
+  render either a count or a rate. The first sample is dropped — it has no
+  predecessor to diff against.
+  """
+  def delta_series(opts) do
+    opts |> series() |> deltas()
+  end
+
+  @doc """
+  Pure counterpart of `delta_series/1`: diffs an already-loaded series.
+
+  A Traefik restart resets every counter to zero, which would otherwise show up
+  as one enormous negative spike. A decrease means the counter restarted, and
+  the requests served before the restart are simply not recoverable, so the
+  interval is recorded as zero rather than guessed at.
+  """
+  def deltas(series) do
+    series
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.map(fn [previous, current] ->
+      %{
+        recorded_at: current.recorded_at,
+        value: max((current.value || 0) - (previous.value || 0), 0),
+        seconds: DateTime.diff(current.recorded_at, previous.recorded_at)
+      }
+    end)
+  end
+
+  @doc "Total increase across a delta series — what the window added up to."
+  def delta_total(deltas) when is_list(deltas),
+    do: Enum.reduce(deltas, 0, fn point, sum -> sum + (point.value || 0) end)
 
   @doc "Convenience for host-wide series (subject `nil`)."
   def host_series(metric, opts \\ []) do
