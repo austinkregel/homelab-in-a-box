@@ -4,6 +4,7 @@ defmodule Homelab.BackupsTest do
   alias Homelab.Backups
   alias Homelab.Backups.BackupJob
   import Homelab.Factory
+  import Mox
 
   describe "list_backup_jobs/0" do
     test "returns all backup jobs ordered by scheduled_at desc" do
@@ -117,6 +118,50 @@ defmodule Homelab.BackupsTest do
       assert {:ok, updated} = Backups.fail_backup(job, "Disk full")
       assert updated.status == :failed
       assert updated.error_message == "Disk full"
+      assert updated.completed_at != nil
+    end
+  end
+
+  describe "execute_backup/1" do
+    setup :verify_on_exit!
+
+    test "records the snapshot on success" do
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:ok, "snap_abc123"}
+      end)
+
+      assert {:ok, updated} = Backups.execute_backup(job)
+      assert updated.status == :completed
+      assert updated.snapshot_id == "snap_abc123"
+    end
+
+    test "fails the job when the provider returns an error" do
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:error, {:restic_missing, "restic is not installed or not on PATH"}}
+      end)
+
+      assert {:ok, updated} = Backups.execute_backup(job)
+      assert updated.status == :failed
+      assert updated.error_message =~ "restic is not installed"
+    end
+
+    # A provider that shells out to a missing binary raises rather than returning an
+    # error tuple. Before, that left the row on `:running` with no error_message, so the
+    # Backups page showed a backup in progress forever.
+    test "fails the job when the provider raises" do
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        raise ErlangError, original: :enoent
+      end)
+
+      assert {:ok, updated} = Backups.execute_backup(job)
+      assert updated.status == :failed
+      assert updated.error_message =~ "enoent"
       assert updated.completed_at != nil
     end
   end

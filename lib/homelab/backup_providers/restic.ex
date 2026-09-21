@@ -129,17 +129,23 @@ defmodule Homelab.BackupProviders.Restic do
   # --- Helpers ---
 
   defp run_restic(args) do
-    restic_path = System.find_executable("restic") || "restic"
+    # `System.cmd/3` raises `ErlangError :enoent` for a binary that is not on PATH, and
+    # the old `|| "restic"` fallback guaranteed that raise on a host without restic.
+    case System.find_executable("restic") do
+      nil ->
+        {:error, {:restic_missing, "restic is not installed or not on PATH"}}
 
-    Logger.debug("Running restic: #{restic_path} #{Enum.join(args, " ")}")
+      restic_path ->
+        Logger.debug("Running restic: #{restic_path} #{Enum.join(args, " ")}")
 
-    case System.cmd(restic_path, args, stderr_to_stdout: true) do
-      {output, 0} ->
-        {:ok, String.trim(output)}
+        case System.cmd(restic_path, args, stderr_to_stdout: true) do
+          {output, 0} ->
+            {:ok, String.trim(output)}
 
-      {output, exit_code} ->
-        Logger.error("Restic failed (exit #{exit_code}): #{output}")
-        {:error, {:restic_error, exit_code, output}}
+          {output, exit_code} ->
+            Logger.error("Restic failed (exit #{exit_code}): #{output}")
+            {:error, {:restic_error, exit_code, output}}
+        end
     end
   end
 

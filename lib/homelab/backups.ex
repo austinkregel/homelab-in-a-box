@@ -202,16 +202,33 @@ defmodule Homelab.Backups do
     backup_provider = Homelab.Config.backup_provider()
     deployment = Repo.preload(job, deployment: [:tenant, :app_template]).deployment
 
-    with {:ok, updated_job} <- start_backup(job),
-         source_path = backup_source_path(deployment),
-         repo = backup_repo(),
-         tags = ["deployment:#{deployment.id}", "app:#{deployment.app_template.slug}"],
-         {:ok, snapshot_id} <- backup_provider.backup(source_path, repo, tags) do
-      complete_backup(updated_job, snapshot_id, nil)
-    else
-      {:error, reason} ->
-        fail_backup(job, inspect(reason))
+    with {:ok, running_job} <- start_backup(job) do
+      case attempt_backup(backup_provider, deployment) do
+        {:ok, snapshot_id} -> complete_backup(running_job, snapshot_id, nil)
+        {:error, message} -> fail_backup(running_job, message)
+      end
     end
+  end
+
+  # Both steps here raise rather than return `{:error, _}` on the most common
+  # misconfigurations: `managed_root/0` raises when Settings → Storage is unset, and a
+  # provider shelling out to a binary that is not installed raises `ErlangError :enoent`.
+  # A raise skipped `fail_backup/2`, leaving `status: :running` and a blank
+  # `error_message` forever — a backup that never started looked like one still going.
+  defp attempt_backup(backup_provider, deployment) do
+    source_path = backup_source_path(deployment)
+    repo = backup_repo()
+    tags = ["deployment:#{deployment.id}", "app:#{deployment.app_template.slug}"]
+
+    case backup_provider.backup(source_path, repo, tags) do
+      {:ok, snapshot_id} -> {:ok, snapshot_id}
+      {:error, reason} -> {:error, inspect(reason)}
+      other -> {:error, inspect(other)}
+    end
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    :exit, reason -> {:error, inspect(reason)}
   end
 
   # Where this deployment's managed data actually is.
