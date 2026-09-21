@@ -938,6 +938,77 @@ defmodule Homelab.Deployments.SpecBuilder do
   defp covered_by_wildcard?(_domain, _parent), do: false
 
   @doc """
+  Every Traefik router/service name this deployment's labels define, with the host and
+  path each one answers on.
+
+  A proxied deployment is rarely one route. The base host is one; every `extra_routes`
+  entry adds `<router>-<path>`, and every `additional_domains` entry adds a name of its
+  own. Traefik meters each separately, so anything reading traffic for "this deployment"
+  has to ask for all of them — reading only the base name reports a busy app as idle the
+  moment its traffic arrives on a second host.
+
+  Returns `[]` for a deployment with no proxied domain, which is the same condition under
+  which `build_routing_labels/2` emits no routers at all. The names come from the same
+  private helpers the label builders use, so the two cannot drift apart.
+
+  Note these are BARE names. Traefik's own metrics and API qualify them with the provider
+  that discovered them (`myapp@docker`); see `Homelab.System.TraefikMetrics.lookup/2`.
+  """
+  def route_names(%Deployment{domain: domain} = deployment)
+      when is_binary(domain) and domain != "" do
+    if Access.proxy_mode?(deployment) do
+      router = sanitize_domain(domain)
+
+      [%{name: router, host: domain, path: nil, kind: :primary}] ++
+        extra_route_names(deployment, router, domain) ++
+        additional_domain_names(deployment)
+    else
+      []
+    end
+  end
+
+  def route_names(_deployment), do: []
+
+  defp extra_route_names(deployment, router, domain) do
+    deployment
+    |> Map.get(:extra_routes)
+    |> List.wrap()
+    |> Enum.flat_map(fn route ->
+      path = route["path_prefix"]
+      port = route["port"]
+
+      if is_binary(path) and is_integer(port) do
+        [
+          %{
+            name: "#{router}-#{sanitize_path(path)}",
+            host: domain,
+            path: path,
+            kind: :path
+          }
+        ]
+      else
+        []
+      end
+    end)
+  end
+
+  defp additional_domain_names(deployment) do
+    deployment
+    |> Map.get(:additional_domains)
+    |> List.wrap()
+    |> Enum.flat_map(fn entry ->
+      host = entry["host"]
+      path = entry["path_prefix"]
+
+      if is_binary(host) and host != "" do
+        [%{name: additional_router_name(host, path), host: host, path: path, kind: :host}]
+      else
+        []
+      end
+    end)
+  end
+
+  @doc """
   Routers + services for a deployment's `extra_routes` — a path on the same host that
   must reach a DIFFERENT container port.
 
