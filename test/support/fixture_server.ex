@@ -274,14 +274,36 @@ defmodule Homelab.TestFixtures.ApiServer do
     "http://localhost:#{bypass.port}"
   end
 
+  @doc """
+  Stubs Traefik's Prometheus endpoint.
+
+  The default body mirrors the shape of a real scrape rather than a minimal one:
+  service names carry the `@docker` provider suffix Traefik appends, requests are
+  partitioned by code/method/protocol, `code="0"` stands for an upgraded websocket
+  that never returned an HTTP status, and the latency histogram is cumulative.
+  A fixture missing any of those hides exactly the bugs this endpoint produces.
+  """
   def traefik_metrics(bypass, opts \\ []) do
     metrics_text =
       Keyword.get(opts, :metrics, """
-      traefik_service_requests_total{code="200",method="GET",protocol="http",service="myapp@docker"} 150
+      # HELP traefik_service_requests_total How many HTTP requests processed on a service.
+      # TYPE traefik_service_requests_total counter
+      traefik_service_requests_total{code="200",method="GET",protocol="http",service="myapp@docker"} 120
+      traefik_service_requests_total{code="200",method="POST",protocol="http",service="myapp@docker"} 30
       traefik_service_requests_total{code="404",method="GET",protocol="http",service="myapp@docker"} 5
       traefik_service_requests_total{code="500",method="GET",protocol="http",service="myapp@docker"} 2
+      traefik_service_requests_total{code="0",method="GET",protocol="websocket",service="myapp@docker"} 9
       traefik_service_requests_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 1024000
       traefik_service_responses_bytes_total{code="200",method="GET",protocol="http",service="myapp@docker"} 5120000
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="myapp@docker",le="0.1"} 100
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="myapp@docker",le="0.3"} 140
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="myapp@docker",le="1.2"} 155
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="myapp@docker",le="5"} 157
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="myapp@docker",le="+Inf"} 157
+      traefik_service_request_duration_seconds_sum{code="200",method="GET",protocol="http",service="myapp@docker"} 15.7
+      traefik_service_request_duration_seconds_count{code="200",method="GET",protocol="http",service="myapp@docker"} 157
+      traefik_service_requests_total{code="200",method="GET",protocol="http",service="otherapp@docker"} 40
+      traefik_service_responses_bytes_total{code="200",method="GET",protocol="http",service="otherapp@docker"} 80000
       """)
 
     Bypass.stub(bypass, "GET", "/metrics", fn conn ->
