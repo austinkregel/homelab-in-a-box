@@ -14,12 +14,22 @@ defmodule HomelabWeb.DeploymentLive do
   alias Homelab.Backups
   alias Homelab.Services.BackupScheduler
   alias Homelab.Storage
+  alias Homelab.System.TraefikMetrics
+  alias Homelab.Telemetry
   alias HomelabWeb.DeploymentSettings
   alias HomelabWeb.SecretReveal
 
   @tabs ~w(overview settings topology traffic logs environment volumes backups releases)
 
   @log_poll_interval 3_000
+
+  # Look-back windows the traffic tab offers: {label, minutes}. The same set the
+  # telemetry dashboard uses, so a number read on one page means the same thing here.
+  @traffic_windows [{"30m", 30}, {"3h", 180}, {"24h", 1440}]
+
+  # Samples land every 10s, so a 24h window holds ~8600 points. Charting every one of
+  # them is invisible detail at 100 SVG units wide; the cap keeps the payload small.
+  @traffic_point_cap 240
 
   # Both re-run refusals mean the same thing to the operator: something else is driving
   # a deployment this would touch.
@@ -63,7 +73,9 @@ defmodule HomelabWeb.DeploymentLive do
       # list tags is not an error state — the free-text field is the real control.
       |> assign(:available_tags, :idle)
       |> assign(:resource_stats, nil)
-      |> assign(:traffic_stats, nil)
+      |> assign(:traffic, nil)
+      |> assign(:traffic_windows, @traffic_windows)
+      |> assign(:traffic_window, 30)
       |> assign(:tenants, [])
       |> assign(:siblings, [])
       |> assign(:releases, [])
@@ -192,11 +204,11 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  def handle_info({:metrics, _metrics}, socket) do
+  def handle_info({:metrics, metrics}, socket) do
     {:noreply,
      socket
      |> load_resource_stats()
-     |> load_traffic_stats()}
+     |> load_traffic_stats(Map.get(metrics, :traefik) || %{})}
   end
 
   def handle_info({:deployment_status, deployment_id, _new_status}, socket) do
@@ -299,6 +311,11 @@ defmodule HomelabWeb.DeploymentLive do
   def handle_event("switch_tab", %{"tab" => tab}, socket) do
     {:noreply,
      push_patch(socket, to: ~p"/deployments/#{socket.assigns.deployment.id}?tab=#{tab}")}
+  end
+
+  def handle_event("set_traffic_window", %{"minutes" => minutes}, socket) do
+    socket = assign(socket, :traffic_window, String.to_integer(minutes))
+    {:noreply, load_traffic_stats(socket)}
   end
 
   def handle_event("toggle_follow_logs", _params, socket) do
@@ -773,24 +790,155 @@ defmodule HomelabWeb.DeploymentLive do
     end
   end
 
-  defp load_traffic_stats(socket) do
-    deployment = socket.assigns.deployment
+  defp load_traffic_stats(socket), do: load_traffic_stats(socket, traefik_snapshot())
 
-    stats =
-      if deployment.domain && deployment.domain != "" do
-        svc_key =
-          deployment.domain
-          |> String.downcase()
-          |> String.replace(".", "-")
-          |> String.replace(~r/[^a-z0-9-]/, "")
+  # `snapshot` is Traefik's whole `/metrics` scrape, keyed by provider-qualified service
+  # name. It is passed in rather than fetched here so the 10s "metrics:update" broadcast
+  # — which already carries it — costs nothing: without that, every open deployment page
+  # would fire its own HTTP scrape at Traefik on every tick.
+  defp load_traffic_stats(socket, snapshot) do
+    routes = SpecBuilder.route_names(socket.assigns.deployment)
 
-        Homelab.System.TraefikMetrics.for_service(svc_key)
-      else
-        nil
-      end
-
-    assign(socket, :traffic_stats, stats)
+    assign(socket, :traffic, build_traffic(routes, snapshot, socket.assigns.traffic_window))
   end
+
+  defp build_traffic([], _snapshot, _minutes), do: nil
+
+  defp build_traffic(routes, snapshot, minutes) do
+    opts = [minutes: minutes, limit: @traffic_point_cap]
+
+    recorded =
+      safely(fn -> Telemetry.subjects("traefik", "requests_total", minutes: minutes) end, [])
+
+    routes =
+      Enum.map(routes, fn route ->
+        Map.merge(route, %{
+          subject: resolve_subject(snapshot, recorded, route.name),
+          stats: TraefikMetrics.lookup(snapshot, route.name)
+        })
+      end)
+
+    subjects = routes |> Enum.map(& &1.subject) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+    requests = window_deltas(subjects, "requests_total", opts)
+    errors = window_deltas(subjects, "error_count", opts)
+    bytes_in = window_deltas(subjects, "requests_bytes_total", opts)
+    bytes_out = window_deltas(subjects, "responses_bytes_total", opts)
+    latency_sum = Telemetry.delta_total(window_deltas(subjects, "duration_seconds_sum", opts))
+    latency_count = Telemetry.delta_total(window_deltas(subjects, "duration_count", opts))
+
+    window_requests = Telemetry.delta_total(requests)
+    window_errors = Telemetry.delta_total(errors)
+
+    # Elapsed time the samples actually cover, not the nominal window: a page opened
+    # five minutes after boot has five minutes of data, and dividing by 30 would
+    # under-report the rate sixfold.
+    covered_seconds = Enum.reduce(requests, 0, fn point, sum -> sum + (point.seconds || 0) end)
+
+    %{
+      routes: routes,
+      total: TraefikMetrics.merge(Enum.map(routes, & &1.stats)),
+      window_minutes: minutes,
+      # Charted as rates, not raw increments. An increment is "per sample", and a sample
+      # is only ten seconds wide because the collector happens to poll at 10s — a gap in
+      # collection would silently change what a point on the chart means.
+      requests_series: as_rate(requests),
+      errors_series: as_rate(errors),
+      bytes_out_series: as_rate(bytes_out),
+      window_requests: window_requests,
+      window_errors: window_errors,
+      window_bytes_in: Telemetry.delta_total(bytes_in),
+      window_bytes_out: Telemetry.delta_total(bytes_out),
+      window_error_rate: percent_of(window_errors, window_requests),
+      window_latency_ms: if(latency_count > 0, do: latency_sum / latency_count * 1000),
+      requests_per_minute:
+        if(covered_seconds > 0, do: window_requests / covered_seconds * 60, else: 0.0),
+      covered_seconds: covered_seconds,
+      # No sample carries any counter at all -> nothing has ever been recorded for these
+      # routes, which reads differently from "recorded, and it was zero".
+      seen?: subjects != []
+    }
+  end
+
+  # Increments per minute, so every point means the same thing no matter how far apart
+  # the two samples behind it happened to land.
+  defp as_rate(deltas) do
+    Enum.map(deltas, fn point ->
+      seconds = point.seconds || 0
+
+      %{
+        recorded_at: point.recorded_at,
+        value: if(seconds > 0, do: point.value / seconds * 60, else: 0.0)
+      }
+    end)
+  end
+
+  # A router name is bare (`app-example-com`); Traefik reports and the time-series stores
+  # it provider-qualified (`app-example-com@docker`). Prefer the live scrape's spelling,
+  # and fall back to the recorded one so the window still renders while Traefik is down.
+  defp resolve_subject(snapshot, recorded, name) do
+    List.first(TraefikMetrics.match_keys(snapshot, name)) ||
+      List.first(TraefikMetrics.match_keys(recorded, name))
+  end
+
+  # One deployment can own several routers, each metered separately. Their samples are
+  # written in a single insert_all per tick, so they share a `recorded_at` exactly and
+  # group cleanly into one series for the deployment as a whole.
+  defp window_deltas(subjects, metric, opts) do
+    subjects
+    |> Enum.flat_map(fn subject ->
+      safely(
+        fn ->
+          Telemetry.delta_series([source: "traefik", subject: subject, metric: metric] ++ opts)
+        end,
+        []
+      )
+    end)
+    |> Enum.group_by(& &1.recorded_at)
+    |> Enum.map(fn {at, points} ->
+      %{
+        recorded_at: at,
+        value: Enum.reduce(points, 0, fn point, sum -> sum + point.value end),
+        seconds: points |> List.first() |> Map.get(:seconds)
+      }
+    end)
+    |> Enum.sort_by(& &1.recorded_at, DateTime)
+  end
+
+  # The live scrape, preferring the collector's cached one. The collector polls every
+  # 10s anyway, so a page load almost always reads it for free.
+  defp traefik_snapshot do
+    case cached_metrics() do
+      %{traefik: traefik} when is_map(traefik) and map_size(traefik) > 0 ->
+        traefik
+
+      _ ->
+        case TraefikMetrics.collect() do
+          {:ok, metrics} -> metrics
+          {:error, _} -> %{}
+        end
+    end
+  end
+
+  defp cached_metrics do
+    Homelab.Services.MetricsCollector.get_latest()
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Telemetry is a nicety on this page; a repo hiccup must not take the tab down.
+  defp safely(fun, default) do
+    fun.()
+  rescue
+    _ -> default
+  catch
+    :exit, _ -> default
+  end
+
+  defp percent_of(_part, 0), do: 0.0
+  defp percent_of(part, whole), do: part / whole * 100
 
   defp load_resource_stats(socket) do
     stats =
@@ -1112,92 +1260,322 @@ defmodule HomelabWeb.DeploymentLive do
         </div>
 
         <%!-- Traffic tab --%>
-        <div
-          :if={@active_tab == "traffic"}
-          class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
-        >
-          <div class="px-4 py-3 border-b border-base-content/5">
-            <h3 class="text-sm font-semibold text-base-content">Traffic</h3>
-          </div>
-          <div class="p-4">
-            <%= if @deployment.domain && @deployment.domain != "" do %>
-              <%= if @traffic_stats do %>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                  <div>
-                    <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">Requests</p>
-                    <p class="text-2xl font-bold text-base-content">
-                      {format_traffic_number(@traffic_stats.requests_total || 0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">
-                      Bandwidth In
-                    </p>
-                    <p class="text-2xl font-bold text-base-content">
-                      {format_bytes(@traffic_stats.requests_bytes_total || 0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">
-                      Bandwidth Out
-                    </p>
-                    <p class="text-2xl font-bold text-base-content">
-                      {format_bytes(@traffic_stats.responses_bytes_total || 0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">Errors</p>
-                    <p class={[
-                      "text-2xl font-bold",
-                      if((@traffic_stats.error_count || 0) > 0,
-                        do: "text-error",
-                        else: "text-base-content"
+        <div :if={@active_tab == "traffic"} id="traffic-tab" class="space-y-4">
+          <%= if @traffic do %>
+            <%!-- Window totals. These are DIFFS of Traefik's counters across the selected
+                  window, not the counters themselves -- "1.2K requests in the last 30m"
+                  rather than "1.2K requests since the proxy last restarted". --%>
+            <div class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden">
+              <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-base-content/5">
+                <div>
+                  <h3 class="text-sm font-semibold text-base-content">Traffic</h3>
+                  <p class="text-[11px] text-base-content/40 mt-0.5">
+                    {traffic_coverage_label(@traffic)}
+                  </p>
+                </div>
+                <div class="flex rounded-lg bg-base-200/60 p-0.5" id="traffic-window">
+                  <button
+                    :for={{label, minutes} <- @traffic_windows}
+                    type="button"
+                    phx-click="set_traffic_window"
+                    phx-value-minutes={minutes}
+                    class={[
+                      "px-2.5 py-1 text-xs font-medium rounded-md transition-colors duration-150",
+                      if(@traffic_window == minutes,
+                        do: "bg-base-100 text-base-content shadow-sm",
+                        else: "text-base-content/50 hover:text-base-content"
                       )
-                    ]}>
-                      {format_traffic_number(@traffic_stats.error_count || 0)}
-                    </p>
-                  </div>
+                    ]}
+                  >
+                    {label}
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 md:grid-cols-4 divide-x divide-y md:divide-y-0 divide-base-content/5">
+                <div class="p-4" id="traffic-requests">
+                  <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">Requests</p>
+                  <p
+                    id="traffic-requests-value"
+                    class="text-2xl font-bold text-base-content tracking-tight"
+                  >
+                    {format_traffic_number(@traffic.window_requests)}
+                  </p>
+                  <p class="text-[11px] text-base-content/35 mt-0.5">
+                    {format_rate(@traffic.requests_per_minute)}
+                  </p>
+                  <.sparkline
+                    points={@traffic.requests_series}
+                    color="primary"
+                    class="w-full h-8 mt-2"
+                  />
                 </div>
 
-                <div :if={
-                  Map.get(@traffic_stats, :status_breakdown) &&
-                    map_size(@traffic_stats.status_breakdown) > 0
-                }>
-                  <p class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-3">
-                    Status Code Breakdown
+                <div class="p-4" id="traffic-errors">
+                  <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">Errors</p>
+                  <p
+                    id="traffic-errors-value"
+                    class={[
+                      "text-2xl font-bold tracking-tight",
+                      if(@traffic.window_errors > 0, do: "text-error", else: "text-base-content")
+                    ]}
+                  >
+                    {format_traffic_number(@traffic.window_errors)}
                   </p>
-                  <div class="flex flex-wrap gap-3">
-                    <div
-                      :for={{code, count} <- Enum.sort(@traffic_stats.status_breakdown)}
-                      class={[
-                        "rounded-lg px-3 py-2 text-center min-w-[80px]",
-                        status_code_bg(code)
-                      ]}
-                    >
-                      <p class="text-xs font-medium text-base-content/60">{code}</p>
-                      <p class="text-sm font-bold text-base-content">
-                        {format_traffic_number(count)}
+                  <p class="text-[11px] text-base-content/35 mt-0.5">
+                    {format_percent_1(@traffic.window_error_rate)} of requests
+                  </p>
+                  <.sparkline points={@traffic.errors_series} color="error" class="w-full h-8 mt-2" />
+                </div>
+
+                <div class="p-4" id="traffic-latency">
+                  <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">
+                    Avg latency
+                  </p>
+                  <p
+                    id="traffic-latency-value"
+                    class="text-2xl font-bold text-base-content tracking-tight"
+                  >
+                    {format_latency(@traffic.window_latency_ms)}
+                  </p>
+                  <p class="text-[11px] text-base-content/35 mt-0.5">
+                    lifetime {format_latency(TraefikMetrics.mean_latency_ms(@traffic.total))}
+                  </p>
+                </div>
+
+                <div class="p-4" id="traffic-transferred">
+                  <p class="text-xs text-base-content/40 uppercase tracking-wider mb-1">
+                    Transferred
+                  </p>
+                  <p
+                    id="traffic-transferred-value"
+                    class="text-2xl font-bold text-base-content tracking-tight"
+                  >
+                    {format_bytes(@traffic.window_bytes_out)}
+                  </p>
+                  <p class="text-[11px] text-base-content/35 mt-0.5">
+                    out · {format_bytes(@traffic.window_bytes_in)} in
+                  </p>
+                  <.sparkline points={@traffic.bytes_out_series} color="info" class="w-full h-8 mt-2" />
+                </div>
+              </div>
+            </div>
+
+            <%= if @traffic.seen? do %>
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <.area_chart
+                  series={@traffic.requests_series}
+                  label="Requests per minute"
+                  color="primary"
+                  format={&format_chart_rate/1}
+                />
+                <.area_chart
+                  series={@traffic.errors_series}
+                  label="Errors per minute"
+                  color="error"
+                  format={&format_chart_rate/1}
+                />
+              </div>
+
+              <%!-- Everything below is a LIFETIME counter. Traefik only breaks requests
+                    down by code/method/latency in the totals it exposes, so these cannot
+                    follow the window selector above, and saying so beats implying they do. --%>
+              <div
+                id="traffic-response-mix"
+                class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
+              >
+                <div class="px-4 py-3 border-b border-base-content/5">
+                  <h3 class="text-sm font-semibold text-base-content">Response mix</h3>
+                  <p id="traffic-lifetime-total" class="text-[11px] text-base-content/40 mt-0.5">
+                    Totals since Traefik last restarted — {format_traffic_number(
+                      @traffic.total.requests_total
+                    )} requests
+                  </p>
+                </div>
+
+                <div class="p-4 space-y-5">
+                  <div :if={map_size(@traffic.total.status_breakdown) > 0}>
+                    <div class="flex h-2 rounded-full overflow-hidden bg-base-200">
+                      <div
+                        :for={{code, count} <- status_segments(@traffic.total)}
+                        class={status_code_fill(code)}
+                        style={"width: #{segment_width(count, @traffic.total.requests_total)}%"}
+                        title={"#{code}: #{count}"}
+                      >
+                      </div>
+                    </div>
+                    <div class="flex flex-wrap gap-x-5 gap-y-2 mt-3">
+                      <div
+                        :for={{code, count} <- status_segments(@traffic.total)}
+                        class="flex items-center gap-2"
+                      >
+                        <span class={["size-2 rounded-full shrink-0", status_code_fill(code)]}></span>
+                        <span class="text-xs font-medium text-base-content">
+                          {status_label(code)}
+                        </span>
+                        <span class="text-xs text-base-content/40 tabular-nums">
+                          {format_traffic_number(count)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div :if={latency_bands(@traffic.total) != []}>
+                    <p class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-2">
+                      Latency distribution
+                    </p>
+                    <div class="space-y-1.5">
+                      <div
+                        :for={{label, count, share} <- latency_bands(@traffic.total)}
+                        class="flex items-center gap-3"
+                      >
+                        <span class="w-24 shrink-0 text-xs text-base-content/50 tabular-nums text-right">
+                          {label}
+                        </span>
+                        <div class="flex-1 h-2 rounded-full bg-base-200 overflow-hidden">
+                          <div
+                            class="h-full rounded-full bg-primary/70 transition-all duration-500"
+                            style={"width: #{share}%"}
+                          >
+                          </div>
+                        </div>
+                        <span class="w-16 shrink-0 text-xs text-base-content/40 tabular-nums">
+                          {format_traffic_number(count)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="flex flex-wrap gap-6">
+                    <div :if={map_size(@traffic.total.method_breakdown) > 0}>
+                      <p class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-2">
+                        Methods
                       </p>
+                      <div class="flex flex-wrap gap-1.5">
+                        <span
+                          :for={{method, count} <- sorted_breakdown(@traffic.total.method_breakdown)}
+                          class="inline-flex items-center gap-1.5 rounded-md bg-base-200/70 px-2 py-1"
+                        >
+                          <span class="text-[11px] font-semibold text-base-content">{method}</span>
+                          <span class="text-[11px] text-base-content/40 tabular-nums">
+                            {format_traffic_number(count)}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div :if={map_size(@traffic.total.protocol_breakdown) > 0}>
+                      <p class="text-xs font-semibold text-base-content/50 uppercase tracking-wider mb-2">
+                        Protocols
+                      </p>
+                      <div class="flex flex-wrap gap-1.5">
+                        <span
+                          :for={
+                            {protocol, count} <-
+                              sorted_breakdown(@traffic.total.protocol_breakdown)
+                          }
+                          class="inline-flex items-center gap-1.5 rounded-md bg-base-200/70 px-2 py-1"
+                        >
+                          <span class="text-[11px] font-semibold text-base-content">{protocol}</span>
+                          <span class="text-[11px] text-base-content/40 tabular-nums">
+                            {format_traffic_number(count)}
+                          </span>
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              <% else %>
-                <p class="text-sm text-base-content/50 py-4">
-                  No traffic data available yet. Metrics will appear once Traefik processes requests for this domain.
-                </p>
-              <% end %>
+              </div>
             <% else %>
+              <div class="rounded-lg bg-base-100 border border-base-content/5 p-8 text-center">
+                <.icon name="hero-chart-bar" class="size-8 text-base-content/15 mx-auto mb-3" />
+                <p class="text-sm text-base-content/50">
+                  Traefik has not reported anything for {if length(@traffic.routes) == 1,
+                    do: "this route",
+                    else: "these routes"} yet.
+                </p>
+                <p class="text-xs text-base-content/30 mt-1">
+                  Counters appear once the proxy serves a request; if the app is live and this
+                  stays empty, the router is probably not the one Traefik is using.
+                </p>
+              </div>
+            <% end %>
+
+            <%!-- Each router is metered separately, so a deployment whose labels define more
+                  than one is only fully described route by route. --%>
+            <div
+              :if={length(@traffic.routes) > 1}
+              id="traffic-routes"
+              class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden"
+            >
+              <div class="px-4 py-3 border-b border-base-content/5">
+                <h3 class="text-sm font-semibold text-base-content">Routes</h3>
+                <p class="text-[11px] text-base-content/40 mt-0.5">
+                  Lifetime totals per Traefik router
+                </p>
+              </div>
+              <div class="divide-y divide-base-content/5">
+                <div
+                  :for={route <- @traffic.routes}
+                  class="flex items-center gap-4 px-4 py-3 hover:bg-base-200/30 transition-colors duration-150"
+                >
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-base-content truncate">
+                      {route.host}<span class="text-base-content/40">{route.path}</span>
+                    </p>
+                    <p class="text-[11px] text-base-content/30 truncate font-mono">
+                      {route.subject || route.name}
+                    </p>
+                  </div>
+                  <span class={[
+                    "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+                    route_kind_class(route.kind)
+                  ]}>
+                    {route_kind_label(route.kind)}
+                  </span>
+                  <div class="w-20 shrink-0 text-right">
+                    <p class="text-sm font-semibold text-base-content tabular-nums">
+                      {format_traffic_number(route.stats.requests_total)}
+                    </p>
+                    <p class="text-[10px] text-base-content/30 uppercase tracking-wider">reqs</p>
+                  </div>
+                  <div class="w-20 shrink-0 text-right">
+                    <p class={[
+                      "text-sm font-semibold tabular-nums",
+                      if(route.stats.error_count > 0,
+                        do: "text-error",
+                        else: "text-base-content/40"
+                      )
+                    ]}>
+                      {format_traffic_number(route.stats.error_count)}
+                    </p>
+                    <p class="text-[10px] text-base-content/30 uppercase tracking-wider">errors</p>
+                  </div>
+                  <div class="w-24 shrink-0 text-right hidden sm:block">
+                    <p class="text-sm font-semibold text-base-content tabular-nums">
+                      {format_bytes(route.stats.responses_bytes_total)}
+                    </p>
+                    <p class="text-[10px] text-base-content/30 uppercase tracking-wider">out</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          <% else %>
+            <div class="rounded-lg bg-base-100 border border-base-content/5 overflow-hidden">
+              <div class="px-4 py-3 border-b border-base-content/5">
+                <h3 class="text-sm font-semibold text-base-content">Traffic</h3>
+              </div>
               <div class="py-8 text-center">
                 <.icon name="hero-globe-alt" class="size-8 text-base-content/15 mx-auto mb-3" />
                 <p class="text-sm text-base-content/50">
-                  No domain configured for this deployment.
+                  {no_traffic_reason(@deployment)}
                 </p>
                 <p class="text-xs text-base-content/30 mt-1">
                   Traffic metrics require a domain and reverse proxy routing.
                 </p>
               </div>
-            <% end %>
-          </div>
+            </div>
+          <% end %>
         </div>
 
         <%!-- Logs tab --%>
@@ -2175,12 +2553,19 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_datetime(nil), do: "—"
   defp format_datetime(dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M")
 
-  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_073_741_824,
+  defp format_bytes(bytes) when is_number(bytes) and bytes >= 1_073_741_824,
     do: "#{Float.round(bytes / 1_073_741_824, 1)} GB"
 
-  defp format_bytes(bytes) when is_integer(bytes),
+  defp format_bytes(bytes) when is_number(bytes) and bytes >= 1_048_576,
     do: "#{Float.round(bytes / 1_048_576, 1)} MB"
 
+  # Traffic in a short window is routinely kilobytes. Reporting that as "0.0 MB"
+  # is indistinguishable from no traffic at all, which is the thing this page exists
+  # to tell apart.
+  defp format_bytes(bytes) when is_number(bytes) and bytes >= 1024,
+    do: "#{Float.round(bytes / 1024, 1)} KB"
+
+  defp format_bytes(bytes) when is_number(bytes), do: "#{round(bytes)} B"
   defp format_bytes(_), do: "—"
 
   defp memory_percent(stats) do
@@ -2243,20 +2628,133 @@ defmodule HomelabWeb.DeploymentLive do
   defp format_traffic_number(n) when is_number(n) and n >= 1_000,
     do: "#{Float.round(n / 1_000, 1)}K"
 
-  defp format_traffic_number(n) when is_number(n), do: to_string(n)
+  # Window totals are diffs of float-valued samples, so this arrives as 43.0 rather
+  # than 43. A request count is a whole number either way.
+  defp format_traffic_number(n) when is_number(n), do: to_string(round(n))
   defp format_traffic_number(_), do: "0"
 
-  defp status_code_bg(code) when is_binary(code) do
+  defp format_rate(rpm) when is_number(rpm) and rpm >= 1,
+    do: "#{Float.round(rpm, 1)}/min"
+
+  defp format_rate(rpm) when is_number(rpm) and rpm > 0,
+    do: "#{Float.round(rpm * 60, 1)}/hr"
+
+  defp format_rate(_), do: "idle"
+
+  # The chart axis is already labelled "per minute", so the number carries no unit.
+  defp format_chart_rate(value) when is_number(value) and value >= 100,
+    do: format_traffic_number(value)
+
+  defp format_chart_rate(value) when is_number(value), do: "#{Float.round(value * 1.0, 1)}"
+  defp format_chart_rate(_), do: "—"
+
+  defp format_percent_1(value) when is_number(value), do: "#{Float.round(value * 1.0, 1)}%"
+  defp format_percent_1(_), do: "—"
+
+  defp format_latency(ms) when is_number(ms) and ms >= 1_000,
+    do: "#{Float.round(ms / 1_000, 2)} s"
+
+  defp format_latency(ms) when is_number(ms) and ms >= 1, do: "#{round(ms)} ms"
+  defp format_latency(ms) when is_number(ms) and ms > 0, do: "<1 ms"
+  defp format_latency(_), do: "—"
+
+  # Codes sort as numbers, not as strings -- otherwise "1000" would land between
+  # "100" and "200", and the bar's colour bands would interleave.
+  defp status_segments(stats) do
+    stats.status_breakdown
+    |> Enum.sort_by(fn {code, _} ->
+      case Integer.parse(to_string(code)) do
+        {n, _} -> n
+        :error -> 999_999
+      end
+    end)
+  end
+
+  # Traefik records `code="0"` for a connection that never produced an HTTP status --
+  # in practice a websocket that was upgraded and held open. Labelling it "0" reads
+  # like a bug; labelling it as what it is does not.
+  defp status_label("0"), do: "upgraded"
+  defp status_label(code), do: to_string(code)
+
+  defp status_code_fill("0"), do: "bg-base-content/25"
+
+  defp status_code_fill(code) when is_binary(code) do
     cond do
-      String.starts_with?(code, "2") -> "bg-success/10"
-      String.starts_with?(code, "3") -> "bg-info/10"
-      String.starts_with?(code, "4") -> "bg-warning/10"
-      String.starts_with?(code, "5") -> "bg-error/10"
-      true -> "bg-base-200"
+      String.starts_with?(code, "2") -> "bg-success"
+      String.starts_with?(code, "3") -> "bg-info"
+      String.starts_with?(code, "4") -> "bg-warning"
+      String.starts_with?(code, "5") -> "bg-error"
+      true -> "bg-base-content/25"
     end
   end
 
-  defp status_code_bg(_), do: "bg-base-200"
+  defp status_code_fill(_), do: "bg-base-content/25"
+
+  defp segment_width(_count, total) when not is_number(total) or total <= 0, do: 0
+
+  # A slice that rounds to zero width vanishes from the bar entirely, so a handful of
+  # 500s among a million 200s would look like a clean record. Floored at a hairline.
+  defp segment_width(count, total) do
+    max(Float.round(count / total * 100, 2), 0.4)
+  end
+
+  # `{label, count, share-of-measured-requests}` per latency band, for the bars.
+  defp latency_bands(stats) do
+    bands = TraefikMetrics.latency_histogram(stats)
+    total = bands |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+
+    if total > 0 do
+      Enum.map(bands, fn {label, count} ->
+        {label, count, Float.round(count / total * 100, 2)}
+      end)
+    else
+      []
+    end
+  end
+
+  defp sorted_breakdown(breakdown) do
+    Enum.sort_by(breakdown, fn {_key, count} -> -count end)
+  end
+
+  defp route_kind_label(:primary), do: "host"
+  defp route_kind_label(:host), do: "alias"
+  defp route_kind_label(:path), do: "path"
+  defp route_kind_label(_), do: "route"
+
+  defp route_kind_class(:primary), do: "bg-primary/10 text-primary"
+  defp route_kind_class(:host), do: "bg-info/10 text-info"
+  defp route_kind_class(:path), do: "bg-base-200 text-base-content/50"
+  defp route_kind_class(_), do: "bg-base-200 text-base-content/50"
+
+  defp traffic_coverage_label(%{covered_seconds: 0}), do: "Waiting for the first samples"
+
+  defp traffic_coverage_label(traffic) do
+    window_seconds = traffic.window_minutes * 60
+
+    # A window the samples do not fill -- a fresh boot, or a gap while the collector was
+    # down -- would otherwise read as a quiet period rather than as missing data.
+    if traffic.covered_seconds < window_seconds * 0.8 do
+      "Last #{humanize_minutes(traffic.window_minutes)} · #{humanize_seconds(traffic.covered_seconds)} of samples"
+    else
+      "Last #{humanize_minutes(traffic.window_minutes)}"
+    end
+  end
+
+  defp humanize_minutes(minutes) when minutes >= 1440, do: "#{div(minutes, 1440)}d"
+  defp humanize_minutes(minutes) when minutes >= 60, do: "#{div(minutes, 60)}h"
+  defp humanize_minutes(minutes), do: "#{minutes}m"
+
+  defp humanize_seconds(seconds) when seconds >= 3600, do: "#{round(seconds / 3600)}h"
+  defp humanize_seconds(seconds) when seconds >= 60, do: "#{round(seconds / 60)}m"
+  defp humanize_seconds(seconds), do: "#{round(seconds)}s"
+
+  defp no_traffic_reason(%{domain: domain}) when domain in [nil, ""],
+    do: "No domain configured for this deployment."
+
+  defp no_traffic_reason(deployment) do
+    "This deployment is not routed through the proxy " <>
+      "(#{Access.effective_exposure(deployment)} access), so Traefik never sees its requests."
+  end
 
   defp format_status(:running), do: "Running"
   defp format_status(:pending), do: "Pending"
