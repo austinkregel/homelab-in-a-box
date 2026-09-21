@@ -1747,6 +1747,226 @@ defmodule HomelabWeb.DeploymentLiveTest do
     end
   end
 
+  describe "traffic tab against a real Traefik scrape" do
+    @domain "trafficdemo.homelab.local"
+    @service "trafficdemo-homelab-local@docker"
+    @alias_service "alias-homelab-local@docker"
+
+    defp traefik_body(service, requests, extra \\ "") do
+      """
+      traefik_service_requests_total{code="200",method="GET",protocol="http",service="#{service}"} #{requests}
+      traefik_service_requests_total{code="503",method="GET",protocol="http",service="#{service}"} 4
+      traefik_service_responses_bytes_total{code="200",method="GET",protocol="http",service="#{service}"} 2097152
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="#{service}",le="0.1"} #{requests}
+      traefik_service_request_duration_seconds_bucket{code="200",method="GET",protocol="http",service="#{service}",le="+Inf"} #{requests}
+      traefik_service_request_duration_seconds_sum{code="200",method="GET",protocol="http",service="#{service}"} 4.0
+      traefik_service_request_duration_seconds_count{code="200",method="GET",protocol="http",service="#{service}"} #{requests}
+      """ <> extra
+    end
+
+    setup do
+      bypass = Bypass.open()
+
+      previous = Application.get_env(:homelab, Homelab.System.TraefikMetrics)
+
+      Application.put_env(:homelab, Homelab.System.TraefikMetrics,
+        metrics_url: "http://localhost:#{bypass.port}/metrics"
+      )
+
+      on_exit(fn -> restore(Homelab.System.TraefikMetrics, previous) end)
+
+      {:ok, bypass: bypass}
+    end
+
+    # The headline figures sit next to an inline sparkline whose path coordinates are
+    # also digits, so a substring match on the whole tile would happily pass on the
+    # wrong number. Read the value element's text and compare it exactly.
+    defp text_of(view, selector) do
+      view
+      |> element(selector)
+      |> render()
+      |> String.replace(~r/<[^>]*>/, "")
+      |> String.trim()
+    end
+
+    defp serve_metrics(bypass, body) do
+      Bypass.stub(bypass, "GET", "/metrics", fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.resp(200, body)
+      end)
+    end
+
+    defp routed_deployment(tenant, template, overrides \\ []) do
+      insert(
+        :deployment,
+        [
+          tenant: tenant,
+          app_template: template,
+          status: :running,
+          external_id: "c_traffic",
+          domain: @domain
+        ] ++ overrides
+      )
+    end
+
+    defp open_traffic(conn, deployment) do
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{deployment.id}")
+      render_click(view, "switch_tab", %{"tab" => "traffic"})
+      view
+    end
+
+    test "reports traffic for a router Traefik meters under a provider suffix", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      # The regression. Traefik keys this service "…@docker"; the page derives the bare
+      # router name from the domain. Matching those by equality found nothing, so a
+      # deployment serving 1,200 requests rendered as four zeros forever.
+      serve_metrics(bypass, traefik_body(@service, 1200))
+
+      view = open_traffic(conn, routed_deployment(tenant, template))
+
+      assert view |> element("#traffic-lifetime-total") |> render() =~ "1.2K requests"
+      refute render(view) =~ "has not reported anything"
+    end
+
+    test "window totals come from diffs of the persisted counters", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      serve_metrics(bypass, traefik_body(@service, 1200))
+
+      base = DateTime.utc_now() |> DateTime.add(-120, :second)
+
+      for {offset, requests, errors} <- [{0, 1000, 10}, {10, 1030, 12}, {20, 1060, 13}] do
+        Homelab.Telemetry.record_snapshot(
+          %{
+            traefik: %{
+              @service => %{
+                requests_total: requests,
+                error_count: errors,
+                responses_bytes_total: 1_000_000 + offset * 1000,
+                requests_bytes_total: 5_000,
+                duration_seconds_sum: requests / 100,
+                duration_count: requests
+              }
+            }
+          },
+          DateTime.add(base, offset, :second)
+        )
+      end
+
+      view = open_traffic(conn, routed_deployment(tenant, template))
+
+      # 1060 - 1000 served in the window, of which 13 - 10 failed. The lifetime counter
+      # says 1204; reporting that as "the last 30 minutes" is the thing being avoided.
+      assert text_of(view, "#traffic-requests-value") == "60"
+      assert text_of(view, "#traffic-errors-value") == "3"
+    end
+
+    test "a deployment answering on a second host counts both routers", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      serve_metrics(
+        bypass,
+        traefik_body(@service, 1200, traefik_body(@alias_service, 300))
+      )
+
+      deployment =
+        routed_deployment(tenant, template,
+          additional_domains: [%{"host" => "alias.homelab.local"}]
+        )
+
+      view = open_traffic(conn, deployment)
+
+      # 1204 + 304 across the two routers. Reading only the base one under-reports by a
+      # fifth, and nothing on the page would say so.
+      assert view |> element("#traffic-lifetime-total") |> render() =~ "1.5K requests"
+
+      routes = view |> element("#traffic-routes") |> render()
+      assert routes =~ @domain
+      assert routes =~ "alias.homelab.local"
+    end
+
+    test "a single-route deployment has no routes breakdown to show", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      serve_metrics(bypass, traefik_body(@service, 1200))
+
+      view = open_traffic(conn, routed_deployment(tenant, template))
+
+      refute has_element?(view, "#traffic-routes")
+    end
+
+    test "changing the window reloads the tab", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      serve_metrics(bypass, traefik_body(@service, 1200))
+
+      base = DateTime.utc_now() |> DateTime.add(-3600, :second)
+
+      # Two samples an hour ago: inside a 3h window, outside a 30m one.
+      for {offset, requests} <- [{0, 500}, {10, 700}] do
+        Homelab.Telemetry.record_snapshot(
+          %{traefik: %{@service => %{requests_total: requests}}},
+          DateTime.add(base, offset, :second)
+        )
+      end
+
+      view = open_traffic(conn, routed_deployment(tenant, template))
+
+      assert text_of(view, "#traffic-requests-value") == "0"
+
+      render_click(view, "set_traffic_window", %{"minutes" => "180"})
+      assert text_of(view, "#traffic-requests-value") == "200"
+    end
+
+    test "an unreachable Traefik still renders the tab", %{
+      conn: conn,
+      tenant: tenant,
+      template: template,
+      bypass: bypass
+    } do
+      Bypass.down(bypass)
+
+      view = open_traffic(conn, routed_deployment(tenant, template))
+
+      assert has_element?(view, "#traffic-tab")
+      assert has_element?(view, "#traffic-requests")
+    end
+
+    test "a non-proxied deployment says why there is nothing to meter", %{
+      conn: conn,
+      tenant: tenant,
+      bypass: bypass
+    } do
+      serve_metrics(bypass, traefik_body(@service, 1200))
+
+      template = insert(:app_template, exposure_mode: :host)
+      deployment = routed_deployment(tenant, template)
+
+      {:ok, view, _html} = live(conn, ~p"/deployments/#{deployment.id}")
+      html = render_click(view, "switch_tab", %{"tab" => "traffic"})
+
+      assert html =~ "not routed through the proxy"
+      refute has_element?(view, "#traffic-requests")
+    end
+  end
+
   describe "toggle_follow_logs on and off" do
     test "enables then disables follow logs", %{conn: conn, deployment: dep} do
       {:ok, view, _html} = live(conn, ~p"/deployments/#{dep.id}")
