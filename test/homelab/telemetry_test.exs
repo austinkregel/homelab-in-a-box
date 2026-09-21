@@ -96,6 +96,93 @@ defmodule Homelab.TelemetryTest do
     end
   end
 
+  describe "deltas/1 and delta_series/1" do
+    test "turns a running counter into what happened in each interval" do
+      base = DateTime.utc_now() |> DateTime.add(-60, :second)
+
+      series = [
+        %{recorded_at: base, value: 100.0},
+        %{recorded_at: DateTime.add(base, 10, :second), value: 130.0},
+        %{recorded_at: DateTime.add(base, 20, :second), value: 131.0}
+      ]
+
+      assert Enum.map(Telemetry.deltas(series), & &1.value) == [30.0, 1.0]
+      assert Enum.map(Telemetry.deltas(series), & &1.seconds) == [10, 10]
+    end
+
+    test "the first sample is dropped — it has nothing to diff against" do
+      point = %{recorded_at: DateTime.utc_now(), value: 5.0}
+
+      assert Telemetry.deltas([point]) == []
+      assert Telemetry.deltas([]) == []
+    end
+
+    test "a counter reset records zero rather than a huge negative spike" do
+      base = DateTime.utc_now() |> DateTime.add(-60, :second)
+
+      # Traefik restarted between the second and third sample, so its counters
+      # went back to zero. The traffic served before the restart is simply gone.
+      series = [
+        %{recorded_at: base, value: 900.0},
+        %{recorded_at: DateTime.add(base, 10, :second), value: 1000.0},
+        %{recorded_at: DateTime.add(base, 20, :second), value: 12.0},
+        %{recorded_at: DateTime.add(base, 30, :second), value: 20.0}
+      ]
+
+      assert Enum.map(Telemetry.deltas(series), & &1.value) == [100.0, 0, 8.0]
+    end
+
+    test "delta_series reads a persisted counter and diffs it" do
+      base = DateTime.utc_now() |> DateTime.add(-100, :second)
+
+      for {offset, total} <- [{0, 10}, {10, 25}, {20, 60}] do
+        Telemetry.record_snapshot(
+          %{traefik: %{"app@docker" => %{requests_total: total}}},
+          DateTime.add(base, offset, :second)
+        )
+      end
+
+      deltas =
+        Telemetry.delta_series(
+          source: "traefik",
+          subject: "app@docker",
+          metric: "requests_total",
+          minutes: 30
+        )
+
+      assert Enum.map(deltas, & &1.value) == [15.0, 35.0]
+      assert Telemetry.delta_total(deltas) == 50.0
+    end
+
+    test "delta_total of an empty window is zero, not an error" do
+      assert Telemetry.delta_total([]) == 0
+    end
+  end
+
+  describe "traefik latency rows" do
+    test "records the duration sum and count so a window mean can be derived" do
+      rows =
+        Telemetry.rows_from_snapshot(
+          %{
+            traefik: %{
+              "app@docker" => %{
+                requests_total: 10,
+                duration_seconds_sum: 1.5,
+                duration_count: 10
+              }
+            }
+          },
+          DateTime.utc_now()
+        )
+
+      by_metric = Map.new(rows, &{&1.metric, &1.value})
+
+      # A stored MEAN could not be diffed across a window; a sum and a count can.
+      assert by_metric["duration_seconds_sum"] == 1.5
+      assert by_metric["duration_count"] == 10.0
+    end
+  end
+
   describe "subjects/3" do
     test "lists distinct subjects for a source/metric in the window" do
       Telemetry.record_snapshot(@snapshot)
