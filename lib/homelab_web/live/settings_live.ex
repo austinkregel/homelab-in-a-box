@@ -1073,7 +1073,6 @@ defmodule HomelabWeb.SettingsLive do
           <div :if={@revealed_recovery_key} class="space-y-3">
             <code
               id="recovery-key-value"
-              phx-no-curly-interpolation
               class="block px-4 py-3 rounded-lg bg-base-content/[0.06] font-mono text-sm text-base-content break-all leading-relaxed select-all"
             >
               {@revealed_recovery_key}

@@ -73,11 +73,26 @@ defmodule Homelab.Backups.Keys do
 
   @doc "The key the instance bundle is encrypted under."
   @spec bundle_key() :: binary()
-  def bundle_key, do: derive(ensure!(), @bundle_info)
+  def bundle_key, do: bundle_key(ensure!())
+
+  @doc """
+  The bundle key for a Recovery Key held in hand rather than on disk.
+
+  Restoring onto new hardware derives from a key the operator has just typed,
+  before there is anything on disk to read one from.
+  """
+  @spec bundle_key(binary()) :: binary()
+  def bundle_key(recovery_key) when byte_size(recovery_key) == @key_bytes,
+    do: derive(recovery_key, @bundle_info)
 
   @doc "The key each backup's own data key is wrapped under."
   @spec backup_master_key() :: binary()
-  def backup_master_key, do: derive(ensure!(), @backup_info)
+  def backup_master_key, do: backup_master_key(ensure!())
+
+  @doc "The backup master key for a Recovery Key held in hand rather than on disk."
+  @spec backup_master_key(binary()) :: binary()
+  def backup_master_key(recovery_key) when byte_size(recovery_key) == @key_bytes,
+    do: derive(recovery_key, @backup_info)
 
   @doc """
   A stable public identifier for the current key, recorded in every manifest.

@@ -136,6 +136,50 @@ defmodule Homelab.Backups.KeysTest do
     end
   end
 
+  # The derivation is the one thing in this module that can never change. Every backup
+  # and every bundle is sealed under a key derived this way, so a changed label, a
+  # changed hash or changed chunking silently orphans everything already written — and
+  # every other test here would still pass. These vectors were computed independently
+  # with `openssl dgst -sha256 -mac HMAC`, so they pin the derivation to HKDF-Expand
+  # over HMAC-SHA256 rather than to whatever this module happens to do today.
+  describe "key derivation (known answers)" do
+    @recovery_key Base.decode16!(
+                    "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F"
+                  )
+
+    test "the bundle key is HKDF-Expand(key, \"hiab:bundle:v1\")" do
+      assert Base.encode16(Keys.bundle_key(@recovery_key), case: :lower) ==
+               "19326175e08a9c62674659f2248df59d26560fceda00e5d508a6023149e030d3"
+    end
+
+    test "the backup master key is HKDF-Expand(key, \"hiab:backup:v1\")" do
+      assert Base.encode16(Keys.backup_master_key(@recovery_key), case: :lower) ==
+               "0511dff44f68d7f34d6eead17382b975326aceb3ea877e95d9dac2f547bd322f"
+    end
+
+    test "the fingerprint is the first 8 bytes of HKDF-Expand(key, \"hiab:fingerprint:v1\")" do
+      assert Keys.fingerprint_of(@recovery_key) == "e2a1beed26baab2c"
+    end
+
+    # The fingerprint is written into every manifest in the clear, so it must come from
+    # its own label rather than being a slice of a key that is still in use. Derived the
+    # lazy way — the first bytes of the bundle key — a published manifest would disclose
+    # part of the key protecting it.
+    test "the fingerprint discloses no part of either usable subkey" do
+      fingerprint = Base.decode16!(Keys.fingerprint_of(@recovery_key), case: :lower)
+
+      refute binary_part(Keys.bundle_key(@recovery_key), 0, 8) == fingerprint
+      refute binary_part(Keys.backup_master_key(@recovery_key), 0, 8) == fingerprint
+    end
+
+    test "a key held in hand derives the same subkeys as one read off disk" do
+      key = Keys.ensure!()
+
+      assert Keys.bundle_key(key) == Keys.bundle_key()
+      assert Keys.backup_master_key(key) == Keys.backup_master_key()
+    end
+  end
+
   describe "fingerprint/0" do
     test "identifies a key without disclosing it" do
       key = :crypto.strong_rand_bytes(32)
