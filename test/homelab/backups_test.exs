@@ -185,6 +185,27 @@ defmodule Homelab.BackupsTest do
       assert notification.title =~ "Backup failed"
       assert notification.body =~ "not installed"
       assert notification.severity == "error"
+
+      # The notification has to land somewhere that shows the reason, which is the
+      # deployment's own backups tab.
+      assert notification.link == "/deployments/#{job.deployment_id}?tab=backups"
+    end
+
+    # The row is written before anything is announced, so a notification never refers
+    # to a run whose outcome has not settled.
+    test "records the outcome before announcing it" do
+      admin = insert(:user, role: :admin)
+      job = insert(:backup_job, deployment: insert(:deployment))
+      Phoenix.PubSub.subscribe(Homelab.PubSub, "notifications:#{admin.id}")
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:error, {:restic_missing, "restic is not installed"}}
+      end)
+
+      assert {:ok, _} = Backups.execute_backup(job)
+
+      assert_receive {:notification, _}, 1_000
+      assert Backups.get_backup_job(job.id) |> elem(1) |> Map.get(:status) == :failed
     end
 
     test "announces a success to the activity log" do

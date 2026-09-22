@@ -4,9 +4,13 @@ defmodule Homelab.Backups do
   """
 
   import Ecto.Query
-  alias Homelab.Repo
+  alias Homelab.Accounts
   alias Homelab.Backups.BackupJob
+  alias Homelab.Backups.Failure
   alias Homelab.Deployments.PermanentHome
+  alias Homelab.Notifications
+  alias Homelab.Repo
+  alias Homelab.Services.ActivityLog
 
   @doc """
   Every deployment paired with the state of its protection.
@@ -204,11 +208,62 @@ defmodule Homelab.Backups do
 
     with {:ok, running_job} <- start_backup(job) do
       case attempt_backup(backup_provider, deployment) do
-        {:ok, snapshot_id} -> complete_backup(running_job, snapshot_id, nil)
-        {:error, message} -> fail_backup(running_job, message)
+        # The outcome is recorded before it is announced, so a notification is only
+        # ever raised about a row that has already settled — and an announcement that
+        # fails cannot cost the result.
+        {:ok, snapshot_id} ->
+          result = complete_backup(running_job, snapshot_id, nil)
+          announce_success(deployment)
+          result
+
+        {:error, reason} ->
+          result = fail_backup(running_job, Failure.to_message(reason))
+          announce_failure(deployment, reason)
+          result
       end
     end
   end
+
+  # A backup that fails on a schedule has nobody watching a flash message, and until
+  # now it wrote nothing to the activity log and raised no notification — so the only
+  # trace was a row in a table the page never rendered. Protection silently lapsing is
+  # the one failure this feature cannot afford to keep quiet about.
+  defp announce_failure(deployment, reason) do
+    %{summary: summary} = Failure.describe(reason)
+    label = deployment_label(deployment)
+
+    ActivityLog.error("backups", "Backup of #{label} failed: #{summary}", %{
+      deployment_id: deployment.id,
+      reason: inspect(reason)
+    })
+
+    for user <- Accounts.list_admins() do
+      Notifications.create(%{
+        user_id: user.id,
+        title: "Backup failed: #{label}",
+        body: summary,
+        severity: "error",
+        link: "/deployments/#{deployment.id}?tab=backups"
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp announce_success(deployment) do
+    ActivityLog.info("backups", "Backup of #{deployment_label(deployment)} completed", %{
+      deployment_id: deployment.id
+    })
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp deployment_label(%{app_template: %{name: name}}) when is_binary(name), do: name
+  defp deployment_label(%{id: id}), do: "deployment #{id}"
 
   # Both steps here raise rather than return `{:error, _}` on the most common
   # misconfigurations: `managed_root/0` raises when Settings → Storage is unset, and a
@@ -220,15 +275,17 @@ defmodule Homelab.Backups do
     repo = backup_repo()
     tags = ["deployment:#{deployment.id}", "app:#{deployment.app_template.slug}"]
 
+    # Reasons travel as terms rather than strings so `Failure` can recognise them; an
+    # `inspect` here would leave it matching on prose.
     case backup_provider.backup(source_path, repo, tags) do
       {:ok, snapshot_id} -> {:ok, snapshot_id}
-      {:error, reason} -> {:error, inspect(reason)}
-      other -> {:error, inspect(other)}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_provider_result, other}}
     end
   rescue
-    error -> {:error, Exception.message(error)}
+    error -> {:error, error}
   catch
-    :exit, reason -> {:error, inspect(reason)}
+    :exit, reason -> {:error, {:exited, reason}}
   end
 
   # Where this deployment's managed data actually is.
