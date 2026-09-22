@@ -21,7 +21,7 @@ defmodule HomelabWeb.DomainsLive do
       |> assign(:modal_form, nil)
       |> assign(:editing_zone_id, nil)
       |> assign(:syncing, false)
-      |> assign(:tls_probes, %{})
+      |> assign(:rechecking, false)
       |> load_all_data()
 
     {:ok, socket}
@@ -31,11 +31,7 @@ defmodule HomelabWeb.DomainsLive do
   def handle_params(params, _uri, socket) do
     tab = params["tab"]
     tab = if tab in @tabs, do: tab, else: "zones"
-
-    {:noreply,
-     socket
-     |> assign(:active_tab, tab)
-     |> probe_missing_tls()}
+    {:noreply, assign(socket, :active_tab, tab)}
   end
 
   @impl true
@@ -269,18 +265,33 @@ defmodule HomelabWeb.DomainsLive do
     end
   end
 
-  # Throws every answer away and asks again, for the operator who just fixed DNS or
-  # watched ACME finish and wants to know now rather than on the next page load.
+  # For the operator who just fixed DNS or watched ACME finish and does not want to wait
+  # up to six hours for `CertManager`'s next pass to notice.
+  #
+  # This is the ONLY thing on this page that opens a handshake, and it takes an explicit
+  # click to do it. Ordinary page views read the rows the observer wrote — a table of 19
+  # domains that probed on render would put 19 TLS connections on the box every time
+  # someone glanced at the tab.
   def handle_event("recheck_tls", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(:tls_probes, %{})
-     |> probe_missing_tls()}
+    fqdns = Enum.map(socket.assigns.domains, & &1.domain)
+    parent = self()
+
+    # Off-process: 19 handshakes against hosts that may not answer, and the page must
+    # not sit on their timeouts.
+    Task.Supervisor.start_child(Homelab.TlsProbeSupervisor, fn ->
+      Homelab.Networking.TlsObserver.observe_fqdns(fqdns)
+      send(parent, :tls_rechecked)
+    end)
+
+    {:noreply, assign(socket, :rechecking, true)}
   end
 
   @impl true
-  def handle_info({:tls_probed, fqdn, result}, socket) do
-    {:noreply, assign(socket, :tls_probes, Map.put(socket.assigns.tls_probes, fqdn, result))}
+  def handle_info(:tls_rechecked, socket) do
+    {:noreply,
+     socket
+     |> assign(:rechecking, false)
+     |> load_all_data()}
   end
 
   def handle_info(:do_sync_registrar, socket) do
@@ -319,83 +330,7 @@ defmodule HomelabWeb.DomainsLive do
     |> assign(:domains, domains)
     |> assign(:dns_records, all_records)
     |> assign(:deployments_without_domain, deployments_without_domain)
-    |> probe_missing_tls()
   end
-
-  # What the TLS column reports, and it is deliberately not the `domains.tls_status`
-  # column. That column is written in exactly one place — `CertManager`, from Traefik's
-  # router API — which calls a domain active because a router exists and then invents a
-  # 90-day expiry, and it is never written at all for a deployment that carries its
-  # domain as a plain string with no `domains` row, which is every domain on a box that
-  # has not been through the Add Domain modal. Those rows were hardcoded `:pending`
-  # below, so names that had been served by a real wildcard certificate for months
-  # reported as awaiting one.
-  #
-  # `TlsProbe` completes a handshake and reads the leaf the server presents, wildcards
-  # included. It is the same seam the deployment page reads.
-  #
-  # Only names with no answer yet are probed, so saving a zone or a DNS record — both
-  # of which reload this page's data — does not re-handshake the whole table. The
-  # Re-check button is the way to ask again.
-  #
-  # And only while this tab is the one being looked at. Landing on Zones should not
-  # open a handshake to every domain on the box for a table nobody has asked for.
-  defp probe_missing_tls(%{assigns: %{active_tab: "domains"}} = socket) do
-    known = socket.assigns.tls_probes
-
-    names =
-      socket.assigns.domains
-      |> Enum.map(& &1.domain)
-      |> Enum.uniq()
-      |> Enum.reject(&Map.has_key?(known, &1))
-
-    if connected?(socket) and names != [] do
-      spawn_probes(names)
-      assign(socket, :tls_probes, Map.merge(known, Map.new(names, &{&1, :loading})))
-    else
-      socket
-    end
-  end
-
-  defp probe_missing_tls(socket), do: socket
-
-  # Off the LiveView process: a table of 19 domains is 19 handshakes against hosts that
-  # may not answer, and the page must not sit on their timeouts. Results arrive one
-  # message at a time so each row settles as soon as its own name does.
-  #
-  # Each probe is caught individually. `:public_key.pkix_decode_cert/2` raises on a
-  # certificate it cannot parse, and one unparseable cert must not strand every other
-  # row on "Checking…".
-  defp spawn_probes(names) do
-    probe = tls_probe_impl()
-    parent = self()
-
-    Task.Supervisor.start_child(Homelab.TlsProbeSupervisor, fn ->
-      names
-      |> Task.async_stream(
-        fn name ->
-          result =
-            try do
-              probe.inspect_domain(name)
-            rescue
-              error -> {:error, error}
-            end
-
-          send(parent, {:tls_probed, name, result})
-        end,
-        # `inspect_domain/2` bounds its own handshake at 5s, so the stream does not need
-        # a deadline of its own — and a killed task would leave its row on "Checking…"
-        # with no message ever arriving.
-        max_concurrency: 8,
-        timeout: :infinity
-      )
-      |> Stream.run()
-    end)
-  end
-
-  # Swappable so tests don't reach out to the real internet on every page mount.
-  defp tls_probe_impl,
-    do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
 
   defp load_domains do
     networking_domains = Networking.list_domains()
@@ -408,7 +343,8 @@ defmodule HomelabWeb.DomainsLive do
           app_name: d.deployment.app_template.name,
           tenant_name: d.deployment.tenant.name,
           exposure_mode: d.exposure_mode,
-          zone_name: if(d.dns_zone, do: d.dns_zone.name, else: nil)
+          zone_name: if(d.dns_zone, do: d.dns_zone.name, else: nil),
+          tls: tls_observation(d)
         }
       end)
 
@@ -428,11 +364,31 @@ defmodule HomelabWeb.DomainsLive do
           # and on this page exposure is the whole point — a deployment made private
           # listed itself as public for as long as the override stood.
           exposure_mode: Access.effective_exposure(d),
-          zone_name: nil
+          zone_name: nil,
+          # No `domains` row, so nothing has ever been recorded against this name and
+          # there is nowhere to record it. `SyncDomain` creates that row on release, so
+          # this is a deployment that predates the step or took a path that skipped it.
+          # Said plainly rather than shown as a TLS state it is not.
+          tls: :untracked
         }
       end)
 
     from_networking ++ from_deployments
+  end
+
+  # The row as the observer left it. `nil` status means nobody has looked yet, which is
+  # a different claim from any status — a domain deployed ten minutes ago has not been
+  # found unhealthy, it has not been checked.
+  defp tls_observation(%{tls_observed_status: nil}), do: :never_checked
+
+  defp tls_observation(domain) do
+    %{
+      status: domain.tls_observed_status,
+      matched_name: domain.tls_matched_name,
+      issuer: domain.tls_issuer,
+      checked_at: domain.tls_checked_at,
+      expires_at: domain.tls_expires_at
+    }
   end
 
   defp load_deployments_without_domain do
@@ -500,7 +456,7 @@ defmodule HomelabWeb.DomainsLive do
                 syncing={@syncing}
               />
             <% "domains" -> %>
-              <.domains_tab domains={@domains} tls_probes={@tls_probes} />
+              <.domains_tab domains={@domains} rechecking={@rechecking} />
             <% "records" -> %>
               <.records_tab dns_records={@dns_records} />
           <% end %>
@@ -879,10 +835,14 @@ defmodule HomelabWeb.DomainsLive do
             type="button"
             id="recheck-tls"
             phx-click="recheck_tls"
-            class="flex items-center gap-1.5 text-xs font-medium text-base-content/50 hover:text-primary transition-colors cursor-pointer"
+            disabled={@rechecking}
+            class="flex items-center gap-1.5 text-xs font-medium text-base-content/50 hover:text-primary transition-colors cursor-pointer disabled:cursor-wait disabled:text-base-content/30"
           >
-            <.icon name="hero-arrow-path-mini" class="size-3.5" />
-            <span>Re-check TLS</span>
+            <.icon
+              name="hero-arrow-path-mini"
+              class={["size-3.5", @rechecking && "animate-spin"]}
+            />
+            <span>{if @rechecking, do: "Checking…", else: "Re-check TLS"}</span>
           </button>
         </div>
         <button
@@ -953,7 +913,7 @@ defmodule HomelabWeb.DomainsLive do
                 </span>
               </td>
               <td class="px-6 py-4">
-                <.tls_cell probe={Map.get(@tls_probes, domain.domain, :idle)} />
+                <.tls_cell tls={domain.tls} />
               </td>
               <td class="px-6 py-4">
                 <.exposure_pill mode={domain.exposure_mode} />
@@ -1179,14 +1139,14 @@ defmodule HomelabWeb.DomainsLive do
   defp format_sync_status(:error), do: "Error"
   defp format_sync_status(s), do: to_string(s)
 
-  # Reports the certificate the name is ACTUALLY serving, plus which name on that
-  # certificate covers it — a subdomain riding `*.homelab.example.com` and an apex
-  # domain with its own certificate are both valid, and which one it is is the thing
-  # an operator is looking at this table to find out.
-  attr :probe, :any, required: true
+  # The certificate the name was last seen serving, read from the row rather than from a
+  # handshake opened on render. Three parts, because a stored reading needs all three to
+  # be honest: what was seen, which name on the certificate covered this domain, and how
+  # long ago we looked.
+  attr :tls, :any, required: true
 
   defp tls_cell(assigns) do
-    assigns = assign(assigns, :state, tls_state(assigns.probe))
+    assigns = assign(assigns, :state, tls_state(assigns.tls))
 
     ~H"""
     <div class="flex flex-col items-start gap-1">
@@ -1200,26 +1160,32 @@ defmodule HomelabWeb.DomainsLive do
         <.icon name={tls_icon(@state)} class="size-3" />
         {format_tls(@state)}
       </span>
-      <span :if={tls_detail(@probe)} class="text-[10px] text-base-content/35 font-mono">
-        {tls_detail(@probe)}
+      <span :if={tls_detail(@tls)} class="text-[10px] text-base-content/35 font-mono">
+        {tls_detail(@tls)}
+      </span>
+      <span :if={tls_checked_ago(@tls)} class="text-[10px] text-base-content/25">
+        {tls_checked_ago(@tls)}
       </span>
     </div>
     """
   end
 
-  defp tls_state(:idle), do: :checking
-  defp tls_state(:loading), do: :checking
-  defp tls_state({:ok, %{status: status}}), do: status
-  defp tls_state({:error, _reason}), do: :unreachable
+  defp tls_state(:untracked), do: :untracked
+  defp tls_state(:never_checked), do: :never_checked
+  defp tls_state(%{status: status}), do: status
 
   defp tls_classes(:valid), do: "bg-success/10 text-success"
   defp tls_classes(:expiring), do: "bg-warning/10 text-warning"
-  defp tls_classes(:checking), do: "bg-base-200 text-base-content/40"
+
+  defp tls_classes(state) when state in [:untracked, :never_checked],
+    do: "bg-base-200 text-base-content/40"
+
   defp tls_classes(_), do: "bg-error/10 text-error"
 
   defp tls_icon(:valid), do: "hero-lock-closed-mini"
   defp tls_icon(:expiring), do: "hero-clock-mini"
-  defp tls_icon(:checking), do: "hero-ellipsis-horizontal-mini"
+  defp tls_icon(:never_checked), do: "hero-ellipsis-horizontal-mini"
+  defp tls_icon(:untracked), do: "hero-question-mark-circle-mini"
   defp tls_icon(:expired), do: "hero-exclamation-triangle-mini"
   defp tls_icon(:unreachable), do: "hero-no-symbol-mini"
   defp tls_icon(_), do: "hero-x-circle-mini"
@@ -1230,29 +1196,47 @@ defmodule HomelabWeb.DomainsLive do
   defp format_tls(:self_signed), do: "Default cert"
   defp format_tls(:name_mismatch), do: "Wrong name"
   defp format_tls(:unreachable), do: "No handshake"
-  defp format_tls(:checking), do: "Checking…"
+  defp format_tls(:never_checked), do: "Never checked"
+  defp format_tls(:untracked), do: "Untracked"
 
-  # The wildcard case is the one worth naming explicitly: it is why a domain nobody
-  # ever requested a certificate for is nonetheless served over real TLS.
-  defp tls_detail(
-         {:ok, %{matched_name: "*." <> _ = wildcard, days_remaining: days, status: status}}
-       )
+  # The wildcard case is the one worth naming explicitly: it is why a domain nobody ever
+  # requested a certificate for is nonetheless served over real TLS.
+  defp tls_detail(%{status: status, matched_name: "*." <> _ = wildcard} = tls)
        when status in [:valid, :expiring],
-       do: "#{wildcard} · #{days}d"
+       do: [wildcard, expiry_detail(tls)] |> Enum.reject(&is_nil/1) |> Enum.join(" · ")
 
-  defp tls_detail({:ok, %{status: :self_signed}}), do: "ACME never issued"
-  defp tls_detail({:ok, %{status: :name_mismatch, subject: subject}}), do: "serving #{subject}"
-  defp tls_detail({:ok, %{status: :expired, days_remaining: days}}), do: "#{abs(days)}d ago"
-  defp tls_detail({:ok, %{days_remaining: days}}), do: "#{days}d"
-  defp tls_detail({:error, reason}), do: tls_error_detail(reason)
+  defp tls_detail(%{status: status} = tls) when status in [:valid, :expiring],
+    do: expiry_detail(tls)
+
+  defp tls_detail(%{status: :self_signed}), do: "ACME never issued"
+
+  defp tls_detail(%{status: :name_mismatch}), do: "certificate is for another name"
+
+  defp tls_detail(%{status: :unreachable}), do: "nothing answering on :443"
+
+  defp tls_detail(%{status: :expired, expires_at: %DateTime{} = at}),
+    do: "#{abs(DateTime.diff(at, DateTime.utc_now(), :day))}d ago"
+
+  defp tls_detail(:untracked), do: "no domain record — redeploy to create one"
   defp tls_detail(_), do: nil
 
-  defp tls_error_detail({:handshake_failed, reason}), do: inspect(reason)
-  defp tls_error_detail({:no_peer_cert, _reason}), do: "no certificate offered"
-  # The rescue in `spawn_probes/1` — a certificate `:public_key` could not decode.
-  defp tls_error_detail(%{__exception__: true}), do: "unreadable certificate"
-  defp tls_error_detail(reason) when is_atom(reason), do: inspect(reason)
-  defp tls_error_detail(_reason), do: "nothing on :443"
+  defp expiry_detail(%{expires_at: %DateTime{} = at}),
+    do: "#{DateTime.diff(at, DateTime.utc_now(), :day)}d"
+
+  defp expiry_detail(_), do: nil
+
+  # A status with no age is not a claim anyone can act on: "Valid" six hours old and
+  # "Valid" three weeks old mean different things.
+  defp tls_checked_ago(%{checked_at: %DateTime{} = at}) do
+    case DateTime.diff(DateTime.utc_now(), at, :second) do
+      s when s < 120 -> "checked just now"
+      s when s < 5400 -> "checked #{div(s, 60)}m ago"
+      s when s < 172_800 -> "checked #{div(s, 3600)}h ago"
+      s -> "checked #{div(s, 86_400)}d ago"
+    end
+  end
+
+  defp tls_checked_ago(_), do: nil
 
   defp scope_badge(assigns) do
     ~H"""

@@ -21,6 +21,10 @@ defmodule Homelab.Networking.TlsProbeStub do
     staged |> Map.get(domain, :healthy) |> resolve(domain)
   end
 
+  # `:public_key.pkix_decode_cert/2` raises on a certificate it cannot parse, and a
+  # caller observing every domain on the box has to survive one of those.
+  defp resolve(:raise, domain), do: raise(ArgumentError, "cannot decode #{domain}")
+
   defp resolve(:healthy, domain), do: {:ok, healthy(domain)}
   defp resolve(:wildcard, domain), do: {:ok, wildcard(domain)}
   defp resolve(:self_signed, _domain), do: {:ok, self_signed()}

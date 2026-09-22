@@ -8,6 +8,9 @@ defmodule HomelabWeb.DomainsLiveTest do
   setup :set_mox_global
   setup :verify_on_exit!
 
+  # Row ids are the fqdn with dots swapped for dashes, so a selector can name one row.
+  @wildcarded "#domain-grafana-tls-example-com "
+
   setup do
     stub(Homelab.Mocks.DnsProvider, :list_records, fn _zone -> {:ok, []} end)
     :ok
@@ -521,7 +524,10 @@ defmodule HomelabWeb.DomainsLiveTest do
           deployment: deployment,
           dns_zone: zone,
           tls_status: :active,
-          exposure_mode: :public
+          exposure_mode: :public,
+          tls_observed_status: :valid,
+          tls_matched_name: "app.assigned.example.com",
+          tls_checked_at: DateTime.utc_now() |> DateTime.truncate(:second)
         )
 
       {:ok, deployment: deployment, domain: domain, zone: zone}
@@ -535,7 +541,7 @@ defmodule HomelabWeb.DomainsLiveTest do
 
     test "shows TLS status badge", %{conn: conn} do
       view = mounted_on_domains_tab(conn)
-      assert await_tls(view, "#domain-app-assigned-example-com [data-tls-status='valid']")
+      assert has_element?(view, "#domain-app-assigned-example-com [data-tls-status='valid']")
     end
 
     test "shows domain count", %{conn: conn} do
@@ -781,7 +787,8 @@ defmodule HomelabWeb.DomainsLiveTest do
     setup %{tenant: tenant, template: template} do
       zone = insert(:dns_zone, name: "tls.example.com")
 
-      # Stored :pending, but served by a wildcard. The regression, exactly.
+      # Stored :pending in the lifecycle column, but OBSERVED as covered by a wildcard.
+      # The regression, exactly: the page read the first and reported "Pending".
       wildcarded =
         insert(:deployment,
           tenant: tenant,
@@ -797,97 +804,132 @@ defmodule HomelabWeb.DomainsLiveTest do
           deployment: wildcarded,
           dns_zone: zone,
           tls_status: :pending,
-          exposure_mode: :public
+          exposure_mode: :public,
+          tls_observed_status: :valid,
+          tls_matched_name: "*.tls.example.com",
+          tls_issuer: "Let's Encrypt R3",
+          tls_expires_at:
+            DateTime.utc_now() |> DateTime.add(60, :day) |> DateTime.truncate(:second),
+          tls_checked_at: DateTime.utc_now() |> DateTime.truncate(:second)
         )
 
-      # No `domains` row at all -- the branch that hardcoded :pending.
-      unlinked =
+      # A row nobody has observed yet.
+      unobserved_deployment =
         insert(:deployment,
           tenant: tenant,
           app_template: template,
           status: :running,
-          external_id: "ext_tls_unlinked",
-          domain: "apex.example.org"
+          external_id: "ext_tls_unobserved",
+          domain: "fresh.tls.example.com"
         )
+
+      insert(:domain,
+        fqdn: "fresh.tls.example.com",
+        deployment: unobserved_deployment,
+        dns_zone: zone,
+        tls_status: :pending,
+        exposure_mode: :public
+      )
+
+      # No `domains` row at all -- the branch that used to hardcode :pending. There is
+      # nowhere to record an observation for this one.
+      insert(:deployment,
+        tenant: tenant,
+        app_template: template,
+        status: :running,
+        external_id: "ext_tls_untracked",
+        domain: "apex.example.org"
+      )
 
       on_exit(fn -> Application.delete_env(:homelab, :tls_probe_result) end)
 
-      {:ok, zone: zone, wildcarded_row: wildcarded_row, unlinked: unlinked}
+      {:ok, zone: zone, wildcarded_row: wildcarded_row}
     end
 
-    test "reports the wildcard certificate a subdomain is actually served by", %{conn: conn} do
-      Application.put_env(:homelab, :tls_probe_result, %{
-        "grafana.tls.example.com" => :wildcard
-      })
+    test "reports the wildcard certificate a subdomain is served by", %{conn: conn} do
+      html = render(mounted_on_domains_tab(conn))
 
+      assert html =~ "*.tls.example.com"
+
+      assert has_element?(
+               mounted_on_domains_tab(conn),
+               @wildcarded <> "[data-tls-status='valid']"
+             )
+    end
+
+    test "says how old the reading is", %{conn: conn} do
+      assert render(mounted_on_domains_tab(conn)) =~ "checked just now"
+    end
+
+    # A stored status with no age cannot be acted on, and "we have not looked" is not
+    # the same claim as any certificate state.
+    test "distinguishes a row nobody has observed from an unhealthy one", %{conn: conn} do
       view = mounted_on_domains_tab(conn)
 
-      assert await_tls(view, "#domain-grafana-tls-example-com [data-tls-status='valid']")
-      assert render(view) =~ "*.tls.example.com"
+      assert has_element?(view, "#domain-fresh-tls-example-com [data-tls-status='never_checked']")
+      refute render(view) =~ "checked just now · fresh"
     end
 
-    test "reports TLS for a deployment that has no domains row", %{conn: conn} do
+    test "says plainly that a deployment with no domains row is untracked", %{conn: conn} do
       view = mounted_on_domains_tab(conn)
 
-      assert await_tls(view, "#domain-apex-example-org [data-tls-status='valid']")
+      assert has_element?(view, "#domain-apex-example-org [data-tls-status='untracked']")
+      assert render(view) =~ "no domain record"
     end
 
-    test "reports Traefik's default certificate rather than calling it pending", %{conn: conn} do
+    # The point of storing it. A page view is a read, and 19 rows must not become 19
+    # handshakes every time someone opens the tab.
+    test "does not probe on render", %{conn: conn} do
+      # If the page probed, it would pick this up and report self-signed instead of the
+      # :valid the row records.
       Application.put_env(:homelab, :tls_probe_result, :self_signed)
 
       view = mounted_on_domains_tab(conn)
 
-      assert await_tls(view, "#domain-apex-example-org [data-tls-status='self_signed']")
-      assert render(view) =~ "ACME never issued"
+      assert has_element?(view, @wildcarded <> "[data-tls-status='valid']")
+      refute has_element?(view, @wildcarded <> "[data-tls-status='self_signed']")
     end
 
-    test "reports a failed handshake rather than claiming health", %{conn: conn} do
-      Application.put_env(:homelab, :tls_probe_result, {:error, {:handshake_failed, :nxdomain}})
+    test "does not write the lifecycle column while reporting", %{conn: conn, wildcarded_row: row} do
+      _view = mounted_on_domains_tab(conn)
 
-      view = mounted_on_domains_tab(conn)
-
-      assert await_tls(view, "#domain-apex-example-org [data-tls-status='unreachable']")
+      # `tls_status` is CertManager's; rendering must not touch it.
+      assert Homelab.Repo.get!(Homelab.Networking.Domain, row.id).tls_status == :pending
     end
 
-    # Reading the served certificate is all this page does with it. Writing it down is
-    # CertManager's job, and its tests cover that -- a page render must not mutate the
-    # column the renewal loop drives off.
-    test "does not write the stored status while reporting it", %{
-      conn: conn,
-      wildcarded_row: row
-    } do
-      Application.put_env(:homelab, :tls_probe_result, %{
-        "grafana.tls.example.com" => :wildcard
-      })
+    test "re-check observes again and records what it finds", %{conn: conn, wildcarded_row: row} do
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
 
       view = mounted_on_domains_tab(conn)
-      assert await_tls(view, "#domain-grafana-tls-example-com [data-tls-status='valid']")
+      assert has_element?(view, @wildcarded <> "[data-tls-status='valid']")
+
+      render_click(view, "recheck_tls", %{})
+
+      assert await_tls(view, @wildcarded <> "[data-tls-status='self_signed']")
 
       reloaded = Homelab.Repo.get!(Homelab.Networking.Domain, row.id)
+      assert reloaded.tls_observed_status == :self_signed
+      # Still the observer's business only. The lifecycle column is untouched, so the
+      # domain stays in the retry queue.
       assert reloaded.tls_status == :pending
     end
 
-    test "re-check asks again", %{conn: conn} do
-      Application.put_env(:homelab, :tls_probe_result, :self_signed)
-
+    test "re-check reaches a row that had never been observed", %{conn: conn} do
       view = mounted_on_domains_tab(conn)
-      assert await_tls(view, "#domain-apex-example-org [data-tls-status='self_signed']")
+      assert has_element?(view, "#domain-fresh-tls-example-com [data-tls-status='never_checked']")
 
-      Application.put_env(:homelab, :tls_probe_result, :healthy)
       render_click(view, "recheck_tls", %{})
 
-      assert await_tls(view, "#domain-apex-example-org [data-tls-status='valid']")
+      assert await_tls(view, "#domain-fresh-tls-example-com [data-tls-status='valid']")
     end
 
     test "shows exposure mode badges", %{conn: conn} do
-      view = mounted_on_domains_tab(conn)
-      html = render(view)
+      html = render(mounted_on_domains_tab(conn))
       assert html =~ "Public" or html =~ "SSO"
     end
 
     test "shows domain count for multiple domains", %{conn: conn} do
-      view = mounted_on_domains_tab(conn)
-      assert render(view) =~ "domain(s)"
+      assert render(mounted_on_domains_tab(conn)) =~ "domain(s)"
     end
   end
 

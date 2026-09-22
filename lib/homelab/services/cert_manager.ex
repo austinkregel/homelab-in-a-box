@@ -67,11 +67,16 @@ defmodule Homelab.Services.CertManager do
     gateway = Homelab.Config.gateway()
 
     if gateway do
+      # FIRST, and once. Every domain's observation is recorded here, which is what the
+      # Domains page reads — it does not probe for itself. The decisions below are then
+      # made from those observations rather than from a second round of handshakes.
+      observations = Homelab.Networking.TlsObserver.observe_all()
+
       threshold = DateTime.utc_now() |> DateTime.add(@renewal_threshold_days, :day)
       expiring = Homelab.Networking.list_expiring_tls(threshold)
       renewed = renew_certs(gateway, expiring)
 
-      check_pending_domains(gateway)
+      check_pending_domains(gateway, observations)
       maybe_enforce_tls()
 
       Process.send_after(self(), :check_certs, state.interval)
@@ -132,11 +137,11 @@ defmodule Homelab.Services.CertManager do
   # ticks this loop does not open a real TLS connection to the internet.
   defp tls_probe, do: Application.get_env(:homelab, :tls_probe, Homelab.Networking.TlsProbe)
 
-  defp check_pending_domains(gateway) do
+  defp check_pending_domains(gateway, observations) do
     pending = Homelab.Networking.list_pending_tls()
 
     Enum.each(pending, fn domain ->
-      case tls_probe().inspect_domain(domain.fqdn) do
+      case Map.get(observations, domain.fqdn, {:error, :not_observed}) do
         # Already serving a certificate a browser accepts, so there is nothing to
         # provision. This is the common case and it used to be invisible: a wildcard
         # `*.<base>` covers every subdomain the moment it is issued, and no `pending`
@@ -194,7 +199,13 @@ defmodule Homelab.Services.CertManager do
   # `list_expiring_tls/1` for two months, so a renewal that kept failing was reported as
   # having succeeded every six hours until the certificate expired underneath it.
   defp record_renewal(domain) do
-    case tls_probe().inspect_domain(domain.fqdn) do
+    # Re-observed rather than read from the pass-start observation: provisioning has
+    # happened since, and whether it changed anything is the whole question. Goes
+    # through the observer so the row's recorded observation reflects the new answer
+    # too, instead of the page showing a pre-renewal reading until the next pass.
+    observed = Homelab.Networking.TlsObserver.observe_fqdns([domain.fqdn])
+
+    case Map.get(observed, domain.fqdn, {:error, :not_observed}) do
       {:ok, %{status: status, not_after: not_after}} when status in [:valid, :expiring] ->
         expires_at = DateTime.truncate(not_after, :second)
 

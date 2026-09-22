@@ -57,6 +57,12 @@ defmodule Homelab.Factory do
       exposure_mode: :sso_protected,
       tls_status: :pending,
       tls_expires_at: nil,
+      # Never observed, which is what a freshly created row is. Tests that care about a
+      # recorded observation set these explicitly.
+      tls_observed_status: nil,
+      tls_matched_name: nil,
+      tls_issuer: nil,
+      tls_checked_at: nil,
       deployment: build(:deployment)
     }
   end
