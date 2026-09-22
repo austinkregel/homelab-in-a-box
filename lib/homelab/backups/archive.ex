@@ -476,12 +476,18 @@ defmodule Homelab.Backups.Archive do
     id = fetch(manifest, :id)
 
     with {:ok, data_key} <- unwrap_data_key(fetch(manifest, :wrapped_data_key), id, master_key),
-         {:ok, stream} <- open_read(target, config, fetch(manifest, :key), opts) do
+         {:ok, stream} <- open_read(target, config, manifest, opts) do
       run_extract(manifest, stream, data_key, dest, verify_only?)
     end
   end
 
-  defp open_read(target, config, key, opts) do
+  # A target that stores the archive as one object (S3) has to know where the frame
+  # boundaries fall to hand them back, and only the manifest knows. One that stores a
+  # frame per file (local disk) ignores it.
+  defp open_read(target, config, manifest, opts) do
+    key = fetch(manifest, :key)
+    opts = Keyword.put_new(opts, :frame_size, fetch(manifest, :frame_size))
+
     case target.read_stream(config, key, opts) do
       {:ok, stream} -> {:ok, stream}
       {:error, reason} -> {:error, {:target_unavailable, reason}}

@@ -53,8 +53,19 @@ services:
     volumes:
       # Lets the app manage containers and self-provision its database.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Durable secrets (secret_key_base, pg password) — survive restarts.
+      # Durable secrets (secret_key_base, pg password, backup recovery key) — these
+      # survive restarts, and losing them loses every backup written under them.
       - homelab-iab-secrets:/run/secrets
+      # Managed data, and where backups of it are written.
+      #
+      # Both are mounted at the SAME path inside as outside, deliberately. The daemon
+      # reads these paths as host paths when it creates managed volumes, while the app
+      # also reads them directly to archive them; if the two disagreed, the app would
+      # back up a directory the containers do not use. Without these mounts the app
+      # cannot see the data it is meant to protect, and an archive would land inside
+      # the container where the next restart erases it.
+      - ${HOMELAB_MANAGED_ROOT:-/srv/homelab/managed}:${HOMELAB_MANAGED_ROOT:-/srv/homelab/managed}
+      - ${HOMELAB_BACKUP_ROOT:-/srv/homelab/backups}:${HOMELAB_BACKUP_ROOT:-/srv/homelab/backups}
     ports:
       # Ingress is via the app's OWN Traefik, which the app provisions and to which
       # it registers its own route (Homelab.Services.GatewayProvisioner —
