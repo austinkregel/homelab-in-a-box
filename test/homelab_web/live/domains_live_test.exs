@@ -534,9 +534,8 @@ defmodule HomelabWeb.DomainsLiveTest do
     end
 
     test "shows TLS status badge", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/domains")
-      html = render_click(view, "switch_tab", %{"tab" => "domains"})
-      assert html =~ "Active"
+      view = mounted_on_domains_tab(conn)
+      assert await_tls(view, "#domain-app-assigned-example-com [data-tls-status='valid']")
     end
 
     test "shows domain count", %{conn: conn} do
@@ -773,78 +772,149 @@ defmodule HomelabWeb.DomainsLiveTest do
     end
   end
 
-  describe "domain assignments with TLS status" do
+  # The column used to render `domains.tls_status`, which is written only by CertManager
+  # and is never written at all for a deployment whose domain lives as a plain string
+  # with no `domains` row -- so a box whose every name had been served by a real
+  # wildcard certificate for months reported all of them as "Pending". These cover the
+  # cell against the certificate actually being served.
+  describe "domains tab TLS column" do
     setup %{tenant: tenant, template: template} do
       zone = insert(:dns_zone, name: "tls.example.com")
 
-      deployment_active =
+      # Stored :pending, but served by a wildcard. The regression, exactly.
+      wildcarded =
         insert(:deployment,
           tenant: tenant,
           app_template: template,
           status: :running,
-          external_id: "ext_tls_active",
-          domain: "secure.tls.example.com"
+          external_id: "ext_tls_wildcard",
+          domain: "grafana.tls.example.com"
         )
 
-      domain_active =
+      wildcarded_row =
         insert(:domain,
-          fqdn: "secure.tls.example.com",
-          deployment: deployment_active,
+          fqdn: "grafana.tls.example.com",
+          deployment: wildcarded,
           dns_zone: zone,
-          tls_status: :active,
+          tls_status: :pending,
           exposure_mode: :public
         )
 
-      deployment_pending =
+      # No `domains` row at all -- the branch that hardcoded :pending.
+      unlinked =
         insert(:deployment,
           tenant: tenant,
           app_template: template,
           status: :running,
-          external_id: "ext_tls_pending",
-          domain: "pending.tls.example.com"
+          external_id: "ext_tls_unlinked",
+          domain: "apex.example.org"
         )
 
-      domain_pending =
-        insert(:domain,
-          fqdn: "pending.tls.example.com",
-          deployment: deployment_pending,
-          dns_zone: zone,
-          tls_status: :pending,
-          exposure_mode: :sso_protected
-        )
+      on_exit(fn -> Application.delete_env(:homelab, :tls_probe_result) end)
 
-      {:ok,
-       zone: zone,
-       domain_active: domain_active,
-       domain_pending: domain_pending,
-       deployment_active: deployment_active,
-       deployment_pending: deployment_pending}
+      {:ok, zone: zone, wildcarded_row: wildcarded_row, unlinked: unlinked}
     end
 
-    test "shows Active TLS badge for active TLS domain", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/domains")
-      html = render_click(view, "switch_tab", %{"tab" => "domains"})
-      assert html =~ "Active"
-      assert html =~ "secure.tls.example.com"
+    test "reports the wildcard certificate a subdomain is actually served by", %{conn: conn} do
+      Application.put_env(:homelab, :tls_probe_result, %{
+        "grafana.tls.example.com" => :wildcard
+      })
+
+      view = mounted_on_domains_tab(conn)
+
+      assert await_tls(view, "#domain-grafana-tls-example-com [data-tls-status='valid']")
+      assert render(view) =~ "*.tls.example.com"
     end
 
-    test "shows Pending TLS badge for pending TLS domain", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/domains")
-      html = render_click(view, "switch_tab", %{"tab" => "domains"})
-      assert html =~ "Pending"
-      assert html =~ "pending.tls.example.com"
+    test "reports TLS for a deployment that has no domains row", %{conn: conn} do
+      view = mounted_on_domains_tab(conn)
+
+      assert await_tls(view, "#domain-apex-example-org [data-tls-status='valid']")
+    end
+
+    test "reports Traefik's default certificate rather than calling it pending", %{conn: conn} do
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+
+      view = mounted_on_domains_tab(conn)
+
+      assert await_tls(view, "#domain-apex-example-org [data-tls-status='self_signed']")
+      assert render(view) =~ "ACME never issued"
+    end
+
+    test "reports a failed handshake rather than claiming health", %{conn: conn} do
+      Application.put_env(:homelab, :tls_probe_result, {:error, {:handshake_failed, :nxdomain}})
+
+      view = mounted_on_domains_tab(conn)
+
+      assert await_tls(view, "#domain-apex-example-org [data-tls-status='unreachable']")
+    end
+
+    # Reading the served certificate is all this page does with it. Writing it down is
+    # CertManager's job, and its tests cover that -- a page render must not mutate the
+    # column the renewal loop drives off.
+    test "does not write the stored status while reporting it", %{
+      conn: conn,
+      wildcarded_row: row
+    } do
+      Application.put_env(:homelab, :tls_probe_result, %{
+        "grafana.tls.example.com" => :wildcard
+      })
+
+      view = mounted_on_domains_tab(conn)
+      assert await_tls(view, "#domain-grafana-tls-example-com [data-tls-status='valid']")
+
+      reloaded = Homelab.Repo.get!(Homelab.Networking.Domain, row.id)
+      assert reloaded.tls_status == :pending
+    end
+
+    test "re-check asks again", %{conn: conn} do
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+
+      view = mounted_on_domains_tab(conn)
+      assert await_tls(view, "#domain-apex-example-org [data-tls-status='self_signed']")
+
+      Application.put_env(:homelab, :tls_probe_result, :healthy)
+      render_click(view, "recheck_tls", %{})
+
+      assert await_tls(view, "#domain-apex-example-org [data-tls-status='valid']")
     end
 
     test "shows exposure mode badges", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/domains")
-      html = render_click(view, "switch_tab", %{"tab" => "domains"})
+      view = mounted_on_domains_tab(conn)
+      html = render(view)
       assert html =~ "Public" or html =~ "SSO"
     end
 
     test "shows domain count for multiple domains", %{conn: conn} do
-      {:ok, view, _html} = live(conn, ~p"/domains")
-      html = render_click(view, "switch_tab", %{"tab" => "domains"})
-      assert html =~ "domain(s)"
+      view = mounted_on_domains_tab(conn)
+      assert render(view) =~ "domain(s)"
     end
+  end
+
+  defp mounted_on_domains_tab(conn) do
+    {:ok, view, _html} = live(conn, ~p"/domains?tab=domains")
+    view
+  end
+
+  # The probes run in a task off the LiveView process, so the first render can honestly
+  # still read "Checking…". Polls the rendered page for the cell to settle rather than
+  # sleeping a guessed interval and hoping -- a wrong guess here either flakes or slows
+  # every test in the file.
+  defp await_tls(view, selector, deadline \\ 2_000) do
+    started = System.monotonic_time(:millisecond)
+
+    Stream.repeatedly(fn ->
+      if has_element?(view, selector) do
+        true
+      else
+        if System.monotonic_time(:millisecond) - started > deadline do
+          flunk("#{selector} never appeared. Rendered:\n#{render(view)}")
+        end
+
+        Process.sleep(10)
+        false
+      end
+    end)
+    |> Enum.find(& &1)
   end
 end

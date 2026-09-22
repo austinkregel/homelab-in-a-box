@@ -136,20 +136,35 @@ defmodule Homelab.Services.CertManager do
     pending = Homelab.Networking.list_pending_tls()
 
     Enum.each(pending, fn domain ->
-      case gateway.provision_tls(domain.fqdn) do
-        {:ok, %{status: :active}} ->
-          Logger.info("TLS active for #{domain.fqdn}")
+      case tls_probe().inspect_domain(domain.fqdn) do
+        # Already serving a certificate a browser accepts, so there is nothing to
+        # provision. This is the common case and it used to be invisible: a wildcard
+        # `*.<base>` covers every subdomain the moment it is issued, and no `pending`
+        # domain under it ever needs its own certificate — but `provision_tls/1` only
+        # answers for a name with a router of its own, so those rows sat at `:pending`
+        # indefinitely while being served perfectly well.
+        #
+        # The handshake also carries the real `notAfter`. What went in here before was
+        # `utc_now() + 90 days`, a date no certificate has, which then drove the
+        # renewal pass above.
+        {:ok, %{status: status, not_after: not_after}} when status in [:valid, :expiring] ->
+          Logger.info("TLS active for #{domain.fqdn} (expires #{DateTime.to_date(not_after)})")
 
           Homelab.Networking.update_domain(domain, %{
             tls_status: :active,
-            tls_expires_at: DateTime.utc_now() |> DateTime.add(90, :day)
+            tls_expires_at: DateTime.truncate(not_after, :second)
           })
 
-        {:ok, _} ->
-          :ok
-
-        {:error, _reason} ->
-          :ok
+        # Anything else — the self-signed default, a cert for another name, an expired
+        # one, no handshake at all — means the name still needs a certificate. Ask the
+        # gateway to provision, and leave the row `:pending` either way so the next
+        # pass tries again. `provision_tls/1` reporting `:active` is not evidence of a
+        # certificate; it only means a router exists.
+        _ ->
+          case gateway.provision_tls(domain.fqdn) do
+            {:ok, _} -> :ok
+            {:error, _reason} -> :ok
+          end
       end
     end)
   end
@@ -158,14 +173,7 @@ defmodule Homelab.Services.CertManager do
     Enum.count(domains, fn domain ->
       case gateway.provision_tls(domain.fqdn) do
         {:ok, _cert_info} ->
-          Logger.info("Renewed TLS for #{domain.fqdn}")
-
-          Homelab.Networking.update_domain(domain, %{
-            tls_status: :active,
-            tls_expires_at: DateTime.utc_now() |> DateTime.add(90, :day)
-          })
-
-          true
+          record_renewal(domain)
 
         {:error, reason} ->
           Logger.error("Failed to renew TLS for #{domain.fqdn}: #{inspect(reason)}")
@@ -176,4 +184,46 @@ defmodule Homelab.Services.CertManager do
       end
     end)
   end
+
+  # Records the expiry the name is ACTUALLY serving, and counts a renewal only when that
+  # date moved forward.
+  #
+  # `provision_tls/1` returning `:ok` means Traefik has a router with a cert resolver
+  # attached — not that ACME issued anything. Writing `utc_now() + 90 days` on the
+  # strength of it took a domain that had just failed to renew straight back out of
+  # `list_expiring_tls/1` for two months, so a renewal that kept failing was reported as
+  # having succeeded every six hours until the certificate expired underneath it.
+  defp record_renewal(domain) do
+    case tls_probe().inspect_domain(domain.fqdn) do
+      {:ok, %{status: status, not_after: not_after}} when status in [:valid, :expiring] ->
+        expires_at = DateTime.truncate(not_after, :second)
+
+        Homelab.Networking.update_domain(domain, %{
+          tls_status: :active,
+          tls_expires_at: expires_at
+        })
+
+        if moved_forward?(domain.tls_expires_at, expires_at) do
+          Logger.info("Renewed TLS for #{domain.fqdn} (expires #{DateTime.to_date(not_after)})")
+          true
+        else
+          # Still the old certificate. ACME is not instant, so this is expected on the
+          # pass that requested it; staying inside the renewal window is what gets it
+          # asked again rather than forgotten.
+          Logger.info("#{domain.fqdn} is still serving its previous certificate")
+          false
+        end
+
+      other ->
+        Logger.error(
+          "Requested TLS for #{domain.fqdn} but it is not serving a usable certificate: " <>
+            inspect(other)
+        )
+
+        false
+    end
+  end
+
+  defp moved_forward?(nil, _new), do: true
+  defp moved_forward?(previous, new), do: DateTime.compare(new, previous) == :gt
 end

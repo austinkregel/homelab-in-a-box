@@ -97,6 +97,126 @@ defmodule Homelab.Services.CertManagerTest do
       updated_domain = Homelab.Repo.get!(Homelab.Networking.Domain, domain.id)
       assert updated_domain.tls_status == :failed
     end
+
+    test "records the expiry the domain is actually serving, not one 90 days out" do
+      deployment = insert(:deployment)
+      expiring_date = DateTime.utc_now() |> DateTime.add(10, :day) |> DateTime.truncate(:second)
+
+      domain =
+        insert(:domain,
+          deployment: deployment,
+          tls_status: :active,
+          tls_expires_at: expiring_date,
+          fqdn: "expiring.homelab.local"
+        )
+
+      Homelab.Mocks.Gateway
+      |> expect(:provision_tls, fn "expiring.homelab.local" -> {:ok, %{cert: "new_cert"}} end)
+
+      start_supervised!({CertManager, enabled: false, interval: :timer.hours(1)})
+      CertManager.check_now()
+      Process.sleep(200)
+
+      # The stub serves a certificate 60 days out. The old code wrote 90 regardless of
+      # what was being served, including when nothing had been reissued at all.
+      reloaded = Homelab.Repo.get!(Homelab.Networking.Domain, domain.id)
+      assert DateTime.diff(reloaded.tls_expires_at, DateTime.utc_now(), :day) in 59..60
+    end
+
+    test "does not count a renewal when the served certificate did not change" do
+      deployment = insert(:deployment)
+      previous = Application.get_env(:homelab, :tls_probe_result, :healthy)
+      on_exit(fn -> Application.put_env(:homelab, :tls_probe_result, previous) end)
+
+      served = DateTime.utc_now() |> DateTime.add(10, :day) |> DateTime.truncate(:second)
+
+      insert(:domain,
+        deployment: deployment,
+        tls_status: :active,
+        tls_expires_at: served,
+        fqdn: "stuck.homelab.local"
+      )
+
+      # The handshake still shows the certificate we already had -- ACME did not issue.
+      Application.put_env(
+        :homelab,
+        :tls_probe_result,
+        {:ok,
+         %{Homelab.Networking.TlsProbeStub.healthy("stuck.homelab.local") | not_after: served}}
+      )
+
+      Homelab.Mocks.Gateway
+      |> expect(:provision_tls, fn "stuck.homelab.local" -> {:ok, %{cert: "same"}} end)
+
+      start_supervised!({CertManager, enabled: false, interval: :timer.hours(1)})
+      CertManager.check_now()
+      Process.sleep(200)
+
+      # Reported as renewed before, which took it out of the expiring window for two
+      # months even though nothing had been reissued.
+      assert CertManager.status().renewed_count == 0
+    end
+  end
+
+  describe "pending domains" do
+    setup do
+      previous = Application.get_env(:homelab, :tls_probe_result, :healthy)
+      on_exit(fn -> Application.put_env(:homelab, :tls_probe_result, previous) end)
+      :ok
+    end
+
+    # The case the Domains page was reporting wrong: a subdomain under a wildcard never
+    # needs a certificate of its own, and `provision_tls/1` has no router to answer for
+    # it, so the row sat at :pending forever while being served perfectly well.
+    test "records a domain already covered by a wildcard without provisioning" do
+      deployment = insert(:deployment)
+
+      domain =
+        insert(:domain,
+          deployment: deployment,
+          tls_status: :pending,
+          tls_expires_at: nil,
+          fqdn: "grafana.homelab.local"
+        )
+
+      Application.put_env(:homelab, :tls_probe_result, :wildcard)
+
+      # No `expect(:provision_tls, ...)`. `verify_on_exit!` fails the test if the
+      # gateway is asked for a certificate the domain already has.
+      start_supervised!({CertManager, enabled: false, interval: :timer.hours(1)})
+      CertManager.check_now()
+      Process.sleep(200)
+
+      reloaded = Homelab.Repo.get!(Homelab.Networking.Domain, domain.id)
+      assert reloaded.tls_status == :active
+      assert DateTime.diff(reloaded.tls_expires_at, DateTime.utc_now(), :day) in 59..60
+    end
+
+    test "asks the gateway to provision a domain serving the default certificate" do
+      deployment = insert(:deployment)
+
+      domain =
+        insert(:domain,
+          deployment: deployment,
+          tls_status: :pending,
+          tls_expires_at: nil,
+          fqdn: "new.homelab.local"
+        )
+
+      Application.put_env(:homelab, :tls_probe_result, :self_signed)
+
+      Homelab.Mocks.Gateway
+      |> expect(:provision_tls, fn "new.homelab.local" -> {:ok, %{status: :active}} end)
+
+      start_supervised!({CertManager, enabled: false, interval: :timer.hours(1)})
+      CertManager.check_now()
+      Process.sleep(200)
+
+      # Stays pending. `provision_tls/1` answering :active only means a router exists --
+      # taking that as proof of a certificate is what marked self-signed domains active.
+      reloaded = Homelab.Repo.get!(Homelab.Networking.Domain, domain.id)
+      assert reloaded.tls_status == :pending
+    end
   end
 
   describe "TLS enforcement latch" do

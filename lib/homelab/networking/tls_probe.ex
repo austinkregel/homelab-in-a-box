@@ -30,7 +30,8 @@ defmodule Homelab.Networking.TlsProbe do
           not_after: DateTime.t(),
           days_remaining: integer(),
           self_signed?: boolean(),
-          covers_domain?: boolean()
+          covers_domain?: boolean(),
+          matched_name: String.t() | nil
         }
 
   # Traefik's built-in placeholder, served when no real cert matches the SNI name.
@@ -141,19 +142,25 @@ defmodule Homelab.Networking.TlsProbe do
     names = Enum.uniq([subject | sans]) |> Enum.reject(&(&1 == ""))
 
     self_signed? = issuer == subject or String.contains?(issuer, @traefik_default)
-    covers? = Enum.any?(names, &name_matches?(&1, domain))
+
+    # Which name on the certificate covers this domain, not merely whether one does.
+    # A caller reporting on a whole table of domains needs to say *why* a name is
+    # covered — an apex domain with its own cert and a subdomain riding a wildcard are
+    # both `:valid`, and the difference is what an operator needs to see.
+    matched = Enum.find(names, &name_matches?(&1, domain))
 
     days = DateTime.diff(not_after, DateTime.utc_now(), :day)
 
     %{
-      status: status(self_signed?, covers?, days),
+      status: status(self_signed?, matched != nil, days),
       issuer: issuer,
       subject: subject,
       sans: sans,
       not_after: not_after,
       days_remaining: days,
       self_signed?: self_signed?,
-      covers_domain?: covers?
+      covers_domain?: matched != nil,
+      matched_name: matched
     }
   end
 

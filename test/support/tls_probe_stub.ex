@@ -10,13 +10,22 @@ defmodule Homelab.Networking.TlsProbeStub do
   """
 
   def inspect_domain(domain, _opts \\ []) do
-    case Application.get_env(:homelab, :tls_probe_result, :healthy) do
-      :healthy -> {:ok, healthy(domain)}
-      :self_signed -> {:ok, self_signed()}
-      {:error, _} = error -> error
-      result -> result
-    end
+    Application.get_env(:homelab, :tls_probe_result, :healthy)
+    |> resolve(domain)
   end
+
+  # A map stages a different answer per name, which is what a page probing a whole
+  # table of domains needs — one wildcard-covered subdomain next to an apex domain
+  # Traefik is serving its default certificate for. Names left out fall back to healthy.
+  defp resolve(staged, domain) when is_map(staged) and not is_struct(staged) do
+    staged |> Map.get(domain, :healthy) |> resolve(domain)
+  end
+
+  defp resolve(:healthy, domain), do: {:ok, healthy(domain)}
+  defp resolve(:wildcard, domain), do: {:ok, wildcard(domain)}
+  defp resolve(:self_signed, _domain), do: {:ok, self_signed()}
+  defp resolve({:error, _} = error, _domain), do: error
+  defp resolve(result, _domain), do: result
 
   def healthy(domain) do
     %{
@@ -27,7 +36,27 @@ defmodule Homelab.Networking.TlsProbeStub do
       not_after: DateTime.add(DateTime.utc_now(), 60, :day),
       days_remaining: 60,
       self_signed?: false,
-      covers_domain?: true
+      covers_domain?: true,
+      matched_name: domain
+    }
+  end
+
+  @doc """
+  A trusted certificate that covers `domain` through a wildcard rather than by name —
+  the common case on a homelab box, where one `*.<base>` cert fronts every subdomain.
+  """
+  def wildcard(domain) do
+    wildcard_name =
+      case String.split(domain, ".", parts: 2) do
+        [_label, rest] -> "*." <> rest
+        _ -> "*." <> domain
+      end
+
+    %{
+      healthy(domain)
+      | subject: wildcard_name,
+        sans: [wildcard_name],
+        matched_name: wildcard_name
     }
   end
 
@@ -41,7 +70,8 @@ defmodule Homelab.Networking.TlsProbeStub do
       not_after: DateTime.add(DateTime.utc_now(), 365, :day),
       days_remaining: 365,
       self_signed?: true,
-      covers_domain?: false
+      covers_domain?: false,
+      matched_name: nil
     }
   end
 end
