@@ -3,6 +3,7 @@ defmodule HomelabWeb.BackupsLive do
 
   alias Homelab.Tenants
   alias Homelab.Backups
+  alias Homelab.Backups.Failure
   alias Homelab.Deployments
 
   @impl true
@@ -62,7 +63,8 @@ defmodule HomelabWeb.BackupsLive do
             {:noreply, put_flash(socket, :info, "Backup completed.")}
 
           {:ok, %{status: :failed, error_message: message}} ->
-            {:noreply, put_flash(socket, :error, "Backup failed: #{message}")}
+            %{summary: summary} = Failure.from_message(message)
+            {:noreply, put_flash(socket, :error, summary)}
 
           {:ok, _job} ->
             {:noreply, put_flash(socket, :info, "Backup started.")}
@@ -309,60 +311,101 @@ defmodule HomelabWeb.BackupsLive do
                 </tr>
               </thead>
               <tbody class="divide-y divide-base-content/[0.04]">
-                <tr :for={backup <- @backups} class="hover:bg-base-content/[0.02] transition-colors">
-                  <td class="px-6 py-4">
-                    <span class="text-sm font-medium text-base-content">
-                      {backup.deployment.app_template.name}
-                    </span>
-                  </td>
-                  <td class="px-6 py-4">
-                    <span class="text-sm text-base-content/50">{backup.deployment.tenant.name}</span>
-                  </td>
-                  <td class="px-6 py-4">
-                    <.status_pill status={backup.status} />
-                  </td>
-                  <td class="px-6 py-4">
-                    <span class="text-sm text-base-content/50">{format_size(backup.size_bytes)}</span>
-                  </td>
-                  <td class="px-6 py-4">
-                    <span class="text-sm text-base-content/50">
-                      {format_datetime(backup.scheduled_at)}
-                    </span>
-                  </td>
-                  <td class="px-6 py-4">
-                    <button
-                      :if={backup.status == :completed && backup.snapshot_id}
-                      type="button"
-                      phx-click="restore"
-                      phx-value-backup_id={backup.id}
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-primary hover:bg-primary/10 transition-colors cursor-pointer"
-                    >
-                      <.icon name="hero-arrow-path" class="size-3.5" /> Restore
-                    </button>
-                    <span
-                      :if={backup.status != :completed || !backup.snapshot_id}
-                      class="text-sm text-base-content/25"
-                    >
-                      —
-                    </span>
-                    <button
-                      :if={backup.status != :running}
-                      type="button"
-                      phx-click="delete_backup"
-                      phx-value-backup_id={backup.id}
-                      data-confirm="Delete this backup job record? The remote snapshot is not deleted."
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-error hover:bg-error/10 transition-colors cursor-pointer"
-                    >
-                      <.icon name="hero-trash" class="size-3.5" /> Delete
-                    </button>
-                  </td>
-                </tr>
+                <%= for backup <- @backups do %>
+                  <tr class="hover:bg-base-content/[0.02] transition-colors">
+                    <td class="px-6 py-4">
+                      <span class="text-sm font-medium text-base-content">
+                        {backup.deployment.app_template.name}
+                      </span>
+                    </td>
+                    <td class="px-6 py-4">
+                      <span class="text-sm text-base-content/50">
+                        {backup.deployment.tenant.name}
+                      </span>
+                    </td>
+                    <td class="px-6 py-4">
+                      <.status_pill status={backup.status} />
+                    </td>
+                    <td class="px-6 py-4">
+                      <span class="text-sm text-base-content/50">
+                        {format_size(backup.size_bytes)}
+                      </span>
+                    </td>
+                    <td class="px-6 py-4">
+                      <span class="text-sm text-base-content/50">
+                        {format_datetime(backup.scheduled_at)}
+                      </span>
+                    </td>
+                    <td class="px-6 py-4">
+                      <button
+                        :if={backup.status == :completed && backup.snapshot_id}
+                        type="button"
+                        phx-click="restore"
+                        phx-value-backup_id={backup.id}
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-primary hover:bg-primary/10 transition-colors cursor-pointer"
+                      >
+                        <.icon name="hero-arrow-path" class="size-3.5" /> Restore
+                      </button>
+                      <span
+                        :if={backup.status != :completed || !backup.snapshot_id}
+                        class="text-sm text-base-content/25"
+                      >
+                        —
+                      </span>
+                      <button
+                        :if={backup.status != :running}
+                        type="button"
+                        phx-click="delete_backup"
+                        phx-value-backup_id={backup.id}
+                        data-confirm="Delete this backup job record? The remote snapshot is not deleted."
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-error hover:bg-error/10 transition-colors cursor-pointer"
+                      >
+                        <.icon name="hero-trash" class="size-3.5" /> Delete
+                      </button>
+                    </td>
+                  </tr>
+                  <%!-- The reason a run failed was stored and never shown, so a red
+                        pill was the whole of the explanation. --%>
+                  <tr :if={backup.status == :failed} id={"backup-error-#{backup.id}"}>
+                    <td colspan="6" class="px-6 pb-4 pt-0">
+                      <.failure_detail message={backup.error_message} />
+                    </td>
+                  </tr>
+                <% end %>
               </tbody>
             </table>
           </div>
         </div>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :message, :string, default: nil
+
+  defp failure_detail(assigns) do
+    assigns = assign(assigns, :failure, Failure.from_message(assigns.message))
+
+    ~H"""
+    <div class="rounded-xl border border-error/20 bg-error/[0.04] px-4 py-3">
+      <div class="flex items-start gap-2.5">
+        <.icon name="hero-exclamation-triangle" class="size-4 text-error shrink-0 mt-0.5" />
+        <div class="min-w-0 space-y-1.5">
+          <p class="text-sm text-error font-medium leading-snug">{@failure.summary}</p>
+          <p :if={@failure.fix} class="text-xs text-base-content/60 leading-relaxed">
+            {@failure.fix}
+          </p>
+          <details :if={@failure.detail != ""} class="group">
+            <summary class="text-xs text-base-content/40 cursor-pointer hover:text-base-content/60 transition-colors">
+              Details
+            </summary>
+            <code class="block mt-1.5 text-[11px] font-mono text-base-content/60 break-all whitespace-pre-wrap">
+              {@failure.detail}
+            </code>
+          </details>
+        </div>
+      </div>
+    </div>
     """
   end
 

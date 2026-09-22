@@ -149,6 +149,59 @@ defmodule Homelab.BackupsTest do
       assert updated.error_message =~ "restic is not installed"
     end
 
+    test "records a failure an operator can read, keeping the original term" do
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:error, {:restic_missing, "restic is not installed or not on PATH"}}
+      end)
+
+      assert {:ok, updated} = Backups.execute_backup(job)
+
+      parsed = Homelab.Backups.Failure.from_message(updated.error_message)
+      assert parsed.summary =~ "not installed"
+      refute parsed.summary =~ ":restic_missing"
+      assert parsed.detail =~ ":restic_missing"
+    end
+
+    # A scheduled backup failing has nobody watching a flash, and used to write nothing
+    # to the activity log and raise no notification.
+    test "announces a failure to the activity log and to admins" do
+      admin = insert(:user, role: :admin)
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:error, {:restic_missing, "restic is not installed"}}
+      end)
+
+      assert {:ok, _} = Backups.execute_backup(job)
+
+      assert Enum.any?(Homelab.Services.ActivityLog.all(), fn event ->
+               event.source == "backups" and event.level == :error and
+                 event.message =~ "failed"
+             end)
+
+      assert [notification] = Homelab.Notifications.list_unread(admin.id)
+      assert notification.title =~ "Backup failed"
+      assert notification.body =~ "not installed"
+      assert notification.severity == "error"
+    end
+
+    test "announces a success to the activity log" do
+      job = insert(:backup_job, deployment: insert(:deployment))
+
+      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
+        {:ok, "snap_ok"}
+      end)
+
+      assert {:ok, _} = Backups.execute_backup(job)
+
+      assert Enum.any?(Homelab.Services.ActivityLog.all(), fn event ->
+               event.source == "backups" and event.level == :info and
+                 event.message =~ "completed"
+             end)
+    end
+
     # A provider that shells out to a missing binary raises rather than returning an
     # error tuple. Before, that left the row on `:running` with no error_message, so the
     # Backups page showed a backup in progress forever.

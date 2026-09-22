@@ -162,12 +162,17 @@ defmodule HomelabWeb.BackupsLiveTest do
 
       html = render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
 
-      assert html =~ "Backup failed"
+      assert html =~ "The backup failed"
       refute html =~ "successfully"
 
       job = Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id)
       assert job.status == :failed
-      assert job.error_message != nil
+
+      # The row states the condition in the operator's language and keeps the original
+      # term behind a disclosure, so neither audience loses out.
+      detail = view |> element("#backup-error-#{job.id}") |> render()
+      assert detail =~ "The backup failed"
+      assert detail =~ ":repository_not_found"
     end
 
     test "the source path is the operator's managed root, not a hardcoded /data", %{
@@ -531,6 +536,68 @@ defmodule HomelabWeb.BackupsLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/backups")
       assert html =~ "Pending"
+    end
+  end
+
+  describe "failed runs" do
+    setup %{tenant: tenant, template: template} do
+      deployment = insert(:deployment, tenant: tenant, app_template: template, status: :running)
+      {:ok, deployment: deployment}
+    end
+
+    # The reason was recorded and never rendered, so a red pill was the whole of the
+    # explanation and the only way to see why was a flash that had already gone.
+    test "shows why a run failed", %{conn: conn, deployment: deployment} do
+      job =
+        insert(:backup_job,
+          deployment: deployment,
+          status: :failed,
+          error_message:
+            Homelab.Backups.Failure.to_message(
+              {:restic_missing, "restic is not installed or not on PATH"}
+            )
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+
+      assert has_element?(view, "#backup-error-#{job.id}")
+      detail = view |> element("#backup-error-#{job.id}") |> render()
+
+      assert detail =~ "not installed"
+      assert detail =~ "Settings"
+      assert detail =~ "restic_missing"
+    end
+
+    test "a run that succeeded carries no failure block", %{conn: conn, deployment: deployment} do
+      job = insert(:backup_job, deployment: deployment, status: :completed, snapshot_id: "s1")
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+
+      refute has_element?(view, "#backup-error-#{job.id}")
+    end
+
+    test "a legacy row holding a bare term still renders", %{conn: conn, deployment: deployment} do
+      job =
+        insert(:backup_job,
+          deployment: deployment,
+          status: :failed,
+          error_message: ~s({:restic_missing, "restic is not installed"})
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+
+      assert view |> element("#backup-error-#{job.id}") |> render() =~ "restic_missing"
+    end
+
+    test "a failed row with no reason at all still renders", %{
+      conn: conn,
+      deployment: deployment
+    } do
+      job = insert(:backup_job, deployment: deployment, status: :failed, error_message: nil)
+
+      {:ok, view, _html} = live(conn, ~p"/backups")
+
+      assert view |> element("#backup-error-#{job.id}") |> render() =~ "No reason was recorded"
     end
   end
 end
