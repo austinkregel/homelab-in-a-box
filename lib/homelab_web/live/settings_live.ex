@@ -9,11 +9,13 @@ defmodule HomelabWeb.SettingsLive do
   alias Homelab.Deployments.AdoptionPolicy
   alias Homelab.Deployments.PermanentHome
   alias Homelab.Infrastructure.SwarmSettings
+  alias Homelab.Backups.Keys, as: BackupKeys
 
   @sections [
     {"general", "General", "hero-cog-6-tooth"},
     {"authentication", "Authentication", "hero-key"},
     {"infrastructure", "Infrastructure", "hero-server-stack"},
+    {"backups", "Backups", "hero-shield-check"},
     {"dns", "DNS & Domains", "hero-globe-alt"},
     {"registry", "Registry", "hero-cube"},
     {"registries", "Registries", "hero-archive-box"},
@@ -56,6 +58,45 @@ defmodule HomelabWeb.SettingsLive do
      |> assign(:active_section, section)
      |> push_patch(to: ~p"/settings?section=#{section}")
      |> load_section_data(section)}
+  end
+
+  def handle_event("generate_recovery_key", _params, socket) do
+    # Revealed straight away: a key the operator never saw is a key they cannot escrow,
+    # and escrow is the only thing standing between a dead machine and unreadable backups.
+    key = BackupKeys.ensure!()
+
+    {:noreply,
+     socket
+     |> assign(:recovery_key_fingerprint, BackupKeys.fingerprint_of(key))
+     |> assign(:recovery_key_escrowed?, BackupKeys.escrowed?())
+     |> assign(:revealed_recovery_key, BackupKeys.format(key))}
+  end
+
+  def handle_event("reveal_recovery_key", _params, socket) do
+    case BackupKeys.read() do
+      {:ok, key} ->
+        {:noreply, assign(socket, :revealed_recovery_key, BackupKeys.format(key))}
+
+      {:error, :absent} ->
+        {:noreply,
+         socket
+         |> assign(:recovery_key_fingerprint, nil)
+         |> put_flash(:error, "No recovery key is stored on this instance.")}
+    end
+  end
+
+  def handle_event("hide_recovery_key", _params, socket) do
+    {:noreply, assign(socket, :revealed_recovery_key, nil)}
+  end
+
+  def handle_event("confirm_recovery_key_escrow", _params, socket) do
+    :ok = BackupKeys.mark_escrowed()
+
+    {:noreply,
+     socket
+     |> assign(:recovery_key_escrowed?, true)
+     |> assign(:revealed_recovery_key, nil)
+     |> put_flash(:info, "Recovery key marked as stored.")}
   end
 
   def handle_event(
@@ -863,6 +904,15 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:enabled_catalogs, enabled_catalog_ids())
   end
 
+  # The key is never revealed by simply opening the page — `revealed_recovery_key` is
+  # reset on every visit, so it takes a deliberate click each time.
+  defp load_section_data(socket, "backups") do
+    socket
+    |> assign(:recovery_key_fingerprint, recovery_key_fingerprint())
+    |> assign(:recovery_key_escrowed?, BackupKeys.escrowed?())
+    |> assign(:revealed_recovery_key, nil)
+  end
+
   defp load_section_data(socket, "danger_zone") do
     socket
     |> assign(:sweep_mode, Settings.get("reconciler_sweep_mode", "sever_only"))
@@ -871,6 +921,15 @@ defmodule HomelabWeb.SettingsLive do
   end
 
   defp load_section_data(socket, _), do: socket
+
+  # Read-only: opening Settings must not mint a key as a side effect, and must not take
+  # the page down when the secrets directory is unwritable.
+  defp recovery_key_fingerprint do
+    case BackupKeys.read() do
+      {:ok, key} -> BackupKeys.fingerprint_of(key)
+      {:error, :absent} -> nil
+    end
+  end
 
   @impl true
   def render(assigns) do
@@ -939,6 +998,7 @@ defmodule HomelabWeb.SettingsLive do
       "general" -> render_general(assigns)
       "authentication" -> render_authentication(assigns)
       "infrastructure" -> render_infrastructure(assigns)
+      "backups" -> render_backups(assigns)
       "dns" -> render_dns(assigns)
       "registry" -> render_registry(assigns)
       "registries" -> render_registries(assigns)
@@ -948,6 +1008,100 @@ defmodule HomelabWeb.SettingsLive do
       "danger_zone" -> render_danger_zone(assigns)
       _ -> render_general(assigns)
     end
+  end
+
+  defp render_backups(assigns) do
+    ~H"""
+    <div class="p-4">
+      <h2 class="text-lg font-semibold text-base-content mb-4">Backups</h2>
+
+      <div class="rounded-xl border border-base-content/[0.08] bg-base-100 p-5">
+        <div class="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h3 class="text-sm font-semibold text-base-content">Recovery key</h3>
+            <p class="text-xs text-base-content/60 mt-1 max-w-xl leading-relaxed">
+              Every backup and the instance bundle are encrypted under this key. It exists
+              nowhere but this machine — store it in a password manager, with the bundle
+              location, and you can rebuild this instance on new hardware from the two.
+            </p>
+          </div>
+          <span
+            :if={@recovery_key_fingerprint}
+            class={[
+              "shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium",
+              @recovery_key_escrowed? && "bg-success/15 text-success",
+              !@recovery_key_escrowed? && "bg-warning/15 text-warning"
+            ]}
+          >
+            {if @recovery_key_escrowed?, do: "Stored off this machine", else: "Not yet stored"}
+          </span>
+        </div>
+
+        <div :if={is_nil(@recovery_key_fingerprint)} class="mt-4">
+          <p class="text-sm text-base-content/70 mb-3">
+            No recovery key yet. Generating one takes a moment and does not touch existing data.
+          </p>
+          <button
+            type="button"
+            id="generate-recovery-key"
+            phx-click="generate_recovery_key"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:shadow-md transition-all cursor-pointer"
+          >
+            Generate recovery key
+          </button>
+        </div>
+
+        <div :if={@recovery_key_fingerprint} class="mt-4 space-y-4">
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-base-content/50">Fingerprint</span>
+            <code class="px-2 py-0.5 rounded bg-base-content/[0.06] font-mono text-base-content/80">
+              {@recovery_key_fingerprint}
+            </code>
+          </div>
+
+          <div :if={is_nil(@revealed_recovery_key)}>
+            <button
+              type="button"
+              id="reveal-recovery-key"
+              phx-click="reveal_recovery_key"
+              class="px-4 py-2 rounded-lg border border-base-content/[0.12] text-sm font-medium text-base-content hover:bg-base-content/[0.04] transition-colors cursor-pointer"
+            >
+              Reveal recovery key
+            </button>
+          </div>
+
+          <div :if={@revealed_recovery_key} class="space-y-3">
+            <code
+              id="recovery-key-value"
+              phx-no-curly-interpolation
+              class="block px-4 py-3 rounded-lg bg-base-content/[0.06] font-mono text-sm text-base-content break-all leading-relaxed select-all"
+            >
+              {@revealed_recovery_key}
+            </code>
+            <div class="flex items-center gap-2">
+              <button
+                :if={!@recovery_key_escrowed?}
+                type="button"
+                id="confirm-recovery-key-escrow"
+                phx-click="confirm_recovery_key_escrow"
+                class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:shadow-md transition-all cursor-pointer"
+              >
+                I've stored it safely
+              </button>
+              <button
+                type="button"
+                id="hide-recovery-key"
+                phx-click="hide_recovery_key"
+                class="px-4 py-2 rounded-lg border border-base-content/[0.12] text-sm font-medium text-base-content hover:bg-base-content/[0.04] transition-colors cursor-pointer"
+              >
+                Hide
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
   end
 
   defp render_general(assigns) do

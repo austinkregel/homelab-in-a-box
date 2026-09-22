@@ -128,16 +128,20 @@ if config_env() == :prod do
 
         case File.write(path, value) do
           :ok ->
-            :ok
+            value
 
           {:error, reason} ->
-            IO.warn(
-              "Could not persist #{name} to #{path} (#{inspect(reason)}); using an " <>
-                "ephemeral value. Mount the homelab-iab-secrets volume to persist secrets."
-            )
-        end
+            raise """
+            Could not persist #{name} to #{path} (#{:file.format_error(reason)}).
 
-        value
+            An ephemeral #{name} is regenerated on every boot, and since it is also the
+            key encrypting every credential in the database, each boot would leave the
+            previous boot's settings and deployment secrets undecryptable. Mount the
+            homelab-iab-secrets volume at #{secrets_dir}, set HOMELAB_SECRETS_DIR to a
+            durable directory, or supply #{String.upcase(name)} as an environment
+            variable.
+            """
+        end
     end
   end
 

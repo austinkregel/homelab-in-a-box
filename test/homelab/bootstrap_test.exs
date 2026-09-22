@@ -43,6 +43,14 @@ defmodule Homelab.BootstrapTest do
       {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false])
       {:ok, port} = :inet.port(listen)
 
+      # The generated Postgres password must land somewhere durable or bootstrap refuses
+      # to continue, so give it a real directory rather than the unwritable /run/secrets.
+      secrets_dir =
+        Path.join(System.tmp_dir!(), "hiab-bootstrap-#{System.unique_integer([:positive])}")
+
+      original_secrets_dir = System.get_env("HOMELAB_SECRETS_DIR")
+      System.put_env("HOMELAB_SECRETS_DIR", secrets_dir)
+
       Application.put_env(:homelab, :bootstrap, true)
       Application.put_env(:homelab, :bootstrap_wait, attempts: 30, interval_ms: 0)
       Application.put_env(:homelab, :bootstrap_tcp_target, {~c"localhost", port})
@@ -54,10 +62,58 @@ defmodule Homelab.BootstrapTest do
         Application.delete_env(:homelab, :bootstrap)
         Application.delete_env(:homelab, :bootstrap_wait)
         Application.delete_env(:homelab, :bootstrap_tcp_target)
+
+        if original_secrets_dir,
+          do: System.put_env("HOMELAB_SECRETS_DIR", original_secrets_dir),
+          else: System.delete_env("HOMELAB_SECRETS_DIR")
+
+        File.rm_rf(secrets_dir)
         :gen_tcp.close(listen)
       end)
 
-      :ok
+      %{secrets_dir: secrets_dir}
+    end
+
+    test "persists the generated Postgres password", %{secrets_dir: secrets_dir} do
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/networks/homelab-iab-internal", _ ->
+          {:ok, %{"Containers" => %{}}}
+
+        "/volumes/" <> _, _ ->
+          {:ok, %{}}
+
+        "/containers/" <> _, _ ->
+          {:ok, %{"State" => %{"Running" => true, "Health" => %{"Status" => "healthy"}}}}
+      end)
+
+      capture_log(fn -> assert :ok = Bootstrap.ensure_infrastructure() end)
+
+      password = File.read!(Path.join(secrets_dir, "pg_password"))
+      assert String.length(password) >= 32
+
+      # A second run reuses it rather than generating a password the running Postgres
+      # container would no longer accept.
+      capture_log(fn -> assert :ok = Bootstrap.ensure_infrastructure() end)
+      assert File.read!(Path.join(secrets_dir, "pg_password")) == password
+    end
+
+    # An unpersisted password is one the next restart cannot reproduce, which leaves the
+    # database it protects unreachable and every deployment record with it.
+    test "refuses to continue when the password cannot be persisted" do
+      blocker = Path.join(System.tmp_dir!(), "hiab-blocked-#{System.unique_integer([:positive])}")
+      File.write!(blocker, "")
+      System.put_env("HOMELAB_SECRETS_DIR", Path.join(blocker, "nested"))
+      on_exit(fn -> File.rm_rf(blocker) end)
+
+      stub(Homelab.Mocks.DockerClient, :get, fn
+        "/networks/homelab-iab-internal", _ -> {:ok, %{"Containers" => %{}}}
+        "/volumes/" <> _, _ -> {:ok, %{}}
+        "/containers/" <> _, _ -> {:ok, %{"State" => %{"Running" => true}}}
+      end)
+
+      assert_raise RuntimeError, ~r/Could not persist the Postgres password/, fn ->
+        capture_log(fn -> Bootstrap.ensure_infrastructure() end)
+      end
     end
 
     test "when everything already exists, returns :ok and configures the repo hostname" do

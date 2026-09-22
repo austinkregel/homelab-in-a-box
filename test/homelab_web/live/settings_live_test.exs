@@ -1540,6 +1540,110 @@ defmodule HomelabWeb.SettingsLiveTest do
     end
   end
 
+  describe "backups section" do
+    setup do
+      dir =
+        Path.join(System.tmp_dir!(), "hiab-settings-keys-#{System.unique_integer([:positive])}")
+
+      prev = System.get_env("HOMELAB_SECRETS_DIR")
+      System.put_env("HOMELAB_SECRETS_DIR", dir)
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("HOMELAB_SECRETS_DIR", prev),
+          else: System.delete_env("HOMELAB_SECRETS_DIR")
+
+        Homelab.Settings.delete("backup_recovery_key_escrowed")
+        File.rm_rf(dir)
+      end)
+
+      :ok
+    end
+
+    test "offers to generate a key when none exists", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "backups"})
+
+      assert has_element?(view, "#generate-recovery-key")
+      refute has_element?(view, "#reveal-recovery-key")
+    end
+
+    test "generating a key reveals it immediately so it can be escrowed", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "backups"})
+
+      render_click(view, "generate_recovery_key")
+
+      assert has_element?(view, "#recovery-key-value")
+      assert has_element?(view, "#confirm-recovery-key-escrow")
+
+      {:ok, generated} = Homelab.Backups.Keys.read()
+      assert revealed_key_html(view) =~ Homelab.Backups.Keys.format(generated)
+    end
+
+    # Opening the page must not mint a key, and must never print one unasked.
+    test "does not reveal or create a key on a plain visit", %{conn: conn} do
+      Homelab.Backups.Keys.ensure!()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "backups"})
+
+      refute has_element?(view, "#recovery-key-value")
+      assert has_element?(view, "#reveal-recovery-key")
+    end
+
+    test "reveal shows the stored key, hide puts it away", %{conn: conn} do
+      key = Homelab.Backups.Keys.ensure!()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "backups"})
+
+      render_click(view, "reveal_recovery_key")
+      assert revealed_key_html(view) =~ Homelab.Backups.Keys.format(key)
+
+      render_click(view, "hide_recovery_key")
+      refute has_element?(view, "#recovery-key-value")
+    end
+
+    test "confirming escrow records it and hides the key", %{conn: conn} do
+      Homelab.Backups.Keys.ensure!()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      render_click(view, "switch_section", %{"section" => "backups"})
+      render_click(view, "reveal_recovery_key")
+
+      render_click(view, "confirm_recovery_key_escrow")
+
+      assert Homelab.Backups.Keys.escrowed?()
+      refute has_element?(view, "#recovery-key-value")
+      refute has_element?(view, "#confirm-recovery-key-escrow")
+    end
+
+    test "shows the fingerprint without showing the key", %{conn: conn} do
+      key = Homelab.Backups.Keys.ensure!()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "backups"})
+
+      assert html =~ Homelab.Backups.Keys.fingerprint_of(key)
+      refute html =~ Homelab.Backups.Keys.format(key)
+    end
+
+    test "escrow state is reported, not implied", %{conn: conn} do
+      Homelab.Backups.Keys.ensure!()
+
+      {:ok, view, _html} = live(conn, ~p"/settings")
+      html = render_click(view, "switch_section", %{"section" => "backups"})
+      assert html =~ "Not yet stored"
+
+      Homelab.Backups.Keys.mark_escrowed()
+      html = render_click(view, "switch_section", %{"section" => "backups"})
+      assert html =~ "Stored off this machine"
+    end
+  end
+
+  defp revealed_key_html(view), do: view |> element("#recovery-key-value") |> render()
+
   defp restore_docker_client(nil), do: Application.delete_env(:homelab, :docker_client)
   defp restore_docker_client(val), do: Application.put_env(:homelab, :docker_client, val)
 end

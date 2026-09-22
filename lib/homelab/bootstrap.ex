@@ -38,7 +38,7 @@ defmodule Homelab.Bootstrap do
   @oban_postgres_image "postgres:17-alpine"
   @oban_postgres_image_repo "postgres"
   @oban_postgres_image_tag "17-alpine"
-  @secrets_path "/run/secrets"
+  @default_secrets_path "/run/secrets"
   @password_file "pg_password"
   @max_wait_attempts 30
   @wait_interval_ms 1_000
@@ -358,21 +358,37 @@ defmodule Homelab.Bootstrap do
     end
   end
 
+  # `runtime.exs` and `Homelab.Backups.Keys` both honour HOMELAB_SECRETS_DIR. This used to
+  # hardcode /run/secrets, so pointing that variable elsewhere moved secret_key_base but
+  # left pg_password behind, splitting the instance's secrets across two directories.
+  defp secrets_path, do: System.get_env("HOMELAB_SECRETS_DIR", @default_secrets_path)
+
   defp ensure_password do
-    password_path = Path.join(@secrets_path, @password_file)
+    secrets_path = secrets_path()
+    password_path = Path.join(secrets_path, @password_file)
 
     if File.exists?(password_path) do
       {:ok, String.trim(File.read!(password_path))}
     else
       password = generate_password(48)
 
-      case File.mkdir_p(@secrets_path) do
+      case File.mkdir_p(secrets_path) do
         :ok ->
           File.write!(password_path, password)
           {:ok, password}
 
-        {:error, _} ->
-          {:ok, password}
+        {:error, reason} ->
+          raise """
+          Could not persist the Postgres password to #{password_path} \
+          (#{:file.format_error(reason)}).
+
+          This password is generated once and is the only way back into the database
+          it protects. Handing back one that was never written means the next restart
+          generates a different password and #{@postgres_container} becomes unreachable,
+          taking every deployment record with it. Mount the #{@secrets_volume} volume
+          at #{secrets_path}, or set HOMELAB_SECRETS_DIR to a durable directory, and
+          start again.
+          """
       end
     end
   end
