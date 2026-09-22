@@ -32,7 +32,11 @@ RUN mix release
 # Stage 2: Runtime
 FROM alpine:${ALPINE_VERSION} AS runtime
 
-RUN apk add --no-cache libstdc++ openssl ncurses-libs curl
+# GNU tar, not busybox's: backups are whole-volume archives, and busybox tar
+# mishandles sparse files, extended attributes and ACLs, so a restore could differ
+# from the original in ways the digest catches but cannot repair. It also keeps the
+# artifact recoverable with `openssl` and `tar` alone, without this app.
+RUN apk add --no-cache libstdc++ openssl ncurses-libs curl tar
 
 ENV LANG=en_US.UTF-8
 ENV MIX_ENV=prod
