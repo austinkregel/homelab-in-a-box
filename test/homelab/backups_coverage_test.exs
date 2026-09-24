@@ -2,12 +2,9 @@ defmodule Homelab.BackupsCoverageTest do
   use Homelab.DataCase, async: false
 
   import Homelab.Factory
-  import Mox
-
-  setup :set_mox_global
-  setup :verify_on_exit!
 
   alias Homelab.Backups
+  alias Homelab.BackupTarget
 
   describe "coverage/0" do
     test "reports an app with no backup job as unprotected" do
@@ -40,52 +37,47 @@ defmodule Homelab.BackupsCoverageTest do
   end
 
   describe "repo_snapshots/0" do
-    test "marks a snapshot no backup job points at as orphaned" do
-      deployment = insert(:deployment)
-      insert(:backup_job, deployment: deployment, status: :completed, snapshot_id: "keep01")
+    setup do
+      paths = BackupTarget.configure_local()
+      template = insert(:app_template, slug: "plex")
+      deployment = insert(:deployment, app_template: template)
+      BackupTarget.seed_service!("plex", %{"a.txt" => "data"})
 
-      Homelab.Mocks.BackupProvider
-      |> stub(:repo, fn -> "/backups/repo" end)
-      |> expect(:list_snapshots, fn "/backups/repo" ->
-        {:ok,
-         [
-           %{
-             id: "keep01",
-             time: "2026-03-02T10:00:00Z",
-             hostname: "box",
-             tags: [],
-             paths: ["/data"]
-           },
-           %{
-             id: "gone42",
-             time: "2026-02-01T10:00:00Z",
-             hostname: "box",
-             tags: [],
-             paths: ["/data"]
-           }
-         ]}
-      end)
-
-      assert {:ok, snapshots} = Backups.repo_snapshots()
-      assert %{id: "keep01", state: :tracked} = Enum.find(snapshots, &(&1.id == "keep01"))
-      assert %{id: "gone42", state: :orphaned} = Enum.find(snapshots, &(&1.id == "gone42"))
+      Map.merge(paths, %{deployment: deployment})
     end
 
-    test "reports a provider that raises rather than taking the page down" do
-      Homelab.Mocks.BackupProvider
-      |> stub(:repo, fn -> "/backups/repo" end)
-      |> expect(:list_snapshots, fn _repo -> raise "restic: repository is locked" end)
+    # An archive outlives the deployment that wrote it: destroying a deployment deletes
+    # its rows by cascade and never touches storage. Orphans are what that leaves
+    # behind — real bytes, costing real space, that nothing else can see.
+    test "marks an archive no backup job points at as orphaned", %{
+      deployment: deployment,
+      backup_root: root
+    } do
+      job = insert(:backup_job, deployment: deployment)
+      {:ok, tracked} = Backups.execute_backup(job)
 
-      assert {:error, message} = Backups.repo_snapshots()
-      assert message =~ "repository is locked"
+      File.mkdir_p!(Path.join([root, "plex/19990101T000000Z", "frames"]))
+      File.write!(Path.join([root, "plex/19990101T000000Z", "frames", "00000000"]), "x")
+
+      assert {:ok, objects} = Backups.repo_snapshots()
+
+      assert %{state: :tracked} = Enum.find(objects, &(&1.id == tracked.archive_key))
+      assert %{state: :orphaned} = Enum.find(objects, &(&1.id == "plex/19990101T000000Z"))
     end
 
-    test "reports a repository it cannot read rather than pretending it is empty" do
-      Homelab.Mocks.BackupProvider
-      |> stub(:repo, fn -> "/backups/repo" end)
-      |> expect(:list_snapshots, fn _repo -> {:error, :repo_unreachable} end)
+    test "reports an unconfigured destination rather than pretending it is empty" do
+      BackupTarget.unconfigure()
 
-      assert {:error, :repo_unreachable} = Backups.repo_snapshots()
+      assert {:error, :no_target_configured} = Backups.repo_snapshots()
+    end
+
+    # Reading the destination touches storage that may be unmounted or unreachable.
+    # This backs a page that already renders an error state; it must not take it down.
+    test "reports a destination that raises rather than taking the page down" do
+      Homelab.Settings.set("backup_root", "relative/not/absolute", category: "backups")
+      on_exit(fn -> Homelab.Settings.evict("backup_root") end)
+
+      assert {:error, _} = Backups.repo_snapshots()
     end
   end
 end

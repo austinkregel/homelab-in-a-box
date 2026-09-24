@@ -252,13 +252,12 @@ defmodule HomelabWeb.BackupsLive do
               </p>
               <div :if={elem(@snapshots, 1) != []} class="divide-y divide-base-content/[0.04]">
                 <div :for={snapshot <- elem(@snapshots, 1)} class="flex items-center gap-4 px-4 py-3">
-                  <span class="text-xs font-mono text-base-content/70 w-20 flex-shrink-0">
-                    {snapshot.id}
+                  <span class="text-xs text-base-content/70 flex-1 min-w-0 truncate font-mono">
+                    {snapshot.key}
                   </span>
-                  <span class="text-xs text-base-content/40 flex-1 min-w-0 truncate font-mono">
-                    {Enum.join(snapshot.paths, ", ")}
+                  <span class="text-xs text-base-content/40 hidden sm:block">
+                    {format_size(snapshot.bytes)}
                   </span>
-                  <span class="text-xs text-base-content/40 hidden sm:block">{snapshot.time}</span>
                   <span class={[
                     "text-[11px] font-medium px-2.5 py-1 rounded-full flex-shrink-0",
                     if(snapshot.state == :orphaned,

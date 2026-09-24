@@ -1,13 +1,17 @@
 defmodule Homelab.Services.BackupSchedulerTest do
   use Homelab.DataCase, async: false
 
-  import Mox
   import Homelab.Factory
 
+  alias Homelab.BackupTarget
   alias Homelab.Services.BackupScheduler
 
-  setup :set_mox_global
-  setup :verify_on_exit!
+  setup do
+    template = insert(:app_template, slug: "scheduled")
+    BackupTarget.configure_local()
+    BackupTarget.seed_service!("scheduled", %{"a.txt" => "data"})
+    %{template: template}
+  end
 
   describe "init/1" do
     test "starts with default state" do
@@ -31,17 +35,15 @@ defmodule Homelab.Services.BackupSchedulerTest do
 
       Phoenix.PubSub.subscribe(Homelab.PubSub, "notifications:#{admin.id}")
 
-      Homelab.Mocks.BackupProvider
-      |> expect(:backup, fn _source, _repo, _tags ->
-        {:error, {:restic_missing, "restic is not installed"}}
-      end)
+      # No destination configured, so the run fails for a reason the operator can act on.
+      BackupTarget.unconfigure()
 
       start_supervised!({BackupScheduler, enabled: false, interval: :timer.hours(1)})
       BackupScheduler.check_now()
 
       assert_receive {:notification, notification}, 5_000
       assert notification.title =~ "Backup failed"
-      assert notification.body =~ "not installed"
+      assert notification.body =~ "destination"
       assert notification.link == "/deployments/#{deployment.id}?tab=backups"
     end
 
@@ -49,9 +51,6 @@ defmodule Homelab.Services.BackupSchedulerTest do
       deployment = insert(:deployment)
       past = DateTime.utc_now() |> DateTime.add(-1, :hour) |> DateTime.truncate(:second)
       insert(:backup_job, deployment: deployment, scheduled_at: past, status: :pending)
-
-      Homelab.Mocks.BackupProvider
-      |> expect(:backup, fn _source, _repo, _tags -> {:ok, "snap_123"} end)
 
       start_supervised!({BackupScheduler, enabled: false, interval: :timer.hours(1)})
       BackupScheduler.check_now()

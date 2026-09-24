@@ -12,10 +12,6 @@ defmodule Homelab.ConfigTest do
       assert Config.gateway() == Homelab.Mocks.Gateway
     end
 
-    test "backup_provider/0 returns configured mock module" do
-      assert Config.backup_provider() == Homelab.Mocks.BackupProvider
-    end
-
     test "identity_broker/0 returns configured mock module" do
       assert Config.identity_broker() == Homelab.Mocks.IdentityBroker
     end
@@ -123,11 +119,6 @@ defmodule Homelab.ConfigTest do
 
     test "gateways/0 returns list of modules" do
       mods = Config.gateways()
-      assert is_list(mods)
-    end
-
-    test "backup_providers/0 returns list of modules" do
-      mods = Config.backup_providers()
       assert is_list(mods)
     end
 

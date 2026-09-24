@@ -2,9 +2,8 @@ defmodule Homelab.Backups.Failure do
   @moduledoc """
   Turns a backup failure into something an operator can act on.
 
-  A failed backup used to record `inspect(reason)` and nothing else, so the row read
-  `{:restic_missing, "restic is not installed or not on PATH"}` — accurate, and no help
-  to anyone deciding what to do about it. Worse, that string was never rendered
+  A failed backup used to record `inspect(reason)` and nothing else — accurate, and no
+  help to anyone deciding what to do about it. Worse, that string was never rendered
   anywhere, so the only way to see a reason was the flash that appeared for a few
   seconds after clicking the button.
 
@@ -57,17 +56,40 @@ defmodule Homelab.Backups.Failure do
 
   # -- classification --
 
-  defp classify({:restic_missing, _}) do
+  defp classify(:no_target_configured) do
     %{
-      summary: "The backup program is not installed in this container, so nothing ran.",
-      fix: "Configure a backup target under Settings → Backups."
+      summary: "No backup destination is configured, so there is nowhere to write.",
+      fix: "Choose a destination under Settings → Backups."
     }
   end
 
-  defp classify({:restic_error, status, output}) do
+  defp classify({:missing_settings, keys}) do
     %{
-      summary: "The backup program exited with status #{status}.",
-      fix: first_line(output)
+      summary: "The backup destination is incomplete.",
+      fix: "Still missing: #{Enum.join(keys, ", ")}."
+    }
+  end
+
+  defp classify({:relative_backup_root, root}) do
+    %{
+      summary: "The backup root #{root} is not an absolute host path.",
+      fix:
+        "A relative path resolves against whatever directory this process runs in, " <>
+          "which is not a place to keep backups."
+    }
+  end
+
+  defp classify({:unknown_target_kind, kind}) do
+    %{
+      summary: "#{inspect(kind)} is not a destination this instance knows how to write to.",
+      fix: nil
+    }
+  end
+
+  defp classify(:no_archive_manifest) do
+    %{
+      summary: "This run recorded no archive, so there is nothing to read back.",
+      fix: "Take a new backup; this row predates the built-in archive engine."
     }
   end
 

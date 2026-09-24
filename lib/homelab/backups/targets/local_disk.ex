@@ -98,26 +98,46 @@ defmodule Homelab.Backups.Targets.LocalDisk do
   @impl true
   def list(config, prefix) do
     root = root!(config)
-    search = Path.join(root, prefix)
+    search = if prefix in [nil, ""], do: root, else: Path.join(root, prefix)
 
-    case File.ls(search) do
-      {:ok, entries} ->
-        {:ok,
-         entries
-         |> Enum.map(&Path.join(prefix, &1))
-         |> Enum.map(fn key ->
-           case stat(config, key) do
-             {:ok, meta} -> Map.put(meta, :key, key)
-             {:error, _} -> nil
-           end
-         end)
-         |> Enum.reject(&is_nil/1)}
+    if File.dir?(search) do
+      {:ok,
+       search
+       |> archive_dirs()
+       |> Enum.map(fn dir ->
+         key = dir |> Path.relative_to(root) |> to_string()
 
-      {:error, :enoent} ->
-        {:ok, []}
+         case stat(config, key) do
+           {:ok, meta} -> Map.put(meta, :key, key)
+           {:error, _} -> nil
+         end
+       end)
+       |> Enum.reject(&is_nil/1)
+       |> Enum.sort_by(& &1.key)}
+    else
+      {:ok, []}
+    end
+  end
 
-      {:error, reason} ->
-        {:error, reason}
+  # An archive is a directory holding a `frames` directory, and keys nest
+  # (`<service>/<timestamp>`), so this walks rather than reading one level. Listing only
+  # the top level found the service directory and none of the archives inside it.
+  defp archive_dirs(dir) do
+    cond do
+      File.dir?(Path.join(dir, @frames_dir)) ->
+        [dir]
+
+      true ->
+        case File.ls(dir) do
+          {:ok, entries} ->
+            entries
+            |> Enum.map(&Path.join(dir, &1))
+            |> Enum.filter(&File.dir?/1)
+            |> Enum.flat_map(&archive_dirs/1)
+
+          {:error, _} ->
+            []
+        end
     end
   end
 

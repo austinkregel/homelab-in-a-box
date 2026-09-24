@@ -5,8 +5,10 @@ defmodule Homelab.Backups do
 
   import Ecto.Query
   alias Homelab.Accounts
+  alias Homelab.Backups.Archive
   alias Homelab.Backups.BackupJob
   alias Homelab.Backups.Failure
+  alias Homelab.Backups.TargetConfig
   alias Homelab.Deployments.PermanentHome
   alias Homelab.Notifications
   alias Homelab.Repo
@@ -61,38 +63,35 @@ defmodule Homelab.Backups do
   behind — real data, still costing real space, that nothing else in the app can see.
   """
   def repo_snapshots do
-    provider = Homelab.Config.backup_provider()
-
-    if function_exported?(provider, :repo, 0) do
-      # Reading the repository runs the provider's binary against storage that may be
-      # absent, locked, or on a filesystem that is not mounted. Whatever it does, this
-      # is a read for a page that already renders an error state — it must not take
-      # the page down with it.
-      try do
-        case provider.list_snapshots(provider.repo()) do
-          {:ok, snapshots} -> {:ok, mark_orphans(snapshots)}
-          {:error, reason} -> {:error, reason}
-          other -> {:error, other}
-        end
-      rescue
-        error -> {:error, Exception.message(error)}
-      catch
-        :exit, reason -> {:error, reason}
+    # Reading the destination touches storage that may be absent, unmounted, or
+    # unreachable over the network. This is a read for a page that already renders an
+    # error state; it must not take the page down with it.
+    try do
+      with {:ok, target, config} <- TargetConfig.resolve(),
+           {:ok, objects} <- target.list(config, "") do
+        {:ok, mark_orphans(objects)}
       end
-    else
-      {:error, :no_repo}
+    rescue
+      error -> {:error, Exception.message(error)}
+    catch
+      :exit, reason -> {:error, reason}
     end
   end
 
-  defp mark_orphans(snapshots) do
-    known = BackupJob |> Repo.all() |> MapSet.new(& &1.snapshot_id)
+  defp mark_orphans(objects) do
+    known =
+      BackupJob
+      |> Repo.all()
+      |> Enum.map(& &1.archive_key)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
 
-    Enum.map(snapshots, fn snapshot ->
-      Map.put(
-        snapshot,
-        :state,
-        if(MapSet.member?(known, snapshot.id), do: :tracked, else: :orphaned)
-      )
+    Enum.map(objects, fn object ->
+      key = Map.get(object, :key) || Map.get(object, "key")
+
+      object
+      |> Map.put(:id, key)
+      |> Map.put(:state, if(MapSet.member?(known, key), do: :tracked, else: :orphaned))
     end)
   end
 
@@ -186,33 +185,27 @@ defmodule Homelab.Backups do
   end
 
   @doc """
-  Runs a backup job through the configured provider.
+  Archives a deployment's managed data to the configured destination.
 
-  The source path used to be a hardcoded `/data/tenants/<tenant>/<app>` — a directory
-  nothing in this codebase ever creates. Managed data lives under
-  `PermanentHome.managed_root/0`, which is an operator-editable setting (Settings →
-  Storage), so the literal was not merely wrong, it ignored a value already plumbed
-  through and configurable. The repo was likewise a bare relative name rather than the
-  provider's configured repository.
+  The whole volume goes into one encrypted archive (`Homelab.Backups.Archive`), written
+  to whichever destination the operator chose (`Homelab.Backups.TargetConfig`). The
+  archive's manifest is stored on the row, because a restore needs the plaintext
+  digest, the wrapped data key and the frame layout — none of which a snapshot id
+  carries.
 
-  `size_bytes` was written as a literal `0` on every success. `format_size(0)` renders
-  "—", so the Size column could never show anything — and worse, `0` is what an EMPTY
-  backup would report, making the two indistinguishable. It is `nil` now, which means
-  "not reported" honestly. The provider contract returns only a snapshot id, so making
-  this a real number needs `backup/3` to surface restic's `total_bytes_processed`; that
-  is a contract change and is deliberately not bundled here.
+  `size_bytes` is the volume's real size now that the writer measures it, so the Size
+  column distinguishes a small backup from an empty one.
   """
   def execute_backup(%BackupJob{} = job) do
-    backup_provider = Homelab.Config.backup_provider()
     deployment = Repo.preload(job, deployment: [:tenant, :app_template]).deployment
 
     with {:ok, running_job} <- start_backup(job) do
-      case attempt_backup(backup_provider, deployment) do
+      case attempt_backup(deployment) do
         # The outcome is recorded before it is announced, so a notification is only
         # ever raised about a row that has already settled — and an announcement that
         # fails cannot cost the result.
-        {:ok, snapshot_id} ->
-          result = complete_backup(running_job, snapshot_id, nil)
+        {:ok, manifest, target_kind} ->
+          result = record_archive(running_job, manifest, target_kind)
           announce_success(deployment)
           result
 
@@ -265,27 +258,39 @@ defmodule Homelab.Backups do
   defp deployment_label(%{app_template: %{name: name}}) when is_binary(name), do: name
   defp deployment_label(%{id: id}), do: "deployment #{id}"
 
-  # Both steps here raise rather than return `{:error, _}` on the most common
-  # misconfigurations: `managed_root/0` raises when Settings → Storage is unset, and a
-  # provider shelling out to a binary that is not installed raises `ErlangError :enoent`.
-  # A raise skipped `fail_backup/2`, leaving `status: :running` and a blank
-  # `error_message` forever — a backup that never started looked like one still going.
-  defp attempt_backup(backup_provider, deployment) do
-    source_path = backup_source_path(deployment)
-    repo = backup_repo()
-    tags = ["deployment:#{deployment.id}", "app:#{deployment.app_template.slug}"]
-
-    # Reasons travel as terms rather than strings so `Failure` can recognise them; an
-    # `inspect` here would leave it matching on prose.
-    case backup_provider.backup(source_path, repo, tags) do
-      {:ok, snapshot_id} -> {:ok, snapshot_id}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_provider_result, other}}
+  # `managed_root/0` and the local target both raise when unconfigured rather than
+  # guessing a path, so a raise here is an ordinary outcome and has to become a failed
+  # job. A raise that escaped left `status: :running` with a blank error forever.
+  #
+  # Reasons travel as terms rather than strings so `Failure` can recognise them; an
+  # `inspect` at this boundary would leave it matching on prose.
+  defp attempt_backup(deployment) do
+    with {:ok, target, config} <- TargetConfig.resolve(),
+         source_path = backup_source_path(deployment),
+         key = archive_key(deployment),
+         opts = [compression: TargetConfig.compression()],
+         {:ok, manifest} <- Archive.create(source_path, target, config, key, opts) do
+      {:ok, manifest, target.kind()}
     end
   rescue
     error -> {:error, error}
   catch
     :exit, reason -> {:error, {:exited, reason}}
+  end
+
+  # One archive per run, under the service it belongs to, named so that listing the
+  # destination is chronological without consulting the database.
+  defp archive_key(deployment) do
+    stamp =
+      DateTime.utc_now() |> DateTime.truncate(:second) |> Calendar.strftime("%Y%m%dT%H%M%SZ")
+
+    Path.join(deployment.app_template.slug, stamp)
+  end
+
+  defp record_archive(job, manifest, target_kind) do
+    job
+    |> BackupJob.archive_changeset(manifest, target_kind)
+    |> Repo.update()
   end
 
   # Where this deployment's managed data actually is.
@@ -297,36 +302,54 @@ defmodule Homelab.Backups do
     PermanentHome.service_dir(deployment.app_template.slug)
   end
 
-  # The provider's CONFIGURED repository, not a per-tenant relative name that was almost
-  # certainly never `restic init`'d. Restic resolves a relative repo against the process
-  # cwd, so `homelab-<tenant>` was not even a stable location.
-  defp backup_repo do
-    Application.get_env(:homelab, Homelab.BackupProviders.Restic, [])
-    |> Keyword.get(:repo, "/backups/restic-repo")
-  end
-
   def delete_backup_job(%BackupJob{} = job) do
     Repo.delete(job)
   end
 
   @doc """
-  Restores a backup job to the target path.
-  Returns :ok on success or {:error, reason} on failure.
+  Restores an archive over the deployment's managed data.
+
+  `Archive.extract/5` assembles the tree beside the destination and moves it in only
+  once the plaintext digest matches, so a corrupt or tampered archive leaves the live
+  directory untouched rather than half-overwritten.
   """
   def restore_backup(backup_id) when is_binary(backup_id) do
-    case String.to_integer(backup_id) do
-      id when is_integer(id) -> restore_backup(id)
+    case Integer.parse(backup_id) do
+      {id, ""} -> restore_backup(id)
+      _ -> {:error, {:invalid_backup_id, backup_id}}
     end
   end
 
   def restore_backup(backup_id) when is_integer(backup_id) do
     with {:ok, job} <- get_backup_job(backup_id),
-         job = Repo.preload(job, deployment: :app_template),
-         backup_provider = Homelab.Config.backup_provider(),
-         :ok <- backup_provider.restore(job.snapshot_id, restore_target(job)) do
-      :ok
+         {:ok, manifest} <- archive_manifest(job),
+         {:ok, target} <- TargetConfig.module_for(job.target_kind),
+         {:ok, ^target, config} <- TargetConfig.resolve() do
+      Archive.extract(manifest, target, config, restore_target(job))
     end
   end
+
+  @doc """
+  Streams an archive back, checks it, and writes nothing — the deep verification that
+  earns the word "verified".
+
+  A `:completed` row only means a write returned; this is the check that the bytes
+  still come back as what went in.
+  """
+  def verify_backup(%BackupJob{} = job) do
+    with {:ok, manifest} <- archive_manifest(job),
+         {:ok, target} <- TargetConfig.module_for(job.target_kind),
+         {:ok, ^target, config} <- TargetConfig.resolve() do
+      Archive.extract(manifest, target, config, nil, verify_only: true)
+    end
+  end
+
+  # Rows written by the restic provider have no manifest, so there is nothing to read
+  # them back with. Saying so beats a decode error from deep inside the archive reader.
+  defp archive_manifest(%BackupJob{manifest: manifest}) when is_map(manifest) and manifest != %{},
+    do: {:ok, manifest}
+
+  defp archive_manifest(%BackupJob{}), do: {:error, :no_archive_manifest}
 
   # Restores INTO the deployment's own managed directory, not a hardcoded `/data/restore`
   # scratch path that no container ever mounts — restoring there succeeded and put the

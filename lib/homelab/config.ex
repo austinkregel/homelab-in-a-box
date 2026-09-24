@@ -22,10 +22,6 @@ defmodule Homelab.Config do
     Homelab.Gateways.Traefik
   ]
 
-  @backup_providers [
-    Homelab.BackupProviders.Restic
-  ]
-
   @identity_brokers [
     Homelab.IdentityBrokers.GenericOidc
   ]
@@ -53,7 +49,6 @@ defmodule Homelab.Config do
   def orchestrator, do: active_driver(:orchestrator, @orchestrators) || inferred_orchestrator()
 
   def gateway, do: active_driver(:gateway, @gateways)
-  def backup_provider, do: active_driver(:backup_provider, @backup_providers)
   def identity_broker, do: active_driver(:identity_broker, @identity_brokers)
   def registrar, do: active_driver(:registrar, @registrars)
   def public_dns_provider, do: active_driver(:public_dns_provider, @dns_providers)
@@ -61,7 +56,6 @@ defmodule Homelab.Config do
 
   def orchestrators, do: available_drivers(:orchestrators, @orchestrators)
   def gateways, do: available_drivers(:gateways, @gateways)
-  def backup_providers, do: available_drivers(:backup_providers, @backup_providers)
   def identity_brokers, do: available_drivers(:identity_brokers, @identity_brokers)
   def registrars, do: available_drivers(:registrars, @registrars)
   def dns_providers, do: available_drivers(:dns_providers, @dns_providers)

@@ -49,11 +49,12 @@ defmodule HomelabWeb.Api.V1.BackupController do
     end
   end
 
+  # Restores over the deployment's own managed data. This used to pass a literal
+  # `/data/restore`, a path no container mounts, so the call succeeded and put the data
+  # nowhere while the response said the restore had happened.
   def restore(conn, %{"space_id" => space_id, "id" => id}) do
-    backup_provider = Homelab.Config.backup_provider()
-
     with {:ok, job} <- Backups.get_backup_job_for_tenant(space_id, id),
-         :ok <- backup_provider.restore(job.snapshot_id, "/data/restore") do
+         :ok <- Backups.restore_backup(job.id) do
       render(conn, :show, backup_job: job)
     end
   end

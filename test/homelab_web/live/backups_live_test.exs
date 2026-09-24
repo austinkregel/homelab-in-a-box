@@ -3,9 +3,11 @@ defmodule HomelabWeb.BackupsLiveTest do
 
   import Phoenix.LiveViewTest
   import Homelab.Factory
+  # Still needed for the orchestrator and gateway stubs the layout reads.
   import Mox
 
   alias Homelab.Backups.BackupJob
+  alias Homelab.BackupTarget
 
   setup :set_mox_global
   setup :verify_on_exit!
@@ -23,12 +25,9 @@ defmodule HomelabWeb.BackupsLiveTest do
     |> stub(:driver_id, fn -> "traefik" end)
     |> stub(:display_name, fn -> "Traefik" end)
 
-    Homelab.Mocks.BackupProvider
-    |> stub(:backup, fn _dep_id, _paths, _opts -> {:ok, "snapshot_1"} end)
-    |> stub(:restore, fn _snapshot_id, _opts -> :ok end)
-    |> stub(:list_snapshots, fn _dep_id -> {:ok, []} end)
+    paths = BackupTarget.configure_local()
 
-    {:ok, conn: conn, tenant: tenant, template: template}
+    {:ok, conn: conn, tenant: tenant, template: template, paths: paths}
   end
 
   describe "mount" do
@@ -142,27 +141,31 @@ defmodule HomelabWeb.BackupsLiveTest do
     # "Backup triggered successfully!" whatever happened — including when the provider
     # failed and the row was written `status: :failed`. `Readiness` reads these jobs, so
     # the deployment then reported protection it did not have.
-    test "a successful backup is reported as completed", %{conn: conn, deployment: dep} do
+    test "a successful backup is reported as completed", %{
+      conn: conn,
+      deployment: dep,
+      template: template
+    } do
+      BackupTarget.seed_service!(template.slug, %{"a.txt" => "data"})
+
       {:ok, view, _html} = live(conn, ~p"/backups")
 
       html = render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
 
       assert html =~ "Backup completed"
-      assert Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id).status == :completed
+
+      job = Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id)
+      assert job.status == :completed
+      assert job.manifest["plaintext_sha256"] != nil
     end
 
-    test "a failing provider is reported as a failure, not a success", %{
-      conn: conn,
-      deployment: dep
-    } do
-      Homelab.Mocks.BackupProvider
-      |> stub(:backup, fn _source, _repo, _tags -> {:error, :repository_not_found} end)
-
+    test "a failure is reported as a failure, not a success", %{conn: conn, deployment: dep} do
+      # Nothing was ever written into the managed root, so there is no volume to archive.
       {:ok, view, _html} = live(conn, ~p"/backups")
 
       html = render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
 
-      assert html =~ "The backup failed"
+      assert html =~ "nothing at"
       refute html =~ "successfully"
 
       job = Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id)
@@ -171,33 +174,32 @@ defmodule HomelabWeb.BackupsLiveTest do
       # The row states the condition in the operator's language and keeps the original
       # term behind a disclosure, so neither audience loses out.
       detail = view |> element("#backup-error-#{job.id}") |> render()
-      assert detail =~ "The backup failed"
-      assert detail =~ ":repository_not_found"
+      assert detail =~ "nothing at"
+      assert detail =~ ":source_missing"
     end
 
-    test "the source path is the operator's managed root, not a hardcoded /data", %{
+    test "the volume archived is the operator's managed root, not a hardcoded /data", %{
       conn: conn,
       deployment: dep,
       template: template
     } do
       # `/data/tenants/<tenant>/<app>` is a directory nothing in this codebase creates,
       # while the real location is an editable Settings value.
-      test_pid = self()
-
-      Homelab.Mocks.BackupProvider
-      |> stub(:backup, fn source, repo, _tags ->
-        send(test_pid, {:backup_called, source, repo})
-        {:ok, "snap_1"}
-      end)
+      dir = BackupTarget.seed_service!(template.slug, %{"marker.txt" => "from managed root"})
+      assert dir == Homelab.Deployments.PermanentHome.service_dir(template.slug)
+      refute dir =~ "/data/tenants"
 
       {:ok, view, _html} = live(conn, ~p"/backups")
       render_click(view, "trigger_backup", %{"deployment_id" => to_string(dep.id)})
 
-      assert_received {:backup_called, source, repo}
-      assert source == Homelab.Deployments.PermanentHome.service_dir(template.slug)
-      refute source =~ "/data/tenants"
-      # ...and an absolute, configured repository rather than a bare relative name.
-      assert String.starts_with?(repo, "/")
+      job = Homelab.Repo.get_by!(BackupJob, deployment_id: dep.id)
+      assert job.status == :completed
+
+      # Proof it read that directory and not some other one: the archive restores the
+      # file that was seeded there.
+      File.rm_rf!(dir)
+      assert :ok = Homelab.Backups.restore_backup(job.id)
+      assert File.read!(Path.join(dir, "marker.txt")) == "from managed root"
     end
 
     test "closes dropdown after triggering backup", %{conn: conn, deployment: dep} do
@@ -325,22 +327,37 @@ defmodule HomelabWeb.BackupsLiveTest do
       {:ok, deployment: deployment, backup: backup}
     end
 
-    test "shows error flash when restore fails", %{conn: conn, backup: backup} do
-      Homelab.Mocks.BackupProvider
-      |> stub(:restore, fn _snapshot_id, _opts -> {:error, "restore failed"} end)
-
+    # This row carries a snapshot id but no manifest, which is what every row written
+    # before the built-in engine looks like. There is nothing to read it back with.
+    test "a row with no archive behind it cannot be restored", %{conn: conn, backup: backup} do
       {:ok, view, _html} = live(conn, ~p"/backups")
+
       html = render_click(view, "restore", %{"backup_id" => to_string(backup.id)})
       assert html =~ "Restore failed"
+      assert html =~ "no_archive_manifest"
     end
 
-    test "shows error details in flash when restore returns reason", %{conn: conn, backup: backup} do
-      Homelab.Mocks.BackupProvider
-      |> stub(:restore, fn _snapshot_id, _opts -> {:error, :snapshot_not_found} end)
+    test "a corrupt archive fails the restore and leaves live data alone", %{
+      conn: conn,
+      deployment: deployment,
+      template: template,
+      paths: paths
+    } do
+      dir = BackupTarget.seed_service!(template.slug, %{"a.txt" => "original"})
+
+      {:ok, job} =
+        Homelab.Backups.execute_backup(insert(:backup_job, deployment: deployment))
+
+      frame = Path.join([paths.backup_root, job.archive_key, "frames", "00000000"])
+      <<head::binary-40, byte, rest::binary>> = File.read!(frame)
+      File.write!(frame, <<head::binary, Bitwise.bxor(byte, 1), rest::binary>>)
+      File.write!(Path.join(dir, "a.txt"), "live data")
 
       {:ok, view, _html} = live(conn, ~p"/backups")
-      html = render_click(view, "restore", %{"backup_id" => to_string(backup.id)})
+      html = render_click(view, "restore", %{"backup_id" => to_string(job.id)})
+
       assert html =~ "Restore failed"
+      assert File.read!(Path.join(dir, "a.txt")) == "live data"
     end
   end
 
@@ -552,10 +569,7 @@ defmodule HomelabWeb.BackupsLiveTest do
         insert(:backup_job,
           deployment: deployment,
           status: :failed,
-          error_message:
-            Homelab.Backups.Failure.to_message(
-              {:restic_missing, "restic is not installed or not on PATH"}
-            )
+          error_message: Homelab.Backups.Failure.to_message(:no_target_configured)
         )
 
       {:ok, view, _html} = live(conn, ~p"/backups")
@@ -563,9 +577,10 @@ defmodule HomelabWeb.BackupsLiveTest do
       assert has_element?(view, "#backup-error-#{job.id}")
       detail = view |> element("#backup-error-#{job.id}") |> render()
 
-      assert detail =~ "not installed"
+      # The condition, the next action, and the original term behind a disclosure.
+      assert detail =~ "No backup destination is configured"
       assert detail =~ "Settings"
-      assert detail =~ "restic_missing"
+      assert detail =~ "no_target_configured"
     end
 
     test "a run that succeeded carries no failure block", %{conn: conn, deployment: deployment} do

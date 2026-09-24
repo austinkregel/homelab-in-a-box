@@ -5,11 +5,26 @@ defmodule Homelab.Backups.FailureTest do
 
   describe "describe/1" do
     test "names the condition rather than the term" do
-      described = Failure.describe({:restic_missing, "restic is not installed or not on PATH"})
+      described = Failure.describe(:no_target_configured)
 
-      assert described.summary =~ "not installed"
-      refute described.summary =~ ":restic_missing"
+      assert described.summary =~ "No backup destination is configured"
+      refute described.summary =~ ":no_target_configured"
       assert described.fix =~ "Settings"
+    end
+
+    test "names what a half-configured destination is still missing" do
+      described =
+        Failure.describe({:missing_settings, ["backup_s3_bucket", "backup_s3_endpoint"]})
+
+      assert described.fix =~ "backup_s3_bucket"
+      assert described.fix =~ "backup_s3_endpoint"
+    end
+
+    test "a row from before the archive engine says so, rather than failing obscurely" do
+      described = Failure.describe(:no_archive_manifest)
+
+      assert described.summary =~ "no archive"
+      assert described.fix =~ "new backup"
     end
 
     test "keeps the original term as detail" do
@@ -80,9 +95,9 @@ defmodule Homelab.Backups.FailureTest do
     # Rows written before this existed hold a bare inspected term. They must still
     # render rather than crashing the page that finally shows them.
     test "tolerates a legacy row holding only an inspected term" do
-      parsed = Failure.from_message(~s({:restic_missing, "restic is not installed"}))
+      parsed = Failure.from_message(~s({:some_old_reason, "written before this existed"}))
 
-      assert parsed.summary == ~s({:restic_missing, "restic is not installed"})
+      assert parsed.summary == ~s({:some_old_reason, "written before this existed"})
       assert parsed.fix == nil
     end
 

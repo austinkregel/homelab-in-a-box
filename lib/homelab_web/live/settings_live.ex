@@ -10,6 +10,7 @@ defmodule HomelabWeb.SettingsLive do
   alias Homelab.Deployments.PermanentHome
   alias Homelab.Infrastructure.SwarmSettings
   alias Homelab.Backups.Keys, as: BackupKeys
+  alias Homelab.Backups.TargetConfig
 
   @sections [
     {"general", "General", "hero-cog-6-tooth"},
@@ -58,6 +59,37 @@ defmodule HomelabWeb.SettingsLive do
      |> assign(:active_section, section)
      |> push_patch(to: ~p"/settings?section=#{section}")
      |> load_section_data(section)}
+  end
+
+  def handle_event("select_backup_target_kind", %{"kind" => kind}, socket) do
+    {:noreply, assign(socket, :backup_target_kind, kind)}
+  end
+
+  def handle_event("save_backup_target", %{"target" => params}, socket) do
+    keys = TargetConfig.settings_keys()
+    kind = params["kind"]
+
+    Settings.set(keys.kind, kind, category: "backups")
+    Settings.set(keys.compression, params["compression"] || "gzip", category: "backups")
+
+    case kind do
+      "local_disk" ->
+        Settings.set(keys.root, String.trim(params["root"] || ""), category: "backups")
+
+      "s3" ->
+        save_s3_settings(keys.s3, params)
+    end
+
+    socket = assign_backup_target(socket)
+
+    case socket.assigns.backup_target_status do
+      {:ok, module, _config} ->
+        {:noreply,
+         put_flash(socket, :info, "Backups will be written to #{module.display_name()}.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, target_error_message(reason))}
+    end
   end
 
   def handle_event("generate_recovery_key", _params, socket) do
@@ -911,6 +943,7 @@ defmodule HomelabWeb.SettingsLive do
     |> assign(:recovery_key_fingerprint, recovery_key_fingerprint())
     |> assign(:recovery_key_escrowed?, BackupKeys.escrowed?())
     |> assign(:revealed_recovery_key, nil)
+    |> assign_backup_target()
   end
 
   defp load_section_data(socket, "danger_zone") do
@@ -921,6 +954,60 @@ defmodule HomelabWeb.SettingsLive do
   end
 
   defp load_section_data(socket, _), do: socket
+
+  defp assign_backup_target(socket) do
+    keys = TargetConfig.settings_keys()
+
+    socket
+    |> assign(:backup_target_kind, Settings.get(keys.kind) || "local_disk")
+    |> assign(:backup_target_status, TargetConfig.resolve())
+    |> assign(
+      :backup_target_form,
+      to_form(%{
+        "kind" => Settings.get(keys.kind) || "local_disk",
+        "compression" => Settings.get(keys.compression) || "gzip",
+        "root" => Settings.get(keys.root) || "",
+        "s3_endpoint" => Settings.get(keys.s3.endpoint) || "",
+        "s3_bucket" => Settings.get(keys.s3.bucket) || "",
+        "s3_region" => Settings.get(keys.s3.region) || "",
+        "s3_prefix" => Settings.get(keys.s3.prefix) || "",
+        "s3_access_key_id" => Settings.get(keys.s3.access_key_id) || "",
+        # Never echoed back — a rendered secret is a secret in the page source.
+        "s3_secret_access_key" => "",
+        "s3_storage_class" => Settings.get(keys.s3.storage_class) || ""
+      })
+    )
+  end
+
+  defp save_s3_settings(keys, params) do
+    for {key, param} <- [
+          {keys.endpoint, "s3_endpoint"},
+          {keys.bucket, "s3_bucket"},
+          {keys.region, "s3_region"},
+          {keys.prefix, "s3_prefix"},
+          {keys.access_key_id, "s3_access_key_id"},
+          {keys.storage_class, "s3_storage_class"}
+        ] do
+      Settings.set(key, String.trim(params[param] || ""), category: "backups")
+    end
+
+    # Blank means "leave it alone", since the form never renders the stored secret back.
+    case String.trim(params["s3_secret_access_key"] || "") do
+      "" -> :ok
+      secret -> Settings.set(keys.secret_access_key, secret, category: "backups", encrypt: true)
+    end
+  end
+
+  defp target_error_message({:missing_settings, missing}) do
+    "Still missing: #{Enum.join(missing, ", ")}."
+  end
+
+  defp target_error_message({:relative_backup_root, root}) do
+    "#{root} is not an absolute host path."
+  end
+
+  defp target_error_message(:no_target_configured), do: "No destination is configured."
+  defp target_error_message(other), do: "Destination is not usable: #{inspect(other)}"
 
   # Read-only: opening Settings must not mint a key as a side effect, and must not take
   # the page down when the secrets directory is unwritable.
@@ -1012,8 +1099,134 @@ defmodule HomelabWeb.SettingsLive do
 
   defp render_backups(assigns) do
     ~H"""
-    <div class="p-4">
+    <div class="p-4 space-y-4">
       <h2 class="text-lg font-semibold text-base-content mb-4">Backups</h2>
+
+      <div class="rounded-xl border border-base-content/[0.08] bg-base-100 p-5">
+        <div class="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h3 class="text-sm font-semibold text-base-content">Destination</h3>
+            <p class="text-xs text-base-content/60 mt-1 max-w-xl leading-relaxed">
+              Where archives are written. A local disk protects a volume; object storage
+              is what survives losing this machine.
+            </p>
+          </div>
+          <span
+            class={[
+              "shrink-0 px-2.5 py-1 rounded-lg text-xs font-medium",
+              match?({:ok, _, _}, @backup_target_status) && "bg-success/15 text-success",
+              !match?({:ok, _, _}, @backup_target_status) && "bg-warning/15 text-warning"
+            ]}
+            id="backup-target-status"
+          >
+            {case @backup_target_status do
+              {:ok, module, _} -> module.display_name()
+              {:error, _} -> "Not configured"
+            end}
+          </span>
+        </div>
+
+        <.form
+          for={@backup_target_form}
+          id="backup-target-form"
+          phx-submit="save_backup_target"
+          as={:target}
+          class="space-y-4"
+        >
+          <div class="flex gap-2">
+            <button
+              :for={{value, label} <- [{"local_disk", "Local disk"}, {"s3", "S3-compatible"}]}
+              type="button"
+              id={"backup-kind-#{value}"}
+              phx-click="select_backup_target_kind"
+              phx-value-kind={value}
+              class={[
+                "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors cursor-pointer border",
+                @backup_target_kind == value && "border-primary bg-primary/10 text-primary",
+                @backup_target_kind != value &&
+                  "border-base-content/[0.12] text-base-content/60 hover:bg-base-content/[0.04]"
+              ]}
+            >
+              {label}
+            </button>
+          </div>
+
+          <input type="hidden" name="target[kind]" value={@backup_target_kind} />
+
+          <div :if={@backup_target_kind == "local_disk"}>
+            <.input
+              field={@backup_target_form[:root]}
+              type="text"
+              label="Backup root"
+              placeholder="/srv/homelab/backups"
+            />
+            <p class="text-xs text-base-content/50 mt-1.5 leading-relaxed">
+              An absolute host path, bind-mounted into this container at the same path.
+            </p>
+          </div>
+
+          <div :if={@backup_target_kind == "s3"} class="grid grid-cols-2 gap-3">
+            <.input
+              field={@backup_target_form[:s3_endpoint]}
+              type="text"
+              label="Endpoint"
+              placeholder="https://s3.us-west-002.backblazeb2.com"
+            />
+            <.input field={@backup_target_form[:s3_bucket]} type="text" label="Bucket" />
+            <.input
+              field={@backup_target_form[:s3_region]}
+              type="text"
+              label="Region"
+              placeholder="us-east-1"
+            />
+            <.input
+              field={@backup_target_form[:s3_prefix]}
+              type="text"
+              label="Prefix"
+              placeholder="homelab"
+            />
+            <.input field={@backup_target_form[:s3_access_key_id]} type="text" label="Access key" />
+            <.input
+              field={@backup_target_form[:s3_secret_access_key]}
+              type="password"
+              label="Secret key"
+              placeholder="unchanged"
+            />
+            <div class="col-span-2">
+              <.input
+                field={@backup_target_form[:s3_storage_class]}
+                type="text"
+                label="Storage class"
+                placeholder="STANDARD"
+              />
+              <p class="text-xs text-base-content/50 mt-1.5 leading-relaxed">
+                GLACIER_IR or DEEP_ARCHIVE cost less to keep and take hours to read back.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <.input
+              field={@backup_target_form[:compression]}
+              type="select"
+              label="Compression"
+              options={[{"gzip", "gzip"}, {"None", "none"}]}
+            />
+            <p class="text-xs text-base-content/50 mt-1.5 leading-relaxed">
+              Already-compressed libraries (FLAC, MP4) will not shrink, so gzip costs CPU
+              for nothing on those.
+            </p>
+          </div>
+
+          <button
+            type="submit"
+            id="save-backup-target"
+            class="px-4 py-2 rounded-lg bg-primary text-primary-content text-sm font-semibold hover:shadow-md transition-all cursor-pointer"
+          >
+            Save destination
+          </button>
+        </.form>
+      </div>
 
       <div class="rounded-xl border border-base-content/[0.08] bg-base-100 p-5">
         <div class="flex items-start justify-between gap-4 mb-3">

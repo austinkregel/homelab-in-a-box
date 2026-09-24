@@ -1,10 +1,12 @@
 defmodule Homelab.BackupsTest do
-  use Homelab.DataCase, async: true
+  # Not async: the local target is configured through Settings, whose cache is global.
+  use Homelab.DataCase, async: false
 
   alias Homelab.Backups
   alias Homelab.Backups.BackupJob
+  alias Homelab.Backups.Failure
+  alias Homelab.BackupTarget
   import Homelab.Factory
-  import Mox
 
   describe "list_backup_jobs/0" do
     test "returns all backup jobs ordered by scheduled_at desc" do
@@ -123,56 +125,94 @@ defmodule Homelab.BackupsTest do
   end
 
   describe "execute_backup/1" do
-    setup :verify_on_exit!
+    setup do
+      paths = BackupTarget.configure_local()
+      template = insert(:app_template, slug: "plex")
+      deployment = insert(:deployment, app_template: template)
+      BackupTarget.seed_service!("plex", %{"config/prefs.xml" => "<prefs/>"})
 
-    test "records the snapshot on success" do
-      job = insert(:backup_job, deployment: insert(:deployment))
+      Map.merge(paths, %{deployment: deployment})
+    end
 
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:ok, "snap_abc123"}
-      end)
+    test "archives the volume and records what it takes to restore it", %{
+      deployment: deployment
+    } do
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, updated} = Backups.execute_backup(job)
       assert updated.status == :completed
-      assert updated.snapshot_id == "snap_abc123"
+      assert updated.target_kind == "local_disk"
+      assert updated.archive_key =~ "plex/"
+
+      # Size is the volume's real size now, so an empty backup is distinguishable from
+      # a small one rather than both rendering as a dash.
+      assert updated.size_bytes > 0
+
+      manifest = updated.manifest
+      assert Regex.match?(~r/^[0-9a-f]{64}$/, manifest["plaintext_sha256"])
+      assert manifest["wrapped_data_key"] != nil
+      assert manifest["frames"] >= 1
+      assert updated.snapshot_id == manifest["id"]
     end
 
-    test "fails the job when the provider returns an error" do
-      job = insert(:backup_job, deployment: insert(:deployment))
+    test "the archive round-trips back to the original bytes", %{deployment: deployment} do
+      job = insert(:backup_job, deployment: deployment)
+      {:ok, completed} = Backups.execute_backup(job)
 
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:error, {:restic_missing, "restic is not installed or not on PATH"}}
-      end)
+      dir = Homelab.Deployments.PermanentHome.service_dir("plex")
+      File.write!(Path.join(dir, "config/prefs.xml"), "clobbered")
+
+      assert :ok = Backups.restore_backup(completed.id)
+      assert File.read!(Path.join(dir, "config/prefs.xml")) == "<prefs/>"
+    end
+
+    test "deep verification reads the archive back without writing anything", %{
+      deployment: deployment
+    } do
+      job = insert(:backup_job, deployment: deployment)
+      {:ok, completed} = Backups.execute_backup(job)
+
+      assert :ok = Backups.verify_backup(completed)
+    end
+
+    test "a corrupt archive fails verification rather than reporting protection", %{
+      deployment: deployment,
+      backup_root: root
+    } do
+      job = insert(:backup_job, deployment: deployment)
+      {:ok, completed} = Backups.execute_backup(job)
+
+      frame = Path.join([root, completed.archive_key, "frames", "00000000"])
+      <<head::binary-40, byte, rest::binary>> = File.read!(frame)
+      File.write!(frame, <<head::binary, Bitwise.bxor(byte, 1), rest::binary>>)
+
+      assert {:error, _} = Backups.verify_backup(completed)
+    end
+
+    test "fails the job when no destination is configured", %{deployment: deployment} do
+      BackupTarget.unconfigure()
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, updated} = Backups.execute_backup(job)
       assert updated.status == :failed
-      assert updated.error_message =~ "restic is not installed"
+      assert Failure.from_message(updated.error_message).detail =~ "no_target_configured"
     end
 
-    test "records a failure an operator can read, keeping the original term" do
-      job = insert(:backup_job, deployment: insert(:deployment))
-
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:error, {:restic_missing, "restic is not installed or not on PATH"}}
-      end)
+    test "fails the job when the volume does not exist", %{deployment: deployment} do
+      File.rm_rf!(Homelab.Deployments.PermanentHome.service_dir("plex"))
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, updated} = Backups.execute_backup(job)
-
-      parsed = Homelab.Backups.Failure.from_message(updated.error_message)
-      assert parsed.summary =~ "not installed"
-      refute parsed.summary =~ ":restic_missing"
-      assert parsed.detail =~ ":restic_missing"
+      assert updated.status == :failed
+      assert Failure.from_message(updated.error_message).summary =~ "nothing at"
     end
 
     # A scheduled backup failing has nobody watching a flash, and used to write nothing
     # to the activity log and raise no notification.
-    test "announces a failure to the activity log and to admins" do
+    test "announces a failure to the activity log and to admins", %{deployment: deployment} do
       admin = insert(:user, role: :admin)
-      job = insert(:backup_job, deployment: insert(:deployment))
-
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:error, {:restic_missing, "restic is not installed"}}
-      end)
+      BackupTarget.unconfigure()
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, _} = Backups.execute_backup(job)
 
@@ -183,24 +223,17 @@ defmodule Homelab.BackupsTest do
 
       assert [notification] = Homelab.Notifications.list_unread(admin.id)
       assert notification.title =~ "Backup failed"
-      assert notification.body =~ "not installed"
       assert notification.severity == "error"
-
-      # The notification has to land somewhere that shows the reason, which is the
-      # deployment's own backups tab.
       assert notification.link == "/deployments/#{job.deployment_id}?tab=backups"
     end
 
     # The row is written before anything is announced, so a notification never refers
     # to a run whose outcome has not settled.
-    test "records the outcome before announcing it" do
+    test "records the outcome before announcing it", %{deployment: deployment} do
       admin = insert(:user, role: :admin)
-      job = insert(:backup_job, deployment: insert(:deployment))
+      BackupTarget.unconfigure()
+      job = insert(:backup_job, deployment: deployment)
       Phoenix.PubSub.subscribe(Homelab.PubSub, "notifications:#{admin.id}")
-
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:error, {:restic_missing, "restic is not installed"}}
-      end)
 
       assert {:ok, _} = Backups.execute_backup(job)
 
@@ -208,12 +241,8 @@ defmodule Homelab.BackupsTest do
       assert Backups.get_backup_job(job.id) |> elem(1) |> Map.get(:status) == :failed
     end
 
-    test "announces a success to the activity log" do
-      job = insert(:backup_job, deployment: insert(:deployment))
-
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        {:ok, "snap_ok"}
-      end)
+    test "announces a success to the activity log", %{deployment: deployment} do
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, _} = Backups.execute_backup(job)
 
@@ -223,20 +252,30 @@ defmodule Homelab.BackupsTest do
              end)
     end
 
-    # A provider that shells out to a missing binary raises rather than returning an
-    # error tuple. Before, that left the row on `:running` with no error_message, so the
-    # Backups page showed a backup in progress forever.
-    test "fails the job when the provider raises" do
-      job = insert(:backup_job, deployment: insert(:deployment))
+    # An unconfigured managed root raises rather than guessing a path. A raise that
+    # escaped left `status: :running` with a blank error forever.
+    test "a raise becomes a failed job rather than a wedged one", %{deployment: deployment} do
+      Application.delete_env(:homelab, :managed_root)
+      Application.put_env(:homelab, :containerized, true)
+      on_exit(fn -> Application.delete_env(:homelab, :containerized) end)
 
-      expect(Homelab.Mocks.BackupProvider, :backup, fn _source, _repo, _tags ->
-        raise ErlangError, original: :enoent
-      end)
+      job = insert(:backup_job, deployment: deployment)
 
       assert {:ok, updated} = Backups.execute_backup(job)
       assert updated.status == :failed
-      assert updated.error_message =~ "enoent"
       assert updated.completed_at != nil
+    end
+  end
+
+  describe "restore_backup/1" do
+    test "refuses a row that has no archive behind it" do
+      job = insert(:backup_job, deployment: insert(:deployment), status: :completed)
+
+      assert {:error, :no_archive_manifest} = Backups.restore_backup(job.id)
+    end
+
+    test "rejects an id that is not a number" do
+      assert {:error, {:invalid_backup_id, "abc"}} = Backups.restore_backup("abc")
     end
   end
 

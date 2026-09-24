@@ -1,10 +1,11 @@
 defmodule HomelabWeb.Api.V1.BackupControllerTest do
-  use HomelabWeb.ConnCase, async: true
+  # Not async: the backup destination is configured through Settings, whose cache is
+  # process-independent.
+  use HomelabWeb.ConnCase, async: false
 
   import Homelab.Factory
-  import Mox
 
-  setup :verify_on_exit!
+  alias Homelab.BackupTarget
 
   # Backups moved under `/api/v1/spaces/:space_id/...` — the top-level routes listed
   # and restored across every tenant. These tests keep asserting the same behaviours;
@@ -65,20 +66,22 @@ defmodule HomelabWeb.Api.V1.BackupControllerTest do
   end
 
   describe "POST /api/v1/spaces/:space_id/backups/:id/restore" do
-    test "restores a backup job", %{conn: conn, tenant: tenant, deployment: deployment} do
-      job =
-        insert(:backup_job,
-          deployment: deployment,
-          status: :completed,
-          snapshot_id: "snap-abc123"
-        )
+    test "restores a backup job", %{conn: conn, tenant: tenant} do
+      BackupTarget.configure_local()
+      template = insert(:app_template, slug: "api-restore")
+      deployment = insert(:deployment, tenant: tenant, app_template: template)
+      dir = BackupTarget.seed_service!("api-restore", %{"a.txt" => "original"})
 
-      Homelab.Mocks.BackupProvider
-      |> expect(:restore, fn "snap-abc123", "/data/restore" -> :ok end)
+      {:ok, job} = Homelab.Backups.execute_backup(insert(:backup_job, deployment: deployment))
+      File.write!(Path.join(dir, "a.txt"), "clobbered")
 
       conn = post(conn, ~p"/api/v1/spaces/#{tenant.id}/backups/#{job.id}/restore")
       assert %{"data" => data} = json_response(conn, 200)
       assert data["id"] == job.id
+
+      # The restore used to be handed a literal `/data/restore`, a path no container
+      # mounts, so it reported success and put the data nowhere.
+      assert File.read!(Path.join(dir, "a.txt")) == "original"
     end
 
     test "returns 404 for nonexistent backup", %{conn: conn, tenant: tenant} do

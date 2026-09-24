@@ -18,8 +18,7 @@ config :homelab,
   # records one on first boot. Tests still pin it (config/test.exs) to inject a mock.
   docker_client: Homelab.Docker.ReqClient,
   identity_broker: Homelab.IdentityBrokers.GenericOidc,
-  gateway: Homelab.Gateways.Traefik,
-  backup_provider: Homelab.BackupProviders.Restic
+  gateway: Homelab.Gateways.Traefik
 
 # Configure the endpoint
 config :homelab, HomelabWeb.Endpoint,

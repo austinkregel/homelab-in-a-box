@@ -17,12 +17,13 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
   tenant it belongs to, and there is exactly one place to enforce membership when a
   membership model finally exists. It is a prerequisite for that model, not a substitute.
   """
-  use HomelabWeb.ConnCase, async: true
+  # Not async: the backup destination is configured through Settings, whose cache is
+  # process-independent.
+  use HomelabWeb.ConnCase, async: false
 
   import Homelab.Factory
-  import Mox
 
-  setup :verify_on_exit!
+  alias Homelab.BackupTarget
 
   setup %{conn: conn} do
     mine = insert(:tenant)
@@ -82,14 +83,13 @@ defmodule HomelabWeb.Api.V1.BackupTenantScopeTest do
 
   describe "restore" do
     test "restores the tenant's own snapshot", %{conn: conn, mine: mine} do
-      job =
-        insert(:backup_job,
-          deployment: insert(:deployment, tenant: mine),
-          status: :completed,
-          snapshot_id: "my-snapshot"
-        )
+      BackupTarget.configure_local()
+      template = insert(:app_template, slug: "scoped")
+      deployment = insert(:deployment, tenant: mine, app_template: template)
+      BackupTarget.seed_service!("scoped", %{"a.txt" => "mine"})
 
-      expect(Homelab.Mocks.BackupProvider, :restore, fn "my-snapshot", "/data/restore" -> :ok end)
+      {:ok, job} =
+        Homelab.Backups.execute_backup(insert(:backup_job, deployment: deployment))
 
       conn = post(conn, ~p"/api/v1/spaces/#{mine.id}/backups/#{job.id}/restore")
 
