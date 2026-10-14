@@ -78,7 +78,7 @@ defmodule Homelab.MixProject do
       # Observability
       {:telemetry_metrics_prometheus, "~> 1.1"},
       {:logger_json, "~> 7.0"},
-      {:sentry, "~> 13.0"},
+      {:sentry, "~> 14.0"},
       {:finch, "~> 0.18"},
       # Testing
       {:mox, "~> 1.1", only: :test},
